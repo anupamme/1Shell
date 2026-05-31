@@ -1,0 +1,347 @@
+'use strict';
+
+const crypto = require('crypto');
+const { createId } = require('../utils/common');
+const { BRIDGE_TOKEN } = require('../config/env');
+const { toMcpToolResult } = require('./mcp.tools');
+const { createOneShellCoreTools } = require('../tools/oneshell-core.tools');
+const log = require('../../lib/logger');
+
+const MCP_PROTOCOL_VERSION = '2024-11-05';
+const SERVER_INFO = { name: '1shell-bridge', version: '1.0.0' };
+
+/**
+ * MCP Service
+ *
+ * 实现 MCP HTTP SSE 传输协议（JSON-RPC 2.0）。
+ *
+ * 连接生命周期：
+ *   1. 客户端 GET /mcp/sse → 建立 SSE 长连接，收到 endpoint 事件
+ *   2. 客户端 POST /mcp/message?sessionId=xxx → 发送 JSON-RPC 请求
+ *   3. 服务端通过 SSE 回发 JSON-RPC 响应
+ *   4. 客户端断开 → 清理 session
+ *
+ * 支持的 JSON-RPC 方法：
+ *   - initialize / initialized
+ *   - ping
+ *   - tools/list
+ *   - tools/call
+ */
+function createMcpService(deps = {}) {
+  const coreTools = createOneShellCoreTools(deps);
+  const TOOLS = coreTools.getToolSchemas('mcp');
+  const remoteMcpService = deps.remoteMcpService || null;
+  const auditService = deps.auditService || null;
+
+  // Map<sessionId, { res: Response, initialized: boolean, context: object }>
+  const sessions = new Map();
+
+  // ─── SSE 工具函数 ────────────────────────────────────────────────────────
+
+  function sseWrite(res, event, data) {
+    // message 事件的 data 是 JSON 对象，需要序列化；
+    // endpoint 事件的 data 是裸 URL 字符串，不能额外加引号
+    const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+    res.write(`event: ${event}\ndata: ${dataStr}\n\n`);
+  }
+
+  function sendMessage(sessionId, payload) {
+    const session = sessions.get(sessionId);
+    if (!session) return false;
+    sseWrite(session.res, 'message', payload);
+    return true;
+  }
+
+  function makeResponse(id, result) {
+    return { jsonrpc: '2.0', id, result };
+  }
+
+  function makeError(id, code, message) {
+    return { jsonrpc: '2.0', id, error: { code, message } };
+  }
+
+  // ─── 工具调用分发 ─────────────────────────────────────────────────────────
+
+  async function callTool(name, args, context = {}) {
+    const startedAt = Date.now();
+    const toolName = name === 'execute_ssh_command' ? 'host_exec' : name;
+    const argSummary = summarizeArgs(args);
+    log.info('[mcp] tools/call IN', { name: toolName, source: context.source || 'mcp', exposure: context.exposure || 'unknown', args: argSummary });
+
+    if (remoteMcpService && !remoteMcpService.isToolAllowed(toolName, context)) {
+      const result = makeToolError(`Remote MCP 不允许调用工具: ${toolName}`);
+      auditToolCall(toolName, args, context, startedAt, result);
+      return result;
+    }
+
+    const hostDenied = validateHostAccess(args, context);
+    if (hostDenied) {
+      const result = makeToolError(hostDenied);
+      auditToolCall(toolName, args, context, startedAt, result);
+      return result;
+    }
+
+    const scriptDenied = validateScriptAccess(toolName, args, context);
+    if (scriptDenied) {
+      const result = makeToolError(scriptDenied);
+      auditToolCall(toolName, args, context, startedAt, result);
+      return result;
+    }
+
+    const pathDenied = validatePathAccess(toolName, args, context);
+    if (pathDenied) {
+      const result = makeToolError(pathDenied);
+      auditToolCall(toolName, args, context, startedAt, result);
+      return result;
+    }
+
+    let result;
+    try {
+      result = await callToolImpl(toolName, args, context);
+      log.info('[mcp] tools/call OUT', { name: toolName, durationMs: Date.now() - startedAt, isError: !!result?.isError });
+      auditToolCall(toolName, args, context, startedAt, result);
+    } catch (err) {
+      log.error('[mcp] tools/call THROW', { name: toolName, durationMs: Date.now() - startedAt, error: err.message });
+      auditToolCall(toolName, args, context, startedAt, null, err);
+      throw err;
+    }
+    return result;
+  }
+
+  async function callToolImpl(toolName, args, context = {}) {
+    const result = await coreTools.handle(toolName, args || {}, { source: context.source || 'mcp', clientIp: context.clientIp });
+    return toMcpToolResult(result);
+  }
+
+  function makeToolError(message) {
+    return { content: [{ type: 'text', text: `[ERROR] ${message}` }], isError: true };
+  }
+
+  function validateHostAccess(args, context = {}) {
+    if (context.exposure !== 'remote') return null;
+    const allowedHosts = Array.isArray(context.allowedHosts) ? context.allowedHosts : [];
+    if (allowedHosts.length === 0) return null;
+    const hostId = String(args?.hostId || '').trim();
+    if (!hostId) return null;
+    if (allowedHosts.includes('*') || allowedHosts.includes(hostId)) return null;
+    return `Remote MCP Token 不允许访问主机: ${hostId}`;
+  }
+
+  function validateScriptAccess(toolName, args, context = {}) {
+    if (context.exposure !== 'remote' || toolName !== 'run_script') return null;
+    const allowedScripts = Array.isArray(context.allowedScripts) ? context.allowedScripts : [];
+    if (allowedScripts.length === 0) return null;
+    const scriptId = String(args?.scriptId || '').trim();
+    if (!scriptId) return null;
+    if (allowedScripts.includes('*') || allowedScripts.includes(scriptId)) return null;
+    return `Remote MCP Token 不允许运行脚本: ${scriptId}`;
+  }
+
+  function validatePathAccess(toolName, args, context = {}) {
+    if (context.exposure !== 'remote') return null;
+    const pathFieldsByTool = {
+      list_remote_dir: ['path'],
+      read_remote_file: ['path'],
+      write_remote_file: ['path'],
+      upload_file: ['dirPath', 'localPath'],
+      download_file: ['path', 'localPath'],
+    };
+    const fields = pathFieldsByTool[toolName];
+    if (!fields) return null;
+    const allowedPaths = Array.isArray(context.allowedPaths) ? context.allowedPaths : [];
+    if (allowedPaths.length === 0) return null;
+    for (const field of fields) {
+      const value = String(args?.[field] || '').trim();
+      if (!value) continue;
+      if (!isPathAllowed(value, allowedPaths)) return `Remote MCP Token 不允许访问路径: ${value}`;
+    }
+    return null;
+  }
+
+  function isPathAllowed(targetPath, allowedPaths) {
+    if (allowedPaths.includes('*')) return true;
+    const normalizedTarget = normalizePathForPolicy(targetPath);
+    return allowedPaths.some((rule) => {
+      const normalizedRule = normalizePathForPolicy(rule);
+      if (normalizedRule.includes('*')) return wildcardPathMatch(normalizedTarget, normalizedRule);
+      return normalizedTarget === normalizedRule || normalizedTarget.startsWith(`${normalizedRule}/`);
+    });
+  }
+
+  function wildcardPathMatch(targetPath, rulePath) {
+    const escaped = rulePath.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}($|/)`).test(targetPath);
+  }
+
+  function normalizePathForPolicy(value) {
+    return String(value || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+  }
+
+  function summarizeArgs(args) {
+    try {
+      const s = JSON.stringify(args || {}, (key, value) => /token|key|secret|password/i.test(key) ? '<redacted>' : value);
+      return s.length > 200 ? s.slice(0, 200) + '…' : s;
+    } catch { return '<unserializable>'; }
+  }
+
+  function auditToolCall(name, args, context, startedAt, result, error = null) {
+    if (context.auditEnabled === false) return;
+    auditService?.log?.({
+      action: context.exposure === 'remote' ? 'remote_mcp_tool_call' : 'mcp_tool_call',
+      source: context.source || 'mcp',
+      clientIp: context.clientIp,
+      command: name,
+      durationMs: Date.now() - startedAt,
+      error: error ? error.message : (result?.isError ? 'tool returned error' : null),
+      details: JSON.stringify({
+        exposure: context.exposure || 'unknown',
+        origin: context.origin || null,
+        host: context.host || null,
+        args: summarizeArgs(args),
+      }),
+    });
+  }
+
+  function getToolSchemas(context = {}) {
+    return remoteMcpService ? remoteMcpService.filterTools(TOOLS, context) : TOOLS;
+  }
+
+  function getAllToolSchemas() {
+    return TOOLS;
+  }
+
+  // ─── JSON-RPC 消息处理 ────────────────────────────────────────────────────
+
+  async function handleMessage(sessionId, msg) {
+    const { id, method, params } = msg;
+
+    // 通知类消息（无 id），不需要回复
+    if (id === undefined || id === null) {
+      if (method === 'notifications/initialized') {
+        const session = sessions.get(sessionId);
+        if (session) session.initialized = true;
+      }
+      return;
+    }
+
+    if (method === 'initialize') {
+      const session = sessions.get(sessionId);
+      if (session) session.initializing = true;
+
+      sendMessage(sessionId, makeResponse(id, {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: SERVER_INFO,
+      }));
+      return;
+    }
+
+    if (method === 'ping') {
+      sendMessage(sessionId, makeResponse(id, {}));
+      return;
+    }
+
+    if (method === 'tools/list') {
+      const session = sessions.get(sessionId);
+      sendMessage(sessionId, makeResponse(id, { tools: getToolSchemas(session?.context || {}) }));
+      return;
+    }
+
+    if (method === 'tools/call') {
+      const session = sessions.get(sessionId);
+      const { name, arguments: args } = params || {};
+      const toolResult = await callTool(name, args, session?.context || {});
+      sendMessage(sessionId, makeResponse(id, toolResult));
+      return;
+    }
+
+    sendMessage(sessionId, makeError(id, -32601, `未知方法: ${method}`));
+  }
+
+  // ─── Session 管理（供 Routes 调用）────────────────────────────────────────
+
+  /**
+   * 建立 SSE 连接，返回 sessionId。
+   * Route 层负责设置 SSE 响应头，本函数只注册 session 并发送 endpoint 事件。
+   *
+   * @param {object} res - Express Response 对象（已设置 SSE headers）
+   * @param {string} baseUrl - 如 "http://localhost:3301"
+   * @returns {string} sessionId
+   */
+  function connect(res, baseUrl, context = {}) {
+    const sessionId = createId('mcp');
+    sessions.set(sessionId, { res, initialized: false, context });
+
+    // 不把 token 拼进 URL（防止进 access log / 浏览器历史）
+    // 客户端应通过 X-Bridge-Token header 或 Authorization: Bearer 传递 token
+    sseWrite(res, 'endpoint', `${baseUrl}/mcp/message?sessionId=${sessionId}`);
+
+    return sessionId;
+  }
+
+  /**
+   * 清理 SSE session。
+   */
+  function disconnect(sessionId) {
+    sessions.delete(sessionId);
+  }
+
+  /**
+   * 处理来自 POST /mcp/message 的 JSON-RPC 消息。
+   * 返回 true 表示 session 存在并已处理，false 表示 session 不存在。
+   */
+  async function receiveMessage(sessionId, msg) {
+    if (!sessions.has(sessionId)) return false;
+    await handleMessage(sessionId, msg);
+    return true;
+  }
+
+  /**
+   * 验证请求的 Bridge Token。
+   */
+  function validateToken(token) {
+    if (!BRIDGE_TOKEN || !token) return false;
+    if (token.length !== BRIDGE_TOKEN.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(BRIDGE_TOKEN));
+  }
+
+  /**
+   * 处理 Streamable HTTP MCP 请求（无状态，不需要 SSE session）。
+   * 返回 JSON-RPC 响应对象，或 null（通知类消息）。
+   */
+  async function handleDirectRequest(msg, context = {}) {
+    const { id, method, params } = msg;
+
+    if (id === undefined || id === null) {
+      return null;
+    }
+
+    if (method === 'initialize') {
+      return makeResponse(id, {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: SERVER_INFO,
+      });
+    }
+
+    if (method === 'ping') {
+      return makeResponse(id, {});
+    }
+
+    if (method === 'tools/list') {
+      return makeResponse(id, { tools: getToolSchemas(context) });
+    }
+
+    if (method === 'tools/call') {
+      const { name, arguments: args } = params || {};
+      const toolResult = await callTool(name, args, context);
+      return makeResponse(id, toolResult);
+    }
+
+    return makeError(id, -32601, `未知方法: ${method}`);
+  }
+
+  return { connect, disconnect, receiveMessage, handleDirectRequest, validateToken, getToolSchemas, getAllToolSchemas };
+}
+
+module.exports = { createMcpService };
