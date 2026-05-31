@@ -15,12 +15,12 @@ test-results/
 __pycache__/
 
 # Debug / 临时文件
-_debug*.txt
-_debug*.js
-_rescue_logs*.txt
+/_debug*.txt
+/_debug*.js
+/_rescue_logs*.txt
 *.tmp
-probe-*.js
-fix-claude-mcp.js
+/probe-*.js
+/fix-claude-mcp.js
 
 # 部署脚本（含服务器凭据，仅本地使用）
 deploy.js
