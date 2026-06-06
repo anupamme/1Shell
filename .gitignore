@@ -51,6 +51,9 @@ _debug*.txt
 _debug*.js
 _rescue_logs*.txt
 probe-*.js
+!src/routes/probe-*.js
+!src/services/probe-*.js
+!src/services/probe/**/*.js
 fix-claude-mcp.js
 deploy.js
 evil.txt
