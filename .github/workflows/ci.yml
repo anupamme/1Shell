@@ -64,6 +64,14 @@ jobs:
             -e APP_LOGIN_PASSWORD=ci-test-pw \
             -p 3301:3301 \
             1shell:test
-          sleep 5
-          curl -sf http://localhost:3301/api/health | grep -q '"status":"ok"'
-          docker stop 1shell-test
+          for i in {1..30}; do
+            if curl -sf http://localhost:3301/api/health | grep -q '"status":"ok"'; then
+              docker stop 1shell-test
+              exit 0
+            fi
+            sleep 1
+          done
+          docker ps -a
+          docker logs 1shell-test
+          docker stop 1shell-test || true
+          exit 1
