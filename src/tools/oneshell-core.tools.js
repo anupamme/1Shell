@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { ROOT_DIR } = require('../config/env');
 const { execLocalCommand } = require('../../lib/exec-local');
+const { emitIdeEvent } = require('../ide/ide.events');
 
 const EXEC_SCHEMA = {
   type: 'object',
@@ -14,6 +15,17 @@ const EXEC_SCHEMA = {
   },
   required: ['hostId', 'command'],
 };
+
+const MCP_STANDARD_TOOL_NAMES = new Set([
+  'list_hosts',
+  'host_exec',
+  'list_remote_dir',
+  'read_remote_file',
+  'write_remote_file',
+  'upload_file',
+  'download_file',
+  'ask_1shell_ai',
+]);
 
 const TOOL_DEFS = [
   {
@@ -33,6 +45,22 @@ const TOOL_DEFS = [
     targets: ['mcp', 'ide'],
     description: '列出 1Shell 中所有已托管主机，返回 id / name / host / port / type。',
     schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'ask_1shell_ai',
+    targets: ['mcp'],
+    description: '把复杂运维、监控、脚本、Program、审计或诊断任务委托给 1Shell AI，由它在内部选择合适工具并返回结果摘要。',
+    schema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: '要交给 1Shell AI 完成的问题、目标或诊断任务' },
+        hostId: { type: 'string', description: '可选的目标主机 ID，用于限定任务范围' },
+        mode: { type: 'string', enum: ['answer', 'plan', 'execute'], description: '执行模式：answer 只回答，plan 只制定计划，execute 可执行必要动作；默认 answer' },
+        requireConfirmation: { type: 'boolean', description: '是否要求 1Shell AI 在变更型动作前走确认；默认 true' },
+        timeoutMs: { type: 'number', description: '等待 1Shell AI 完成的超时时间，默认 300000，最大 600000' },
+      },
+      required: ['task'],
+    },
   },
   {
     name: 'list_scripts',
@@ -244,7 +272,7 @@ const TOOL_DEFS = [
   {
     name: 'list_probes',
     targets: ['mcp', 'ide'],
-    description: '获取所有主机的探针监控快照，包含在线状态、CPU、内存、磁盘、网络、Agent 状态和流量摘要。',
+    description: '获取所有主机的探针监控快照，包含在线状态、CPU、内存、磁盘、网络、系统内部体检(systemHealth)、Agent 状态和流量摘要。',
     schema: {
       type: 'object',
       properties: { refresh: { type: 'boolean', description: '是否强制刷新（默认 false，优先使用缓存）' } },
@@ -254,7 +282,7 @@ const TOOL_DEFS = [
   {
     name: 'get_probe',
     targets: ['mcp', 'ide'],
-    description: '获取单台主机的探针监控快照。',
+    description: '获取单台主机的探针监控快照，返回硬件指标和系统内部体检(systemHealth：端口、TCP 连接、僵尸进程、失败服务、错误日志、防火墙和系统安全状态)。',
     schema: {
       type: 'object',
       properties: {
@@ -412,9 +440,16 @@ const TOOL_DEFS = [
 function createOneShellCoreTools(deps = {}) {
   const toolMap = new Map(TOOL_DEFS.map((tool) => [tool.name, tool]));
 
+  function isToolExposed(name, target) {
+    const tool = toolMap.get(name);
+    if (!tool || !tool.targets.includes(target)) return false;
+    if (target === 'mcp') return MCP_STANDARD_TOOL_NAMES.has(name);
+    return true;
+  }
+
   function getToolSchemas(target) {
     return TOOL_DEFS
-      .filter((tool) => tool.targets.includes(target))
+      .filter((tool) => isToolExposed(tool.name, target))
       .map((tool) => target === 'mcp'
         ? { name: tool.name, description: tool.description, inputSchema: tool.schema }
         : { name: tool.name, description: tool.description, input_schema: tool.schema });
@@ -428,7 +463,9 @@ function createOneShellCoreTools(deps = {}) {
       case 'execute_command':
         return handleExec(input, context);
       case 'list_hosts':
-        return handleListHosts();
+        return handleListHosts(context);
+      case 'ask_1shell_ai':
+        return handleAskOneShellAi(input, context);
       case 'list_scripts':
         return handleListScripts(input);
       case 'run_script':
@@ -494,17 +531,21 @@ function createOneShellCoreTools(deps = {}) {
     const command = String(input.command || '').trim();
     const timeout = Number(input.timeout) > 0 ? Number(input.timeout) : 30000;
     if (!hostId || !command) return err('hostId 和 command 为必填');
+    const onOutput = typeof context.onToolDelta === 'function' ? context.onToolDelta : context.onOutput;
 
-    // 经 harness 统一边界（堵 IDE/MCP 的 local 裸奔）：guard（灾难拦截）→ 执行 → 打码 → 轨迹。
-    // allowApproval:false —— IDE 在 ide.service loop 层已有人审，MCP 用 ACL，此处不重复弹窗，
-    // 但 guard 的确定性灾难拦截仍生效，作为纵深防御。
+    // 经 harness 统一边界执行：guard → 人审 gate → 执行 → 打码 → 轨迹。
+    // IDE 是人在场路径，risk-rules 的 approval 动作接入 IDE 审批弹窗；MCP/Program 保持无人审。
     if (deps.harness?.dispatch) {
       try {
+        const canRequestApproval = context.source === 'ide' && typeof context.requestApproval === 'function';
         const ctx = deps.harness.buildContext(context.source === 'mcp' ? 'mcp' : (context.source || 'core'), {
           hostId,
-          allowApproval: false,
+          allowApproval: canRequestApproval,
+          requestApproval: canRequestApproval ? context.requestApproval : undefined,
+          runId: context.runId,
           sessionId: context.sessionId,
           signal: context.signal,
+          onOutput,
         });
         const dispatched = await deps.harness.dispatch('execute_command', { command, hostId, timeout }, ctx);
         if (!dispatched.raw) {
@@ -529,8 +570,8 @@ function createOneShellCoreTools(deps = {}) {
     try {
       if (hostId !== 'local' && !deps.bridgeService) return err('bridgeService 未初始化');
       const result = hostId === 'local'
-        ? await execLocal(command, timeout, { signal: context.signal })
-        : await deps.bridgeService.execOnHost(hostId, command, timeout, { source: context.source || 'core_tools', signal: context.signal });
+        ? await execLocal(command, timeout, { signal: context.signal, onOutput })
+        : await deps.bridgeService.execOnHost(hostId, command, timeout, { source: context.source || 'core_tools', signal: context.signal, onOutput });
       emitTool(context, 'execute_command', { hostId, command }, result);
       const okRun = result.exitCode === 0;
       return structured(okRun, okRun ? '命令执行成功' : `命令执行失败，exitCode=${result.exitCode}`, {
@@ -547,12 +588,76 @@ function createOneShellCoreTools(deps = {}) {
     }
   }
 
-  function handleListHosts() {
-    const hosts = (deps.hostService?.listHosts?.() || []).map((h) => {
-      const addr = h.type === 'local' ? '127.0.0.1:-' : `${h.host || '127.0.0.1'}:${h.port || 22}`;
-      return `id=${h.id}  name=${h.name}  ${addr}  type=${h.type || 'ssh'}`;
-    });
-    return ok(hosts.length > 0 ? hosts.join('\n') : '（无已托管主机）');
+  function handleListHosts(context = {}) {
+    const allowedHosts = Array.isArray(context.allowedHosts) ? context.allowedHosts : [];
+    const hosts = (deps.hostService?.listHosts?.() || [])
+      .filter((h) => context.exposure !== 'remote' || allowedHosts.length === 0 || allowedHosts.includes('*') || allowedHosts.includes(h.id))
+      .map((h) => {
+        const addr = h.type === 'local' ? '127.0.0.1:-' : `${h.host || '127.0.0.1'}:${h.port || 22}`;
+        return `id=${h.id}  name=${h.name}  ${addr}  type=${h.type || 'ssh'}`;
+      });
+    return ok(hosts.length > 0 ? hosts.join('\n') : '（无允许访问的主机）');
+  }
+
+  async function handleAskOneShellAi(input, context) {
+    if (!deps.ideService?.ask) return err('1Shell AI gateway 未初始化');
+    const task = String(input.task || '').trim();
+    if (!task) return err('task 为必填');
+    const mode = ['answer', 'plan', 'execute'].includes(input.mode) ? input.mode : 'answer';
+    const hostId = String(input.hostId || '').trim();
+    const requireConfirmation = input.requireConfirmation !== false;
+    const timeoutMs = Number(input.timeoutMs) > 0 ? Math.min(Number(input.timeoutMs), 600000) : 300000;
+    const host = hostId && deps.hostService?.findHost ? deps.hostService.findHost(hostId) : null;
+    const contextHosts = host ? [{
+      id: host.id,
+      name: host.name,
+      host: host.host,
+      port: host.port,
+      username: host.username,
+      type: host.type,
+      platform: host.platform || host.os,
+    }] : (hostId ? [{ id: hostId }] : []);
+    const guidance = [
+      '[MCP_GATEWAY_REQUEST]',
+      `mode=${mode}`,
+      hostId ? `hostId=${hostId}` : '',
+      'External MCP clients directly see only these tools: list_hosts, host_exec, list_remote_dir, read_remote_file, write_remote_file, upload_file, download_file, ask_1shell_ai.',
+      'Scripts, Programs, probes, audit, diagnostics, and MCP registry operations are delegated capabilities behind ask_1shell_ai; do not describe them as directly visible external MCP tools.',
+      requireConfirmation ? 'mutating actions require confirmation; if confirmation is unavailable, explain what would be done instead of forcing the action.' : 'the caller explicitly allowed execution without interactive confirmation.',
+      mode === 'answer' ? 'Answer the request. Prefer read-only inspection and do not make changes.' : '',
+      mode === 'plan' ? 'Produce a concrete plan. Do not make changes.' : '',
+      mode === 'execute' ? 'Execute only the necessary actions and summarize exactly what changed.' : '',
+      '',
+      task,
+    ].filter(Boolean).join('\n');
+
+    try {
+      const result = await deps.ideService.ask({
+        message: guidance,
+        context: {
+          hosts: contextHosts,
+          toolPolicy: {
+            allowedTools: Array.isArray(context.allowedTools) ? context.allowedTools : [],
+            allowedHosts: Array.isArray(context.allowedHosts) ? context.allowedHosts : [],
+            allowedScripts: Array.isArray(context.allowedScripts) ? context.allowedScripts : [],
+            allowedPaths: Array.isArray(context.allowedPaths) ? context.allowedPaths : [],
+            gatewayMode: mode,
+          },
+        },
+        safeMode: requireConfirmation,
+        entry: 'core',
+        timeoutMs,
+        approvalAction: requireConfirmation ? 'deny' : 'allow',
+      });
+      return structured(true, '1Shell AI 已完成请求', {
+        mode,
+        hostId: hostId || null,
+        response: result.text || '',
+        toolCalls: (result.toolCalls || []).map((item) => ({ name: item.name, input: item.input })),
+      });
+    } catch (e) {
+      return err(e.message);
+    }
   }
 
   function handleListScripts(input) {
@@ -1042,7 +1147,7 @@ function createOneShellCoreTools(deps = {}) {
     }
   }
 
-  return { getToolSchemas, handle };
+  return { getToolSchemas, handle, isToolExposed };
 }
 
 function makeAbortError() {
@@ -1052,14 +1157,15 @@ function makeAbortError() {
   return err;
 }
 
-function execLocal(command, timeout, { cwd = ROOT_DIR, signal } = {}) {
-  return execLocalCommand(command, { timeout, cwd, signal });
+function execLocal(command, timeout, { cwd = ROOT_DIR, signal, onOutput } = {}) {
+  return execLocalCommand(command, { timeout, cwd, signal, onOutput });
 }
 
 function emitTool(context, toolName, input, result) {
   if (!context.socket) return;
-  context.socket.emit('ide:tool-call', {
+  emitIdeEvent(context.socket, 'ide:tool-call', {
     sessionId: context.sessionId,
+    runId: context.runId,
     tool: toolName,
     input,
     result: {

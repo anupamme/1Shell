@@ -49,15 +49,23 @@ function createFileRouter({ fileService }) {
       if (!filePath) {
         return res.status(400).json({ error: '缺少 path 参数' });
       }
-      const { stream, size, filename } = await fileService.downloadFile(hostId, filePath);
+      const { stream, size, filename, source } = await fileService.downloadFile(hostId, filePath);
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
       res.setHeader('Content-Type', 'application/octet-stream');
+      if (source) res.setHeader('X-1Shell-File-Download-Source', source);
       if (size) res.setHeader('Content-Length', size);
-      stream.pipe(res);
+      let completed = false;
+      res.on('finish', () => { completed = true; });
+      res.on('close', () => {
+        if (!completed && typeof stream.destroy === 'function' && !stream.destroyed) {
+          stream.destroy();
+        }
+      });
       stream.on('error', (err) => {
         if (!res.headersSent) next(err);
         else res.end();
       });
+      stream.pipe(res);
     } catch (err) {
       next(err);
     }

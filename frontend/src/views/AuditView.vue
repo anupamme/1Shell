@@ -57,7 +57,10 @@ interface HarnessTrace {
   ts_end?: string;
   source?: string;
   run_id?: string;
+  session_id?: string;
   host_id?: string;
+  stage?: string;
+  event_type?: string;
   tool_name?: string;
   input_summary?: string;
   capabilities?: string;
@@ -75,20 +78,74 @@ interface HarnessTraceResponse {
   source: string;
 }
 
+interface ReasoningChainItem {
+  id: number;
+  traceId?: string;
+  startedAt?: string;
+  endedAt?: string;
+  source?: string;
+  runId?: string;
+  sessionId?: string;
+  hostId?: string;
+  stage: string;
+  eventType: string;
+  toolName?: string;
+  summary?: string;
+  decision?: string;
+  blockReason?: string;
+  riskLevel?: string;
+  riskAction?: string;
+  resultSummary?: string;
+  exitCode?: number | null;
+  durationMs?: number | null;
+}
+
+interface ReasoningChainResponse {
+  chain: ReasoningChainItem[];
+  total: number;
+  source: string;
+  error?: string;
+}
+
 const DECISION_LABELS: Record<string, string> = {
   allowed: '放行',
+  allowed_with_warning: '风险提醒后放行',
+  allowed_after_security_check: '安全校验后放行',
   blocked: '已拦截',
   denied: '已拒绝',
   error: '执行错误',
   pending: '进行中',
+  event: '链路事件',
 };
 
 const DECISION_BADGES: Record<string, string> = {
   allowed: 'bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20',
+  allowed_with_warning: 'bg-amber-50 text-amber-600 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20',
+  allowed_after_security_check: 'bg-cyan-50 text-cyan-600 border-cyan-200 dark:bg-cyan-500/10 dark:text-cyan-300 dark:border-cyan-500/20',
   blocked: 'bg-rose-50 text-rose-600 border-rose-200 dark:bg-rose-500/10 dark:text-rose-300 dark:border-rose-500/20',
   denied:  'bg-amber-50 text-amber-600 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20',
   error:   'bg-orange-50 text-orange-600 border-orange-200 dark:bg-orange-500/10 dark:text-orange-300 dark:border-orange-500/20',
   pending: 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-500/10 dark:text-slate-300 dark:border-slate-500/20',
+  event: 'bg-indigo-50 text-indigo-600 border-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-300 dark:border-indigo-500/20',
+};
+
+const STAGE_LABELS: Record<string, string> = {
+  instruction: '指令',
+  perception: '感知',
+  reasoning: '推理',
+  security: '安全校验',
+  execution: '执行',
+  result: '结果',
+};
+
+const EVENT_TYPE_LABELS: Record<string, string> = {
+  instruction_received: '收到指令',
+  tool_decision: '工具决策',
+  phase_decision: '阶段决策',
+  reasoning_summary: '推理摘要',
+  security_check: '安全检查',
+  final_result: '最终结果',
+  tool_call: '工具调用',
 };
 
 interface AuditPrefs {
@@ -153,6 +210,11 @@ const traceLoaded = ref(false);
 const traceFilterDecision = ref('');
 const traceFilterKeyword = ref('');
 const traceApplied = ref<{ decision: string; keyword: string }>({ decision: '', keyword: '' });
+const chainLoading = ref(false);
+const chainError = ref<string | null>(null);
+const chainRows = ref<ReasoningChainItem[]>([]);
+const chainTitle = ref('');
+const chainActiveKey = ref('');
 
 const tracePage = computed(() => Math.floor(traceOffset.value / TRACE_PAGE_SIZE) + 1);
 const traceTotalPages = computed(() => Math.max(1, Math.ceil(traceTotal.value / TRACE_PAGE_SIZE)));
@@ -202,6 +264,48 @@ function traceGotoPrev(): void { if (!tracePrevDisabled.value) loadTraces(traceO
 function traceGotoNext(): void { if (!traceNextDisabled.value) loadTraces(traceOffset.value + TRACE_PAGE_SIZE); }
 function onTraceFilterEnter(e: KeyboardEvent): void { if (e.key === 'Enter') applyTraceFilters(); }
 
+async function loadReasoningChain(trace: HarnessTrace): Promise<void> {
+  const params = new URLSearchParams();
+  if (trace.run_id) params.set('runId', trace.run_id);
+  else if (trace.session_id) params.set('sessionId', trace.session_id);
+  if (!params.toString()) {
+    notify.warn('这条轨迹没有 runId/sessionId，无法聚合推理链路', 4000);
+    return;
+  }
+  params.set('limit', '200');
+  chainActiveKey.value = trace.run_id ? `run:${trace.run_id}` : `session:${trace.session_id}`;
+  chainTitle.value = trace.run_id ? `runId=${trace.run_id}` : `sessionId=${trace.session_id}`;
+  chainLoading.value = true;
+  chainError.value = null;
+  try {
+    const resp = await requestJson<ReasoningChainResponse>(`/api/audit/reasoning-chain?${params.toString()}`);
+    if (resp.error) throw new Error(resp.error);
+    chainRows.value = Array.isArray(resp.chain) ? resp.chain : [];
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    chainError.value = msg;
+    chainRows.value = [];
+    notify.error(`加载推理链路失败：${msg}`, 5000);
+  } finally {
+    chainLoading.value = false;
+  }
+}
+
+function closeReasoningChain(): void {
+  chainRows.value = [];
+  chainError.value = null;
+  chainTitle.value = '';
+  chainActiveKey.value = '';
+}
+
+function traceChainKey(trace: HarnessTrace): string {
+  return trace.run_id ? `run:${trace.run_id}` : trace.session_id ? `session:${trace.session_id}` : '';
+}
+
+function canLoadReasoningChain(trace: HarnessTrace): boolean {
+  return Boolean(trace.run_id || trace.session_id);
+}
+
 function switchTab(tab: 'audit' | 'harness'): void {
   activeTab.value = tab;
   if (tab === 'harness' && !traceLoaded.value) loadTraces(0);
@@ -209,6 +313,8 @@ function switchTab(tab: 'audit' | 'harness'): void {
 
 function decisionLabel(d: string): string { return DECISION_LABELS[d] || d || '--'; }
 function decisionBadge(d: string): string { return DECISION_BADGES[d] || DEFAULT_BADGE; }
+function stageLabel(stage: string | undefined): string { return STAGE_LABELS[stage || ''] || stage || '--'; }
+function eventTypeLabel(eventType: string | undefined): string { return EVENT_TYPE_LABELS[eventType || ''] || eventType || '--'; }
 function parseCapabilities(raw: string | undefined): string {
   if (!raw) return '';
   try {
@@ -622,6 +728,47 @@ onMounted(() => {
           </div>
         </div>
         <!-- TRACE_LIST_PLACEHOLDER -->
+        <div v-if="chainActiveKey" class="shrink-0 mx-4 mt-4 rounded-2xl border border-blue-200 dark:border-blue-500/20 bg-blue-50/60 dark:bg-blue-500/10 p-4">
+          <div class="flex items-start gap-3">
+            <div>
+              <div class="text-sm font-bold text-slate-700 dark:text-slate-100">推理链路溯源</div>
+              <div class="mt-1 text-[11px] text-slate-500 dark:text-slate-400 break-all">{{ chainTitle }} · {{ chainRows.length }} 个节点</div>
+            </div>
+            <button
+              type="button"
+              class="ml-auto h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white/80 dark:bg-slate-800/80 text-[11px] font-semibold text-slate-500 dark:text-slate-300 hover:text-blue-500 hover:border-blue-300"
+              @click="closeReasoningChain"
+            >关闭</button>
+          </div>
+          <div v-if="chainLoading" class="mt-4 text-xs text-slate-400">链路加载中...</div>
+          <div v-else-if="chainError" class="mt-4 text-xs text-rose-500 dark:text-rose-300">链路加载失败：{{ chainError }}</div>
+          <div v-else-if="chainRows.length === 0" class="mt-4 text-xs text-slate-400">暂无可聚合的推理链路节点</div>
+          <div v-else class="mt-4 space-y-3 max-h-80 overflow-y-auto pr-1">
+            <div
+              v-for="row in chainRows"
+              :key="row.id"
+              class="relative pl-5 before:absolute before:left-1.5 before:top-5 before:bottom-[-14px] before:w-px before:bg-blue-200 dark:before:bg-blue-500/30 last:before:hidden"
+            >
+              <span class="absolute left-0 top-1.5 h-3 w-3 rounded-full bg-blue-500 ring-4 ring-blue-100 dark:ring-blue-500/15"></span>
+              <div class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#0b1324] px-3 py-2">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-[10px] font-semibold text-slate-600 dark:text-slate-300">{{ stageLabel(row.stage) }}</span>
+                  <span class="text-[11px] font-semibold text-slate-600 dark:text-slate-200">{{ eventTypeLabel(row.eventType) }}</span>
+                  <span v-if="row.toolName" class="text-[11px] font-mono text-slate-400">{{ row.toolName }}</span>
+                  <span class="ml-auto text-[10px] text-slate-400">{{ formatTime(row.startedAt) }}</span>
+                </div>
+                <div v-if="row.summary" class="mt-2 text-[11px] text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-all">{{ row.summary }}</div>
+                <div v-if="row.blockReason" class="mt-2 text-[11px] text-rose-500 dark:text-rose-300 break-all">拦截/校验：{{ row.blockReason }}</div>
+                <div v-if="row.resultSummary" class="mt-2 text-[11px] text-slate-500 dark:text-slate-400 break-all">结果：{{ row.resultSummary }}</div>
+                <div class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-400">
+                  <span v-if="row.decision">决策：{{ decisionLabel(row.decision) }}</span>
+                  <span v-if="row.riskLevel">风险：{{ row.riskLevel }}</span>
+                  <span v-if="row.durationMs != null">耗时：{{ row.durationMs }}ms</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <!-- 列表 -->
         <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
           <div v-if="traceLoading" class="text-xs text-slate-400 text-center py-10">加载中...</div>
@@ -636,10 +783,18 @@ onMounted(() => {
           >
             <div class="flex flex-wrap items-center gap-2">
               <span class="inline-flex items-center px-2 py-0.5 rounded-lg border text-[11px] font-semibold" :class="decisionBadge(t.decision)">{{ decisionLabel(t.decision) }}</span>
+              <span v-if="t.stage" class="inline-flex items-center px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-[10px] font-semibold text-slate-500 dark:text-slate-300">{{ stageLabel(t.stage) }}</span>
               <span class="text-[11px] font-mono text-slate-500 dark:text-slate-300">{{ t.tool_name }}</span>
               <span class="text-[11px] text-slate-400">#{{ t.id }}</span>
               <span v-if="t.needed_approval" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300">需审批</span>
-              <span class="text-[11px] text-slate-400 ml-auto">{{ formatTime(t.ts_start) }}</span>
+              <button
+                v-if="canLoadReasoningChain(t)"
+                type="button"
+                class="ml-auto h-6 px-2 rounded-lg border text-[11px] font-semibold transition-all"
+                :class="chainActiveKey === traceChainKey(t) ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300' : 'border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-400 hover:border-blue-300 hover:text-blue-500'"
+                @click="loadReasoningChain(t)"
+              >查看链路</button>
+              <span class="text-[11px] text-slate-400" :class="canLoadReasoningChain(t) ? '' : 'ml-auto'">{{ formatTime(t.ts_start) }}</span>
             </div>
 
             <div class="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
@@ -659,6 +814,12 @@ onMounted(() => {
                 <div class="text-[10px] text-slate-400">退出码 / 耗时</div>
                 <div class="mt-1 font-semibold text-slate-700 dark:text-slate-200">{{ t.exit_code ?? '--' }} · {{ t.duration_ms != null ? t.duration_ms + 'ms' : '--' }}</div>
               </div>
+            </div>
+
+            <div v-if="t.run_id || t.session_id || t.event_type" class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-400 break-all">
+              <span v-if="t.run_id">runId={{ t.run_id }}</span>
+              <span v-if="t.session_id">sessionId={{ t.session_id }}</span>
+              <span v-if="t.event_type">事件={{ eventTypeLabel(t.event_type) }}</span>
             </div>
 
             <div v-if="t.input_summary" class="mt-3">

@@ -6,9 +6,38 @@ import { useNotifyStore } from '@/stores/notify';
 import AppIcon from '@/components/AppIcon.vue';
 import FileBrowserPanel from '@/components/main/FileBrowserPanel.vue';
 import ProbeTrendChart from '@/components/ProbeTrendChart.vue';
-import type { HostPreference, HostRole } from '@/utils/mainConsole';
-import { LOCAL_HOST_ID, formatHostMeta } from '@/utils/mainConsole';
+import type { HostPreference, HostRole, OsInfo } from '@/utils/mainConsole';
+import { LOCAL_HOST_ID, formatHostMeta, formatOsInfo } from '@/utils/mainConsole';
 import { formatBandwidth, type ProbeSample } from '@/utils/probe';
+
+interface ListeningPortSummary {
+  protocol?: string | null;
+  port?: string | null;
+  process?: string | null;
+}
+
+interface ProbeSystemHealth {
+  network?: {
+    listeningPortCount?: number | null;
+    tcpConnectionCount?: number | null;
+    topListeningPorts?: ListeningPortSummary[];
+  } | null;
+  process?: {
+    zombieCount?: number | null;
+  } | null;
+  service?: {
+    failedServiceCount?: number | null;
+    failedServices?: string[];
+  } | null;
+  logs?: {
+    recentErrorCount?: number | null;
+    recentErrors?: string[];
+  } | null;
+  security?: {
+    firewallState?: string | null;
+    selinuxState?: string | null;
+  } | null;
+}
 
 interface ProbeSummary {
   status: 'online' | 'offline' | 'unknown';
@@ -24,6 +53,7 @@ interface ProbeSummary {
   lastSampleAt?: string | number | null;
   alertCount?: number | null;
   platform?: string | null;
+  systemHealth?: ProbeSystemHealth | null;
 }
 
 interface RepositoryHost {
@@ -38,6 +68,7 @@ interface RepositoryHost {
   proxyHostId?: string | null;
   links?: { id?: string; name: string; url: string; description?: string }[];
   manualLocation?: unknown;
+  osInfo?: OsInfo | null;
   preference: HostPreference;
   probe?: ProbeSummary | null;
 }
@@ -193,6 +224,27 @@ function formatLoad(value: number | null | undefined): string {
   return Number(value).toFixed(2);
 }
 
+function formatCount(value: number | null | undefined, unit = ''): string {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
+  return `${Number(value)}${unit}`;
+}
+
+function formatState(value: string | null | undefined): string {
+  const text = String(value || '').trim();
+  return text || '--';
+}
+
+function joinList(values: string[] | null | undefined): string {
+  return Array.isArray(values) && values.length ? values.join('、') : '无';
+}
+
+function formatTopPorts(values: ListeningPortSummary[] | null | undefined): string {
+  if (!Array.isArray(values) || values.length === 0) return '暂无';
+  return values
+    .map((item) => [item.protocol, item.port, item.process].filter(Boolean).join('/'))
+    .join('，');
+}
+
 function formatBytes(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -234,8 +286,7 @@ function hostMeta(host: RepositoryHost): string {
 }
 
 function platformText(host: RepositoryHost): string {
-  const text = host.probe?.platform;
-  return text && text !== '--' ? text : '--';
+  return formatOsInfo(host.osInfo, host.probe?.platform);
 }
 
 async function loadHosts(): Promise<void> {
@@ -624,6 +675,7 @@ onMounted(() => { void loadHosts(); });
                     <span v-if="host.preference.pinned" class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-400/15 dark:text-amber-200">置顶</span>
                   </div>
                   <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{{ hostMeta(host) }}</p>
+                  <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">OS {{ platformText(host) }}</p>
                   <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">CPU {{ formatPercent(host.probe?.cpu) }} · MEM {{ formatPercent(host.probe?.memory) }} · 告警 {{ host.probe?.alertCount || 0 }}</p>
                   <div class="mt-2 flex flex-wrap gap-1">
                     <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600 dark:bg-white/8 dark:text-slate-300">{{ roleText(host) }}</span>
@@ -856,6 +908,52 @@ onMounted(() => { void loadHosts(); });
                   <p class="text-sm font-semibold">诊断入口</p>
                   <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Ping / DNS / HTTP 诊断沿用探针页能力。</p>
                   <button type="button" class="mt-3 rounded-xl bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500" @click="openProbe(selectedHost)">打开探针页</button>
+                </div>
+              </div>
+
+              <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+                <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p class="text-sm font-semibold">系统内部体检</p>
+                    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">进程 / 端口 / 服务 / 日志 / 安全态，供内部 AI 与 MCP get_probe 直接读取。</p>
+                  </div>
+                  <span class="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700 dark:bg-violet-400/10 dark:text-violet-200">systemHealth</span>
+                </div>
+                <div v-if="!selectedHost.probe?.systemHealth" class="rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500 dark:border-white/15 dark:text-slate-400">
+                  暂无系统内部体检数据。请等待探针刷新；旧版 probe-agent 需要更新后才会上报 systemHealth。
+                </div>
+                <div v-else class="grid grid-cols-2 gap-3 xl:grid-cols-5">
+                  <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
+                    <p class="text-[11px] text-slate-500">监听端口</p>
+                    <p class="mt-1 text-lg font-semibold">{{ formatCount(selectedHost.probe?.systemHealth?.network?.listeningPortCount) }}</p>
+                  </div>
+                  <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
+                    <p class="text-[11px] text-slate-500">TCP 连接</p>
+                    <p class="mt-1 text-lg font-semibold">{{ formatCount(selectedHost.probe?.systemHealth?.network?.tcpConnectionCount) }}</p>
+                  </div>
+                  <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
+                    <p class="text-[11px] text-slate-500">僵尸进程</p>
+                    <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.process?.zombieCount || 0) > 0 ? 'text-amber-600 dark:text-amber-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.process?.zombieCount) }}</p>
+                  </div>
+                  <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
+                    <p class="text-[11px] text-slate-500">失败服务</p>
+                    <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.service?.failedServiceCount || 0) > 0 ? 'text-rose-600 dark:text-rose-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.service?.failedServiceCount) }}</p>
+                  </div>
+                  <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
+                    <p class="text-[11px] text-slate-500">近 1h 错误日志</p>
+                    <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.logs?.recentErrorCount || 0) > 0 ? 'text-amber-600 dark:text-amber-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.logs?.recentErrorCount) }}</p>
+                  </div>
+                </div>
+                <div class="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                  <div class="rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-white/[0.04] dark:text-slate-300">
+                    <p><span class="text-slate-400">Top 端口：</span>{{ formatTopPorts(selectedHost.probe?.systemHealth?.network?.topListeningPorts) }}</p>
+                    <p class="mt-1"><span class="text-slate-400">失败服务：</span>{{ joinList(selectedHost.probe?.systemHealth?.service?.failedServices) }}</p>
+                  </div>
+                  <div class="rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-white/[0.04] dark:text-slate-300">
+                    <p><span class="text-slate-400">防火墙：</span>{{ formatState(selectedHost.probe?.systemHealth?.security?.firewallState) }}</p>
+                    <p class="mt-1"><span class="text-slate-400">SELinux：</span>{{ formatState(selectedHost.probe?.systemHealth?.security?.selinuxState) }}</p>
+                    <p class="mt-1"><span class="text-slate-400">日志摘要：</span>{{ joinList(selectedHost.probe?.systemHealth?.logs?.recentErrors) }}</p>
+                  </div>
                 </div>
               </div>
 

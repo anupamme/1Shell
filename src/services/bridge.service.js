@@ -36,7 +36,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
    * @param {string} [options.source] - 调用来源 ('mcp' | 'bridge_api')
    * @returns {Promise<{stdout: string, stderr: string, exitCode: number, durationMs: number}>}
    */
-  async function execOnHost(hostId, command, timeoutMs, { source = 'bridge_api', clientIp, auditCommand, signal } = {}) {
+  async function execOnHost(hostId, command, timeoutMs, { source = 'bridge_api', clientIp, auditCommand, signal, onOutput } = {}) {
     throwIfAborted(signal);
 
     const safeAuditCommand = auditCommand || command;
@@ -67,25 +67,25 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
 
     // 本机：直接用 child_process 执行，不走 SSH
     if (host && host.type === 'local') {
-      return execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand: safeAuditCommand, signal });
+      return execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput });
     }
 
     // 持久 shell 模式（所有远端调用优先走此路径）
     // 优势：单次 SSH 握手，后续命令写 stdin，无 liveness check，极低延迟
     // 并发安全：sshShellPool 内置队列，同一 host 的并发命令自动排队
     if (sshShellPool) {
-      return execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal });
+      return execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput });
     }
 
     // 降级：没有 shell pool 时走 exec 模式（兼容旧配置）
-    return execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal });
+    return execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput });
   }
 
   // ─── 本机模式 ───────────────────────────────────────────────────────────
 
-  async function execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand, signal }) {
+  async function execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand, signal, onOutput }) {
     const commandForAudit = auditCommand || command;
-    const result = await execLocalScript(command, { timeout, signal, windowsShell: 'cmd' });
+    const result = await execLocalScript(command, { timeout, signal, windowsShell: 'cmd', onOutput });
     auditService?.log({
       action: 'bridge_exec',
       source,
@@ -102,11 +102,11 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
 
   // ─── 持久 shell 模式 ─────────────────────────────────────────────────────
 
-  async function execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal }) {
+  async function execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput }) {
     const startAt = Date.now();
     const commandForAudit = auditCommand || command;
     try {
-      const result = await sshShellPool.exec(hostId, command, timeout, { signal });
+      const result = await sshShellPool.exec(hostId, command, timeout, { signal, onOutput });
       auditService?.log({
         action: 'bridge_exec',
         source,
@@ -135,7 +135,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
 
   // ─── exec 模式（原有逻辑）────────────────────────────────────────────────
 
-  function execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal }) {
+  function execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput }) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(makeAbortError());
       const startAt = Date.now();
@@ -236,8 +236,18 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
             const stdoutChunks = [];
             const stderrChunks = [];
 
-            stream.on('data', (chunk) => stdoutChunks.push(chunk));
-            stream.stderr.on('data', (chunk) => stderrChunks.push(chunk));
+            stream.on('data', (chunk) => {
+              stdoutChunks.push(chunk);
+              if (typeof onOutput === 'function') {
+                try { onOutput({ stream: 'stdout', text: chunk.toString('utf8') }); } catch { /* ignore */ }
+              }
+            });
+            stream.stderr.on('data', (chunk) => {
+              stderrChunks.push(chunk);
+              if (typeof onOutput === 'function') {
+                try { onOutput({ stream: 'stderr', text: chunk.toString('utf8') }); } catch { /* ignore */ }
+              }
+            });
 
             stream.on('close', (code) => {
               settle({

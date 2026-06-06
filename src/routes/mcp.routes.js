@@ -8,10 +8,34 @@ const { Router } = require('express');
  * GET  /mcp/sse      — 建立 SSE 长连接，客户端订阅此端点
  * POST /mcp/message  — 客户端发送 JSON-RPC 消息
  *
- * 鉴权：本地 localhost 访问使用 X-Bridge-Token；Remote MCP 使用 X-Remote-Mcp-Token / Bearer。
+ * 鉴权：本地 loopback 访问可免 token；Remote MCP 使用 X-Remote-Mcp-Token / Bearer。
  */
 function createMcpRouter({ mcpService, remoteMcpService }) {
   const router = Router();
+
+  function isLoopbackLocalRequest(req) {
+    const host = stripPort(String(req.headers.host || '').trim().toLowerCase());
+    const socketIp = normalizeIp(req.socket?.remoteAddress || req.ip || '');
+    return isLocalHost(host) && isLocalIp(socketIp);
+  }
+
+  function stripPort(host) {
+    if (!host) return '';
+    if (host.startsWith('[')) return host.slice(1, host.indexOf(']'));
+    return host.split(':')[0];
+  }
+
+  function normalizeIp(ip) {
+    return String(ip || '').trim().toLowerCase().replace(/^::ffff:/, '');
+  }
+
+  function isLocalHost(host) {
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  }
+
+  function isLocalIp(ip) {
+    return ip === '127.0.0.1' || ip === '::1';
+  }
 
   function requireRemotePolicy(req, res, next) {
     if (!remoteMcpService) return next();
@@ -39,7 +63,9 @@ function createMcpRouter({ mcpService, remoteMcpService }) {
       return next();
     }
 
-    // 本地 MCP 只接受 header 传 Bridge Token，禁止 query param（防止进 access log / 浏览器历史）
+    if (isLoopbackLocalRequest(req)) return next();
+
+    // 非 loopback 本地 MCP 只接受 header 传 Bridge Token，禁止 query param（防止进 access log / 浏览器历史）
     let token = req.headers['x-bridge-token'];
     if (!token) {
       const authHeader = req.headers['authorization'] || '';

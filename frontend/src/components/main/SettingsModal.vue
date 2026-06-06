@@ -9,6 +9,32 @@ import IpFilterTab from '@/components/main/IpFilterTab.vue';
 interface Props {
   open: boolean;
 }
+
+type SecurityMode = 'strict' | 'standard' | 'trusted';
+
+interface SecuritySettings {
+  securityMode: SecurityMode;
+  agentPrivilegeIsolation: boolean;
+  agentUser: string;
+  updatedAt?: string | null;
+}
+
+interface SecuritySettingsResponse {
+  ok?: boolean;
+  settings?: SecuritySettings;
+  modes?: string[];
+}
+
+interface AgentUserInitResponse {
+  ok?: boolean;
+  hostId?: string;
+  agentUser?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  durationMs?: number;
+}
+
 const props = defineProps<Props>();
 const emit = defineEmits<{ close: [] }>();
 
@@ -17,7 +43,14 @@ const { requestJson } = useApiClient();
 const notify = useNotifyStore();
 const chat = useAiChat();
 
-type Tab = 'account' | 'ipfilter' | 'aiconfig';
+const SECURITY_MODES: SecurityMode[] = ['strict', 'standard', 'trusted'];
+const SECURITY_MODE_LABELS: Record<SecurityMode, string> = {
+  strict: '严格 strict',
+  standard: '标准 standard',
+  trusted: '信任直通 trusted',
+};
+
+type Tab = 'account' | 'ipfilter' | 'aiconfig' | 'security';
 const tab = ref<Tab>('account');
 
 const username = ref('');
@@ -32,6 +65,18 @@ const aiError = ref('');
 const fetching = ref(false);
 const modelsHints = ref<string[]>([]);
 
+const securityLoading = ref(false);
+const securitySaving = ref(false);
+const securityError = ref('');
+const securityModes = ref<SecurityMode[]>([...SECURITY_MODES]);
+const securityMode = ref<SecurityMode>('strict');
+const securitySettingsLoaded = ref(false);
+const agentPrivilegeIsolation = ref(false);
+const agentUser = ref('oneshell-agent');
+const initHostId = ref('local');
+const initLoading = ref(false);
+const initResult = ref('');
+
 watch(() => props.open, (v) => {
   if (v) {
     tab.value = 'account';
@@ -39,6 +84,7 @@ watch(() => props.open, (v) => {
     password.value = '';
     passwordConfirm.value = '';
     errorMsg.value = '';
+    securitySettingsLoaded.value = false;
   }
 });
 
@@ -49,6 +95,8 @@ watch(tab, (t) => {
     model.value = chat.config.value.model;
     aiError.value = '';
     modelsHints.value = [];
+  } else if (t === 'security') {
+    void loadSecuritySettings();
   }
 });
 
@@ -123,6 +171,86 @@ function onAiSubmit(e: Event): void {
   });
   notify.success('AI 配置已保存');
 }
+
+function isSecurityMode(value: string): value is SecurityMode {
+  return SECURITY_MODES.includes(value as SecurityMode);
+}
+
+async function loadSecuritySettings(): Promise<void> {
+  if (securitySettingsLoaded.value || securityLoading.value) return;
+  securityError.value = '';
+  securityLoading.value = true;
+  try {
+    const res = await requestJson<SecuritySettingsResponse>('/api/security/settings');
+    const modes = Array.isArray(res.modes) ? res.modes.filter(isSecurityMode) : [];
+    if (modes.length) securityModes.value = modes;
+    if (res.settings) applySecuritySettings(res.settings);
+    securitySettingsLoaded.value = true;
+  } catch (err) {
+    securityError.value = (err as Error).message || '加载安全设置失败';
+  } finally {
+    securityLoading.value = false;
+  }
+}
+
+function applySecuritySettings(settings: SecuritySettings): void {
+  securityMode.value = isSecurityMode(settings.securityMode) ? settings.securityMode : 'strict';
+  agentPrivilegeIsolation.value = settings.agentPrivilegeIsolation === true;
+  agentUser.value = settings.agentUser || 'oneshell-agent';
+}
+
+async function onSecuritySubmit(e: Event): Promise<void> {
+  e.preventDefault();
+  securityError.value = '';
+  if (agentPrivilegeIsolation.value && !agentUser.value.trim()) {
+    securityError.value = '启用 Agent 权限隔离时必须填写普通用户';
+    return;
+  }
+  securitySaving.value = true;
+  try {
+    const res = await requestJson<SecuritySettingsResponse>('/api/security/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        securityMode: securityMode.value,
+        agentPrivilegeIsolation: agentPrivilegeIsolation.value,
+        agentUser: agentUser.value.trim() || 'oneshell-agent',
+      }),
+    });
+    if (res.settings) applySecuritySettings(res.settings);
+    notify.success('安全设置已保存');
+  } catch (err) {
+    securityError.value = (err as Error).message || '保存安全设置失败';
+  } finally {
+    securitySaving.value = false;
+  }
+}
+
+async function onInitAgentUser(): Promise<void> {
+  securityError.value = '';
+  initResult.value = '';
+  if (!agentUser.value.trim()) {
+    securityError.value = '请先填写 Agent 普通用户';
+    return;
+  }
+  initLoading.value = true;
+  try {
+    const res = await requestJson<AgentUserInitResponse>('/api/security/agent-user/init', {
+      method: 'POST',
+      body: JSON.stringify({ hostId: initHostId.value.trim() || 'local', agentUser: agentUser.value.trim() }),
+    });
+    initResult.value = [
+      `exitCode=${res.exitCode ?? 0}`,
+      res.stdout ? `stdout:\n${res.stdout}` : '',
+      res.stderr ? `stderr:\n${res.stderr}` : '',
+    ].filter(Boolean).join('\n');
+    if (res.ok) notify.success('Agent 普通用户初始化完成');
+    else securityError.value = '初始化未成功，请查看输出';
+  } catch (err) {
+    securityError.value = (err as Error).message || '初始化失败';
+  } finally {
+    initLoading.value = false;
+  }
+}
 </script>
 
 <template>
@@ -159,6 +287,11 @@ function onAiSubmit(e: Event): void {
             :class="tab === 'aiconfig' ? 'bg-blue-500 text-white' : 'border border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500'"
             @click="tab = 'aiconfig'"
           >AI 配置</button>
+          <button
+            class="h-8 px-4 rounded-lg text-xs font-semibold transition-all"
+            :class="tab === 'security' ? 'bg-blue-500 text-white' : 'border border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500'"
+            @click="tab = 'security'"
+          >安全</button>
         </div>
 
         <div class="mx-5 mt-3 flex items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50/70 px-3 py-2 dark:border-cyan-500/20 dark:bg-cyan-500/10">
@@ -217,7 +350,7 @@ function onAiSubmit(e: Event): void {
         <IpFilterTab v-else-if="tab === 'ipfilter'" />
 
         <!-- AI 配置 -->
-        <form v-else class="p-5 flex flex-col gap-4" autocomplete="off" @submit="onAiSubmit">
+        <form v-else-if="tab === 'aiconfig'" class="p-5 flex flex-col gap-4" autocomplete="off" @submit="onAiSubmit">
           <div class="flex flex-col gap-1.5">
             <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">API 基础地址</label>
             <input
@@ -267,6 +400,80 @@ function onAiSubmit(e: Event): void {
               type="submit"
               class="h-9 px-5 rounded-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-semibold shadow-md hover:shadow-lg transition-all"
             >保存配置</button>
+          </div>
+        </form>
+
+        <!-- 安全设置 -->
+        <form v-else class="p-5 flex flex-col gap-4" autocomplete="off" @submit="onSecuritySubmit">
+          <div v-if="securityLoading" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-[#1e293b] dark:bg-[#0b1324] dark:text-slate-400">
+            正在加载安全设置…
+          </div>
+
+          <div class="rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+            安全默认兼顾个人使用体验和高风险操作保护；如果你要保持当前权限体验，可以关闭 Agent 权限隔离或切到“信任直通”。降级会写入审计。
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">安全档位</label>
+            <select
+              v-model="securityMode"
+              class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+            >
+              <option v-for="m in securityModes" :key="m" :value="m">{{ SECURITY_MODE_LABELS[m] }}</option>
+            </select>
+            <div class="text-[11px] text-slate-400">strict：高危需审批/关键风险阻断；trusted：回到更自由的个人使用体验，但灾难命令仍保留红线。</div>
+          </div>
+
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324]">
+            <input v-model="agentPrivilegeIsolation" type="checkbox" class="mt-1" />
+            <span>
+              <span class="block text-sm font-semibold text-slate-700 dark:text-slate-200">启用 Agent 权限隔离</span>
+              <span class="mt-1 block text-xs text-slate-500 dark:text-slate-400">AI 命令会包裹为普通用户执行。关闭后恢复目前 root/当前用户直通权限水平。</span>
+            </span>
+          </label>
+
+          <div class="flex flex-col gap-1.5">
+            <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">Agent 普通用户</label>
+            <input
+              v-model="agentUser"
+              type="text"
+              placeholder="oneshell-agent"
+              class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+            />
+            <div class="text-[11px] text-slate-400">启用前请先在目标 Linux 主机初始化该用户；下方按钮会创建用户并写入只读 sudo 白名单。</div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-[#1e293b] dark:bg-white/[0.03]">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">初始化 Agent 普通用户</div>
+                <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">在目标 Linux 主机上创建用户并写入只读 sudo 白名单。需要当前连接用户具备 root 权限。</div>
+              </div>
+            </div>
+            <div class="mt-3 flex gap-2">
+              <input
+                v-model="initHostId"
+                type="text"
+                placeholder="local 或主机 ID"
+                class="flex-1 h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+              />
+              <button
+                type="button"
+                class="h-9 px-3 rounded-lg border border-emerald-200 bg-emerald-50 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200 disabled:opacity-50"
+                :disabled="initLoading"
+                @click="onInitAgentUser"
+              >{{ initLoading ? '初始化中…' : '初始化' }}</button>
+            </div>
+            <pre v-if="initResult" class="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-[11px] text-slate-100">{{ initResult }}</pre>
+          </div>
+
+          <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-[#1e293b]">
+            <div class="text-red-500 text-xs">{{ securityError }}</div>
+            <button
+              type="submit"
+              class="h-9 px-5 rounded-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-semibold shadow-md hover:shadow-lg transition-all disabled:opacity-50"
+              :disabled="securitySaving"
+            >{{ securitySaving ? '保存中…' : '保存安全设置' }}</button>
           </div>
         </form>
       </div>

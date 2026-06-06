@@ -11,7 +11,24 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useHostsStore } from '@/stores/hosts';
 import { useNotifyStore } from '@/stores/notify';
+import { bindIdeStreamHandlers } from '@/utils/ideStreamEvents';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
+import { createStreamDeltaBuffer } from '@/utils/streaming';
+import {
+  appendAiLine,
+  appendAiStreamDelta,
+  appendAiToolLog,
+  createAiAssistantTurn,
+  createAiUserTurn,
+  finishAiToolCall,
+  markAiAssistantStatus,
+  startAiToolCall,
+  type AiAgentTurn,
+  type AiAssistantTurn,
+  type AiLineKind,
+  type AiTextLine,
+  type AiToolCallState,
+} from '@/utils/aiMessages';
 
 interface MinimalSocket {
   connected?: boolean;
@@ -22,28 +39,9 @@ interface MinimalSocket {
   off?(event: string, listener?: (...args: unknown[]) => void): unknown;
 }
 
-type LineKind = 'stdout' | 'stderr' | 'info' | 'error' | 'success' | 'stream';
-
-export interface IdeLine {
-  kind: LineKind;
-  text: string;
-}
-
-export interface IdeToolCall {
-  toolUseId: string;
-  name: string;
-  status: 'running' | 'done' | 'error';
-  startedAt: number;
-  durationMs?: number;
-}
-
-export interface IdeTurn {
-  role: 'user' | 'assistant';
-  /** user：纯文本；assistant：line 序列（流式 push） */
-  text?: string;
-  lines?: IdeLine[];
-  toolCalls?: IdeToolCall[];
-}
+export type IdeLine = AiTextLine;
+export type IdeToolCall = AiToolCallState;
+export type IdeTurn = AiAgentTurn;
 
 export interface IdeApproveRequest {
   requestId: string;
@@ -79,7 +77,9 @@ export interface IdePanelApi {
   approveCustom(): void;
 }
 
-let _instance: IdePanelApi | null = null;
+type InternalIdePanelApi = IdePanelApi & { dispose(): void };
+
+let _instance: InternalIdePanelApi | null = null;
 
 export function useIdePanel(): IdePanelApi {
   if (!_instance) _instance = create();
@@ -87,6 +87,7 @@ export function useIdePanel(): IdePanelApi {
 }
 
 export function _resetIdePanelSingleton(): void {
+  _instance?.dispose();
   _instance = null;
 }
 
@@ -99,7 +100,7 @@ function genSessionId(): string {
   return 'ide-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
-function create(): IdePanelApi {
+function create(): InternalIdePanelApi {
   const sessionTerminal = useSessionTerminal();
   const hosts = useHostsStore();
   const notify = useNotifyStore();
@@ -108,7 +109,7 @@ function create(): IdePanelApi {
   const isRunning = ref(false);
   const inputText = ref('');
   const statusText = ref('待命');
-  const safeMode = ref(true);
+  const safeMode = ref(false);
   const claudeCodeEnabled = ref(false);
   const unlimitedTurns = ref(false);
 
@@ -120,12 +121,13 @@ function create(): IdePanelApi {
 
   let sessionId: string | null = null;
   let socket: MinimalSocket | null = null;
-  let currentAssistant: IdeTurn | null = null;
+  let currentAssistant: AiAssistantTurn | null = null;
   let currentTextHadDelta = false;
   let stopFallbackHandle: number | null = null;
   let sendAckHandle: number | null = null;
   let sendConnectHandle: number | null = null;
   let pendingConnectSend: (() => void) | null = null;
+  let streamCleanup: (() => void) | null = null;
   let activeRunId: string | null = null;
   let stopRequested = false;
   const stoppedRunIds = new Set<string>();
@@ -163,13 +165,13 @@ function create(): IdePanelApi {
   function setStatus(text: string): void { statusText.value = text; }
 
   function pushUser(text: string): void {
-    turns.value.push({ role: 'user', text });
+    turns.value.push(createAiUserTurn(text));
     currentAssistant = null;
   }
 
-  function ensureAssistant(): IdeTurn {
+  function ensureAssistant(): AiAssistantTurn {
     if (!currentAssistant) {
-      const t: IdeTurn = { role: 'assistant', lines: [] };
+      const t = createAiAssistantTurn();
       turns.value.push(t);
       currentAssistant = t;
     }
@@ -180,37 +182,23 @@ function create(): IdePanelApi {
     turns.value = [...turns.value];
   }
 
-  function appendLine(kind: LineKind, text: string): void {
+  function appendLine(kind: AiLineKind, text: string): void {
     const t = ensureAssistant();
-    t.lines!.push({ kind, text });
+    appendAiLine(t, kind, text);
     touchTurns();
   }
 
-  /** 流式增量追加 — RAF batched，避免每个 token 都触发 Vue 重渲染整个 turns 数组。 */
-  let pendingDelta = '';
-  let deltaRaf: number | null = null;
-  function flushDelta(): void {
-    deltaRaf = null;
-    const flushed = pendingDelta;
-    pendingDelta = '';
-    if (!flushed) return;
-    const t = ensureAssistant();
-    const lines = t.lines!;
-    const last = lines[lines.length - 1];
-    if (last && last.kind === 'stream') {
-      last.text += flushed;
-    } else {
-      lines.push({ kind: 'stream', text: flushed });
-      touchTurns();
-    }
-  }
+  const deltaBuffer = createStreamDeltaBuffer((flushed) => {
+    appendAiStreamDelta(ensureAssistant(), flushed);
+    touchTurns();
+  });
+
   function appendDelta(text: string): void {
-    pendingDelta += text;
-    if (deltaRaf !== null) return;
-    deltaRaf = requestAnimationFrame(flushDelta);
+    deltaBuffer.push(text);
   }
 
   function finalize(): void {
+    deltaBuffer.flushNow();
     isRunning.value = false;
     stopRequested = false;
     currentAssistant = null;
@@ -271,100 +259,107 @@ function create(): IdePanelApi {
   function bindSocket(): void {
     const s = getSocket();
     if (!s || socket === s) return;
+    streamCleanup?.();
+    streamCleanup = null;
     socket = s;
 
-    s.on('ide:thinking', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage;
-      if (!matchesCurrentRun(msg)) return;
-      currentTextHadDelta = false;
-      setStatus('思考中...');
-    });
-    s.on('ide:text', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage & { text?: string };
-      if (!matchesCurrentRun(msg) || !msg.text || currentTextHadDelta) return;
-      appendDelta(msg.text);
-    });
-    s.on('ide:text-delta', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage & { delta?: string };
-      if (!matchesCurrentRun(msg) || !msg.delta) return;
-      currentTextHadDelta = true;
-      setStatus('生成中...');
-      appendDelta(msg.delta);
-    });
-    s.on('ide:tool-start', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage & { name?: string; input?: unknown; toolUseId?: string };
-      if (!matchesCurrentRun(msg)) return;
-      const t = ensureAssistant();
-      if (!t.toolCalls) t.toolCalls = [];
-      t.toolCalls.push({
-        toolUseId: msg.toolUseId || `tool-${Date.now()}`,
-        name: msg.name || 'unknown',
-        status: 'running',
-        startedAt: Date.now(),
-      });
-      setStatus(msg.name ? `调用 ${msg.name}...` : '调用工具...');
-    });
-    s.on('ide:tool-end', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage & { result?: unknown; is_error?: boolean; toolUseId?: string };
-      if (!matchesCurrentRun(msg)) return;
-      const t = currentAssistant;
-      if (t?.toolCalls && msg.toolUseId) {
-        const call = t.toolCalls.find((c) => c.toolUseId === msg.toolUseId);
-        if (call) {
-          call.status = msg.is_error ? 'error' : 'done';
-          call.durationMs = Date.now() - call.startedAt;
+    streamCleanup = bindIdeStreamHandlers(s, [
+      ['ide:thinking', (msg: unknown) => {
+        const m = msg as IdeSocketMessage;
+        if (!matchesCurrentRun(m)) return;
+        currentTextHadDelta = false;
+        setStatus('思考中...');
+      }],
+      ['ide:text', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { text?: string };
+        if (!matchesCurrentRun(m) || !m.text || currentTextHadDelta) return;
+        appendDelta(m.text);
+      }],
+      ['ide:text-delta', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { delta?: string };
+        if (!matchesCurrentRun(m) || !m.delta) return;
+        currentTextHadDelta = true;
+        setStatus('生成中...');
+        appendDelta(m.delta);
+      }],
+      ['ide:tool-start', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { name?: string; input?: unknown; toolUseId?: string };
+        if (!matchesCurrentRun(m)) return;
+        deltaBuffer.flushNow();
+        startAiToolCall(ensureAssistant(), m.toolUseId || `tool-${Date.now()}`, m.name || 'unknown', m.input);
+        touchTurns();
+        setStatus(m.name ? `调用 ${m.name}...` : '调用工具...');
+      }],
+      ['ide:tool-delta', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { toolUseId?: string; stream?: string; text?: string };
+        if (!matchesCurrentRun(m) || !m.toolUseId || !m.text || !currentAssistant) return;
+        deltaBuffer.flushNow();
+        if (appendAiToolLog(currentAssistant, m.toolUseId, m.stream === 'stderr' ? 'stderr' : 'stdout', m.text)) {
+          touchTurns();
+          setStatus('工具执行中...');
         }
-      }
-      setStatus(msg.is_error ? '工具返回错误' : '思考中...');
-    });
-    s.on('ide:done', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage & { round?: number };
-      if (!matchesCurrentRun(msg)) return;
-      setStatus(`完成 (${msg.round ?? 0} 轮)`);
-      finalize();
-    });
-    s.on('ide:error', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage & { error?: string };
-      if (!matchesCurrentRun(msg)) return;
-      setStatus('出错');
-      appendLine('error', `✘ ${msg.error || '未知错误'}`);
-      finalize();
-    });
-    s.on('ide:cancelled', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage;
-      if (!matchesCurrentRun(msg, { allowStopped: true, allowAfterStop: true })) return;
-      rememberStoppedRun(msg.runId);
-      setStatus('已取消');
-      finalize();
-    });
+      }],
+      ['ide:tool-end', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { result?: unknown; is_error?: boolean; toolUseId?: string };
+        if (!matchesCurrentRun(m)) return;
+        if (currentAssistant && m.toolUseId && finishAiToolCall(currentAssistant, m.toolUseId, Boolean(m.is_error), m.result)) {
+          touchTurns();
+        }
+        setStatus(m.is_error ? '工具返回错误' : '思考中...');
+      }],
+      ['ide:done', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { round?: number };
+        if (!matchesCurrentRun(m)) return;
+        deltaBuffer.flushNow();
+        markAiAssistantStatus(currentAssistant, 'done');
+        touchTurns();
+        setStatus(`完成 (${m.round ?? 0} 轮)`);
+        finalize();
+      }],
+      ['ide:error', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { error?: string };
+        if (!matchesCurrentRun(m)) return;
+        setStatus('出错');
+        appendLine('error', `✘ ${m.error || '未知错误'}`);
+        finalize();
+      }],
+      ['ide:cancelled', (msg: unknown) => {
+        const m = msg as IdeSocketMessage;
+        if (!matchesCurrentRun(m, { allowStopped: true, allowAfterStop: true })) return;
+        deltaBuffer.flushNow();
+        markAiAssistantStatus(currentAssistant, 'cancelled');
+        touchTurns();
+        rememberStoppedRun(m.runId);
+        setStatus('已取消');
+        finalize();
+      }],
+      ['ide:approve-request', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & {
+          requestId?: string;
+          title?: string;
+          toolName?: string;
+          detail?: string;
+        };
+        if (!matchesCurrentRun(m) || !m.requestId) return;
 
-    s.on('ide:approve-request', (...args: unknown[]) => {
-      const msg = args[0] as IdeSocketMessage & {
-        requestId?: string;
-        title?: string;
-        toolName?: string;
-        detail?: string;
-      };
-      if (!matchesCurrentRun(msg) || !msg.requestId) return;
-
-      clearApproveTick();
-      approveCustomText.value = '';
-      approveRequest.value = {
-        requestId: msg.requestId,
-        sessionId: msg.sessionId!,
-        title: msg.title || '安全模式',
-        toolName: msg.toolName || '操作',
-        detail: msg.detail || '',
-        countdown: 120,
-      };
-      // 1:1 复刻 ide-panel.js:331-336 — 120s 倒计时,到 0 自动拒绝
-      approveTickHandle = window.setInterval(() => {
-        const req = approveRequest.value;
-        if (!req) { clearApproveTick(); return; }
-        req.countdown -= 1;
-        if (req.countdown <= 0) respondApprove('deny');
-      }, 1000);
-    });
+        clearApproveTick();
+        approveCustomText.value = '';
+        approveRequest.value = {
+          requestId: m.requestId,
+          sessionId: m.sessionId!,
+          title: m.title || '安全模式',
+          toolName: m.toolName || '操作',
+          detail: m.detail || '',
+          countdown: 120,
+        };
+        approveTickHandle = window.setInterval(() => {
+          const req = approveRequest.value;
+          if (!req) { clearApproveTick(); return; }
+          req.countdown -= 1;
+          if (req.countdown <= 0) respondApprove('deny');
+        }, 1000);
+      }],
+    ]);
   }
 
   function setSafeMode(v: boolean): void {
@@ -522,21 +517,34 @@ function create(): IdePanelApi {
     stopRequested = false;
     stoppedRunIds.clear();
     currentAssistant = null;
+    deltaBuffer.clear();
     turns.value = [];
     setStatus('待命');
   }
 
   let initialized = false;
+  let waitSocketHandle: number | null = null;
   function initialize(): void {
     if (initialized) return;
     initialized = true;
-    // socket 未就绪时轮询直至 getSocket 返回,与老 ide-panel.js:452-455 一致
-    const waitSocket = window.setInterval(() => {
+    waitSocketHandle = window.setInterval(() => {
       if (getSocket()) {
-        window.clearInterval(waitSocket);
+        if (waitSocketHandle !== null) window.clearInterval(waitSocketHandle);
+        waitSocketHandle = null;
         bindSocket();
       }
     }, 500);
+  }
+
+  function dispose(): void {
+    if (waitSocketHandle !== null) {
+      window.clearInterval(waitSocketHandle);
+      waitSocketHandle = null;
+    }
+    streamCleanup?.();
+    streamCleanup = null;
+    finalize();
+    socket = null;
   }
 
   return {
@@ -560,5 +568,6 @@ function create(): IdePanelApi {
     approveAllow,
     approveDeny,
     approveCustom,
+    dispose,
   };
 }

@@ -32,6 +32,10 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
     return `${proto}://${host}`;
   }
 
+  function resolveLoopbackServerUrl() {
+    return `http://127.0.0.1:${PORT}`;
+  }
+
   function maskToken(token) {
     if (!token || token.length < 12) return '****';
     return token.substring(0, 6) + '…' + token.substring(token.length - 4);
@@ -92,7 +96,7 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
     }
     try {
       const start = Date.now();
-      const resp = await fetch(`${serverUrl}/mcp/sse`, {
+      const resp = await fetch(`${resolveLoopbackServerUrl()}/mcp/sse`, {
         headers: { 'X-Bridge-Token': BRIDGE_TOKEN },
         signal: AbortSignal.timeout(3000),
       });

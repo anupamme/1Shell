@@ -15,7 +15,7 @@ export const useIdeStore = defineStore('ide', () => {
   const sessionId = ref<string | null>(null);
   const messages = ref<IdeMessage[]>([]);
   const thinking = ref(false);
-  const safeMode = ref(true);
+  const safeMode = ref(false);
   const claudeCodeEnabled = ref(false);
   const unlimitedTurns = ref(false);
 

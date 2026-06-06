@@ -10,6 +10,17 @@ export interface HostLink {
   description?: string;
 }
 
+export interface OsInfo {
+  os?: string | null;
+  distroId?: string | null;
+  versionId?: string | null;
+  prettyName?: string | null;
+  arch?: string | null;
+  kernel?: string | null;
+  source?: string | null;
+  detectedAt?: string | null;
+}
+
 export type HostAuthType = 'password' | 'privateKey';
 export type HostType = 'local' | 'ssh';
 export type HostRole = 'primary' | 'project' | 'probe' | 'proxy' | 'relay' | 'test' | 'archive';
@@ -37,6 +48,7 @@ export interface MainHost {
   links?: HostLink[];
   status?: string;
   tags?: string[];
+  osInfo?: OsInfo | null;
   preference?: HostPreference;
 }
 
@@ -103,6 +115,23 @@ export const LOCAL_HOST_ID = 'local';
 export const AUTH_TOKEN_KEY = 'auth_token'; // 向下兼容旧 useAuthStore key
 
 /* ───── 帮手 ────────────────────────────────────── */
+
+function cleanText(value: string | null | undefined): string | null {
+  const text = String(value || '').trim();
+  return text && text !== '--' ? text : null;
+}
+
+export function formatOsInfo(osInfo: OsInfo | null | undefined, fallbackPlatform: string | null | undefined = null): string {
+  const prettyName = cleanText(osInfo?.prettyName);
+  const distro = cleanText(osInfo?.distroId);
+  const version = cleanText(osInfo?.versionId);
+  const arch = cleanText(osInfo?.arch);
+  const kernel = cleanText(osInfo?.kernel);
+  const fallback = cleanText(fallbackPlatform);
+  const base = prettyName || [distro, version].filter(Boolean).join(' ') || cleanText(osInfo?.os) || fallback || '未知';
+  const extras = [arch, kernel].filter(Boolean);
+  return extras.length ? `${base} · ${extras.join(' / ')}` : base;
+}
 
 export function formatHostMeta(host: MainHost | null | undefined): string {
   if (!host) return '';

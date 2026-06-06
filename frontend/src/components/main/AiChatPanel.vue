@@ -4,24 +4,28 @@
 import { nextTick, onMounted, ref, watch } from 'vue';
 
 import { useAiChat } from '@/composables/useAiChat';
+import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
 const chat = useAiChat();
 const messagesEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
+let followOutput = true;
 
 onMounted(() => {
   chat.initialize();
-  scrollToBottom();
+  scrollToBottom(true);
 });
 
-// 消息列表变化 / 流式增量 → 滚到底（保留用户主动上滚行为：仅在原先就在底部时跟随）
-watch(() => chat.displayMessages.value.length, () => { void nextTick(scrollToBottom); });
-watch(() => chat.displayMessages.value, () => { void nextTick(scrollToBottom); }, { deep: true });
+watch(() => chat.displayMessages.value.length, () => { void nextTick(() => scrollToBottom()); });
+watch(() => chat.displayMessages.value, () => { void nextTick(() => scrollToBottom()); }, { deep: true });
 
-function scrollToBottom(): void {
+function onMessagesScroll(): void {
   const el = messagesEl.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
+  followOutput = !el || isNearScrollBottom(el);
+}
+
+function scrollToBottom(force = false): void {
+  scrollToBottomIfPinned(messagesEl.value, force || followOutput);
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -46,7 +50,7 @@ function onKeydown(event: KeyboardEvent): void {
     </div>
 
     <!-- messages -->
-    <div ref="messagesEl" class="ai-chat-messages">
+    <div ref="messagesEl" class="ai-chat-messages" @scroll="onMessagesScroll">
       <div
         v-for="(msg, i) in chat.displayMessages.value"
         :key="i"
@@ -55,7 +59,7 @@ function onKeydown(event: KeyboardEvent): void {
       >
         <div class="ai-chat-avatar">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
         <!-- html 已 escapeHtml + 安全 Markdown 转换 -->
-        <div class="ai-chat-bubble" v-html="msg.html" />
+        <div class="ai-chat-bubble markdown-body" v-html="msg.html" />
       </div>
     </div>
 
@@ -73,11 +77,18 @@ function onKeydown(event: KeyboardEvent): void {
         @keydown="onKeydown"
       />
       <button
+        v-if="!chat.isStreaming.value"
         type="button"
         class="ai-chat-send-btn"
-        :disabled="chat.isStreaming.value || !chat.inputText.value.trim()"
+        :disabled="!chat.inputText.value.trim()"
         @click="chat.sendMessage"
-      >{{ chat.isStreaming.value ? '发送中…' : '发送' }}</button>
+      >发送</button>
+      <button
+        v-else
+        type="button"
+        class="ai-chat-send-btn"
+        @click="chat.stopStreaming"
+      >停止</button>
     </div>
   </div>
 </template>

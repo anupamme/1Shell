@@ -58,9 +58,11 @@ const { createSshShellPool } = require('./src/services/ssh-shell-pool.service');
 const { createDatabase } = require('./src/database/db');
 const { createMcpService } = require('./src/mcp/mcp.service');
 const { createRemoteMcpService } = require('./src/services/remote-mcp.service');
+const { createSecuritySettingsService } = require('./src/services/security-settings.service');
 const { createBridgeRouter } = require('./src/routes/bridge.routes');
 const { createMcpRouter } = require('./src/routes/mcp.routes');
 const { createRemoteMcpRouter } = require('./src/routes/remote-mcp.routes');
+const { createSecuritySettingsRouter } = require('./src/routes/security-settings.routes');
 const { createAgentSetupRouter } = require('./src/routes/agent-setup.routes');
 const { createFileRouter } = require('./src/routes/file.routes');
 const { createAuthService } = require('./src/services/auth.service');
@@ -130,10 +132,9 @@ const probeAlertService = createProbeAlertService({ db, hostService, logger: log
 const probeAggregatorService = createProbeAggregatorService({ db, logger: log });
 probeService.refreshSnapshot().catch((error) => log.warn?.(`[probe] initial refresh failed: ${error.message}`));
 const bridgeService = createBridgeService({ hostService, auditService, sshPool, sshShellPool, commandGuard: createCommandGuard() });
+const securitySettingsService = createSecuritySettingsService({ dataDir, auditService, logger: log });
 // ─── Harness — AI 与外部世界的统一边界层 ────────────────────────────────
-// 立层（Phase A）：组装但暂只被 Program AI step 接管（Phase B，见 engine.js）。
-// 其余路径（IDE / MCP / core local）后续 Phase 接入。
-const harness = createHarness({ bridgeService, hostService, auditService, db, logger: log });
+const harness = createHarness({ bridgeService, hostService, auditService, db, logger: log, securitySettingsService });
 const probeDiagService = createProbeDiagService({ bridgeService, hostService, auditService, logger: log });
 const probeAgentInstallerService = createProbeAgentInstallerService({ rootDir: ROOT_DIR, bridgeService, hostService, probeAgentService, probeRelayService });
 const probeRelayInstallerService = createProbeRelayInstallerService({ rootDir: ROOT_DIR, hostService, bridgeService, probeRelayService });
@@ -173,29 +174,6 @@ const programEngine = createProgramEngine({
   harness,
   probeService,
 });
-const mcpService = createMcpService({
-  bridgeService,
-  hostService,
-  auditService,
-  bridgeToken: BRIDGE_TOKEN,
-  localMcpService,
-  localMcpDeployer,
-  mcpRegistry,
-  scriptService,
-  fileService,
-  programEngine,
-  programRegistry,
-  probeService,
-  probeAgentService,
-  probeAggregatorService,
-  probeTrafficService,
-  probeAlertService,
-  probeDiagService,
-  probeAgentInstallerService,
-  remoteMcpService,
-  harness,
-});
-
 // ─── IDE Service (自由创作引擎) ─────────────────────────────────────────
 const ideTools = createIdeTools({
   bridgeService,
@@ -235,17 +213,42 @@ const ideService = createIdeService({
   localMcpService,
   mcpRegistry,
   skillRegistry,
+  harness,
+});
+
+const mcpService = createMcpService({
+  bridgeService,
+  hostService,
+  auditService,
+  bridgeToken: BRIDGE_TOKEN,
+  localMcpService,
+  localMcpDeployer,
+  mcpRegistry,
+  scriptService,
+  fileService,
+  programEngine,
+  programRegistry,
+  probeService,
+  probeAgentService,
+  probeAggregatorService,
+  probeTrafficService,
+  probeAlertService,
+  probeDiagService,
+  probeAgentInstallerService,
+  remoteMcpService,
+  ideService,
+  harness,
 });
 
 // ─── 路由挂载 ───────────────────────────────────────────────────────────
-app.use('/api/auth', createAuthRouter(authService));
-
 // 健康检查：公开端点，无需鉴权（供 CI / K8s / 负载均衡器使用）
 app.use('/api', createHealthRouter({ isUsingFallbackSecret }));
 
-// IP 访问控制：在所有业务路由（含 bridge / mcp / proxy）之前执行。
+// IP 访问控制：在所有业务路由（含 auth / bridge / mcp / proxy）之前执行。
 // 默认全关（无规则时放行），一旦配置白/黑名单即覆盖全部端点，避免被 token 路由绕过。
 app.use(ipFilterService.ipFilterMiddleware);
+
+app.use('/api/auth', createAuthRouter(authService));
 
 // Bridge 内部 API 和 MCP 使用 BRIDGE_TOKEN 鉴权，不走 Web session
 app.use('/api', createBridgeRouter({ bridgeService }));
@@ -284,6 +287,7 @@ app.use('/api', createProbeAlertRouter({ alertService: probeAlertService }));
 app.use('/api', createProbeDiagRouter({ diagService: probeDiagService }));
 app.use('/api', createAgentSetupRouter({ proxyConfigStore, cliSandbox }));
 app.use('/api', createRemoteMcpRouter({ remoteMcpService, mcpService }));
+app.use('/api', createSecuritySettingsRouter({ securitySettingsService, bridgeService, hostService, auditService }));
 app.use('/api', createFileRouter({ fileService }));
 app.use('/api', createIpFilterRouter({ ipFilterService }));
 app.use('/api', createScriptRouter({ scriptService, aiService }));

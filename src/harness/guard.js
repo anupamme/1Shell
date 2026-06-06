@@ -6,38 +6,16 @@
  * 三件事，全部确定性（不调 LLM）：
  *   1. capability 准入（最小授权）—— checkCapabilities
  *   2. 灾难命令拦截（红线兜底）—— 复用 command-safety.assessCommandRisk
- *   3. 风险分级 —— 决定中危操作是否标记 needApproval（人在场时才会真正触发审批）
+ *   3. 高风险操作规则库 —— chmod/rm/curl|sh/防火墙/系统安全机制等中高危参数识别
  *
  * 返回约定（见 HARNESS_DESIGN.md §7）：
  *   - { allow: false, reason }                    → 直接拦截，命令不发出
- *   - { allow: true, needApproval, summary }      → 放行，needApproval 由风险分级决定
+ *   - { allow: true, needApproval, summary }      → 放行，但可能必须人审
  */
 
 const { assessCommandRisk } = require('../ai/command-safety');
 const { checkCapabilities } = require('./capabilities');
-
-// ─── 中危命令模式（放行但建议人审）────────────────────────────────────────
-// 这些不是灾难（不该硬挡），但有副作用，人在场时值得停一下确认。
-// 无人值守路径（allowApproval=false）下，needApproval 会被忽略，照常执行。
-const MEDIUM_RISK_PATTERNS = [
-  { id: 'rm-recursive', test: (t) => /\brm\b[^|;&]*-{1,2}[a-z]*r/i.test(t), label: '递归删除' },
-  { id: 'service-stop', test: (t) => /\bsystemctl\b[^|;&]*\b(stop|disable|mask|kill)\b/.test(t), label: '停止/禁用服务' },
-  { id: 'service-restart', test: (t) => /\bsystemctl\b[^|;&]*\b(restart|reload)\b/.test(t), label: '重启服务' },
-  { id: 'firewall', test: (t) => /\b(iptables|ufw|nft|firewall-cmd)\b/.test(t), label: '修改防火墙规则' },
-  { id: 'reboot', test: (t) => /\b(reboot|shutdown|halt|poweroff)\b/.test(t), label: '重启/关机' },
-  { id: 'pkg-remove', test: (t) => /\b(apt|apt-get|yum|dnf|pacman)\b[^|;&]*\b(remove|purge|erase|uninstall)\b/.test(t), label: '卸载软件包' },
-  { id: 'user-mgmt', test: (t) => /\b(userdel|deluser|passwd|usermod)\b/.test(t), label: '用户管理' },
-  { id: 'overwrite-redirect', test: (t) => /(?<![0-9>])>(?!>)/.test(t), label: '输出覆盖重定向' },
-];
-
-function assessMediumRisk(command) {
-  const text = String(command || '');
-  const matches = MEDIUM_RISK_PATTERNS.filter((item) => item.test(text));
-  return {
-    risky: matches.length > 0,
-    reason: matches.map((m) => m.label).join('、'),
-  };
-}
+const { classifyCommandRisk, assessMediumRisk, COMMAND_RISK_RULES } = require('./risk-rules');
 
 // 写类工具默认建议人审（人在场时）
 const WRITE_TOOLS_NEEDING_APPROVAL = new Set([
@@ -56,11 +34,19 @@ function summarize(toolName, input) {
   return { title: toolName, detail: JSON.stringify(input || {}).slice(0, 300) };
 }
 
+function formatRiskReason(verdict) {
+  if (!verdict?.risky) return '';
+  const reasons = Array.isArray(verdict.reasons) ? verdict.reasons.filter(Boolean) : [];
+  const mode = verdict.securityMode ? `安全档位=${verdict.securityMode}` : '';
+  const level = verdict.level ? `风险等级=${verdict.level}` : '';
+  return [reasons.join('、'), level, mode].filter(Boolean).join('；');
+}
+
 /**
  * @param {string} toolName
  * @param {object} input
  * @param {object} context  - 至少含 { capabilities }
- * @returns {{ allow:boolean, reason?:string, needApproval?:boolean, summary?:object, riskReason?:string }}
+ * @returns {{ allow:boolean, reason?:string, needApproval?:boolean, approvalRequired?:boolean, summary?:object, riskReason?:string, risk?:object }}
  */
 function check(toolName, input, context = {}) {
   const command = String(input?.command || '');
@@ -79,22 +65,48 @@ function check(toolName, input, context = {}) {
     }
   }
 
-  // ── 3. 风险分级 → needApproval（仅人在场时真正触发）──────────────
+  // ── 3. 高风险操作规则库────────────────────────────────────
   let needApproval = false;
+  let approvalRequired = false;
   let riskReason = '';
+  let risk = null;
+
   if (toolName === 'execute_command' || toolName === 'host_exec') {
-    const medium = assessMediumRisk(command);
-    if (medium.risky) { needApproval = true; riskReason = medium.reason; }
+    risk = classifyCommandRisk(command, { securityMode: context.securityMode });
+    if (risk.shouldBlock) {
+      return { allow: false, reason: `高风险操作阻断：${formatRiskReason(risk)}`, risk };
+    }
+    if (risk.approvalRequired) {
+      needApproval = true;
+      approvalRequired = true;
+      riskReason = formatRiskReason(risk);
+    } else if (risk.risky) {
+      riskReason = formatRiskReason(risk);
+    }
   } else if (WRITE_TOOLS_NEEDING_APPROVAL.has(toolName)) {
     needApproval = true;
+    approvalRequired = false;
     riskReason = '写/变更类操作';
   }
 
-  return { allow: true, needApproval, riskReason, summary: summarize(toolName, input || {}) };
+  return {
+    allow: true,
+    needApproval,
+    approvalRequired,
+    riskReason,
+    risk,
+    summary: summarize(toolName, input || {}),
+  };
 }
 
 function createGuard() {
   return { check };
 }
 
-module.exports = { check, createGuard, assessMediumRisk, MEDIUM_RISK_PATTERNS };
+module.exports = {
+  check,
+  createGuard,
+  assessMediumRisk,
+  MEDIUM_RISK_PATTERNS: COMMAND_RISK_RULES,
+  COMMAND_RISK_RULES,
+};

@@ -129,5 +129,27 @@ func buildPayload(hostID, agentVersion string, snap collector.Snapshot) map[stri
 			"txBps":   snap.Network.TxBps,
 		},
 		"processCount": snap.ProcessCount,
+		"systemHealth": map[string]any{
+			"network": map[string]any{
+				"listeningPortCount": snap.SystemHealth.Network.ListeningPortCount,
+				"tcpConnectionCount": snap.SystemHealth.Network.TCPConnectionCount,
+				"topListeningPorts":  snap.SystemHealth.Network.TopListeningPorts,
+			},
+			"process": map[string]any{
+				"zombieCount": snap.SystemHealth.Process.ZombieCount,
+			},
+			"service": map[string]any{
+				"failedServiceCount": snap.SystemHealth.Service.FailedServiceCount,
+				"failedServices":     snap.SystemHealth.Service.FailedServices,
+			},
+			"logs": map[string]any{
+				"recentErrorCount": snap.SystemHealth.Logs.RecentErrorCount,
+				"recentErrors":     snap.SystemHealth.Logs.RecentErrors,
+			},
+			"security": map[string]any{
+				"firewallState": snap.SystemHealth.Security.FirewallState,
+				"selinuxState":  snap.SystemHealth.Security.SELinuxState,
+			},
+		},
 	}
 }

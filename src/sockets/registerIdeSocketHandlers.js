@@ -1,5 +1,7 @@
 'use strict';
 
+const { emitIdeEvent } = require('../ide/ide.events');
+
 /**
  * IDE Socket Handlers
  *
@@ -8,14 +10,9 @@
  *   ide:stop      { sessionId }
  *   ide:clear     { sessionId }
  *
- * 事件（后端 → 前端，由 ide.service 内部 emit）：
- *   ide:thinking     { sessionId }
- *   ide:text         { sessionId, text }
- *   ide:tool-start   { sessionId, toolUseId, name, input }
- *   ide:tool-end     { sessionId, toolUseId, name, result, is_error }
- *   ide:done         { sessionId, round }
- *   ide:error        { sessionId, error }
- *   ide:cancelled    { sessionId }
+ * 事件（后端 → 前端）：
+ *   兼容事件仍保留：ide:thinking / ide:text-delta / ide:text / ide:tool-start / ide:tool-end / ide:done / ide:error / ide:cancelled
+ *   同时额外发统一事件：ide:event { v, type, sessionId, runId, payload, ts }
  */
 function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, mcpRegistry }) {
   io.on('connection', (socket) => {
@@ -50,7 +47,7 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
         unlimitedTurns: payload.unlimitedTurns,
         entry: payload.entry || payload.source || '',
       })).catch((err) => {
-        socket.emit('ide:error', { sessionId, error: err?.message || 'ide:message 处理失败' });
+        emitIdeEvent(socket, 'ide:error', { sessionId, error: err?.message || 'ide:message 处理失败' });
       });
     });
 
@@ -58,7 +55,7 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
       if (typeof reply !== 'function') reply = () => {};
       const sessionId = String(payload.sessionId || '').trim();
       const cancelled = sessionId ? ideService.cancelSession(sessionId) : false;
-      if (sessionId && !cancelled) socket.emit('ide:cancelled', { sessionId });
+      if (sessionId && !cancelled) emitIdeEvent(socket, 'ide:cancelled', { sessionId });
       reply({ ok: true, cancelled });
     });
 
@@ -98,7 +95,7 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
       const sessionId = String(payload.sessionId || '').trim();
       if (!sessionId) return reply({ ok: false, error: 'sessionId 为必填' });
       const result = ideService.recordAuthoringUserReply?.(sessionId, payload) || { ok: false, error: '服务未初始化' };
-      if (result.ok && result.session) socket.emit('ide:authoring-session', { sessionId, session: result.session });
+      if (result.ok && result.session) emitIdeEvent(socket, 'ide:authoring-session', { sessionId, session: result.session });
       reply(result);
     });
 
@@ -126,7 +123,7 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
       if (!server.exposeToIde) return reply({ ok: false, error: '该 MCP 未开放给 IDE AI' });
       if (server.type !== 'local' && !server.command) return reply({ ok: false, error: '该 MCP 不是本地类型' });
       const result = await localMcpService.start(mcpId, server.command, { cwd: server.installDir || undefined });
-      io.emit('ide:mcp-status', { mcpId, ...localMcpService.getStatus(mcpId) });
+      emitIdeEvent(io, 'ide:mcp-status', { mcpId, ...localMcpService.getStatus(mcpId) });
       reply(result);
     });
 
@@ -135,7 +132,7 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
       if (!localMcpService) return reply({ ok: false });
       const mcpId = String(payload.mcpId || '').trim();
       if (mcpId) localMcpService.stop(mcpId);
-      io.emit('ide:mcp-status', { mcpId, status: 'stopped', tools: [] });
+      emitIdeEvent(io, 'ide:mcp-status', { mcpId, status: 'stopped', tools: [] });
       reply({ ok: true });
     });
 

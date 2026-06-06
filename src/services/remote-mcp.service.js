@@ -3,21 +3,19 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { TRUSTED_PROXY_IPS } = require('../config/env');
 
 const DEFAULT_ALLOWED_TOOLS = [
   'list_hosts',
-  'list_scripts',
-  'query_audit',
-  'list_probes',
-  'get_probe',
-  'get_probe_samples',
-  'get_probe_timeseries',
-  'get_probe_traffic',
-  'list_probe_alerts',
-  'probe_diag_ping',
-  'probe_diag_http',
-  'probe_diag_dns',
+  'host_exec',
+  'list_remote_dir',
+  'read_remote_file',
+  'write_remote_file',
+  'upload_file',
+  'download_file',
+  'ask_1shell_ai',
 ];
+const DEFAULT_ALLOWED_TOOL_SET = new Set(DEFAULT_ALLOWED_TOOLS);
 
 function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
   const filePath = path.join(dataDir, 'remote-mcp.json');
@@ -172,7 +170,7 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
         allowedTools: [...DEFAULT_ALLOWED_TOOLS],
       },
       request,
-      warnings: buildWarnings(config, request),
+      warnings: buildWarnings(config, request, state.tokens.map(publicToken)),
     };
   }
 
@@ -229,6 +227,31 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
     return tools.filter((tool) => allowed.has(tool.name));
   }
 
+  function pruneAllowedTools(knownToolNames = []) {
+    const known = new Set(cleanStringList(knownToolNames));
+    if (known.size === 0) return readConfig();
+    const state = readState();
+    let changed = false;
+    const prune = (list) => cleanStringList(list).filter((name) => known.has(name));
+    const nextAllowedTools = prune(state.allowedTools);
+    if (nextAllowedTools.length !== state.allowedTools.length || nextAllowedTools.some((name, i) => name !== state.allowedTools[i])) {
+      state.allowedTools = nextAllowedTools;
+      changed = true;
+    }
+    for (const token of state.tokens) {
+      const nextTokenTools = prune(token.allowedTools);
+      if (nextTokenTools.length !== token.allowedTools.length || nextTokenTools.some((name, i) => name !== token.allowedTools[i])) {
+        token.allowedTools = nextTokenTools;
+        changed = true;
+      }
+    }
+    if (changed) {
+      state.updatedAt = new Date().toISOString();
+      writeState(state);
+    }
+    return publicConfig(state);
+  }
+
   function auditDenied(action, request, extra = {}) {
     auditService?.log?.({
       action,
@@ -246,13 +269,15 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
   }
 
   function inspectRequest(req) {
-    const host = String(req.headers?.['x-forwarded-host'] || req.headers?.host || '').trim();
+    const socketIp = getSocketIp(req);
+    const trustForwarded = isTrustedProxyIp(socketIp);
+    const host = String((trustForwarded && req.headers?.['x-forwarded-host']) || req.headers?.host || '').trim();
     const hostname = stripPort(host).toLowerCase();
-    const protocol = String(req.headers?.['x-forwarded-proto'] || req.protocol || '').split(',')[0].trim().toLowerCase() || 'http';
-    const clientIp = getClientIp(req);
+    const protocol = String((trustForwarded && req.headers?.['x-forwarded-proto']) || req.protocol || '').split(',')[0].trim().toLowerCase() || 'http';
+    const clientIp = getClientIp(req, trustForwarded);
     const origin = String(req.headers?.origin || '').trim();
     const localHost = isLocalHostname(hostname);
-    const localClient = isLocalIp(getSocketIp(req));
+    const localClient = isLocalIp(socketIp);
     return {
       host,
       hostname,
@@ -264,16 +289,21 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
     };
   }
 
-  function buildWarnings(config, request) {
+  function buildWarnings(config, request, tokens = null) {
     const warnings = [];
     if (!config.enabled) warnings.push('Remote MCP 当前未启用，仅本地 / localhost MCP 可用。');
     if (config.enabled && config.requireHttps) warnings.push('已要求 Remote MCP 必须通过 HTTPS 或 X-Forwarded-Proto=https 访问。');
     if (config.enabled && config.allowedHosts.length === 0) warnings.push('Remote MCP 未配置 allowedHosts，建议绑定公网域名。');
     if (config.enabled && config.allowedOrigins.length === 0) warnings.push('未允许任何浏览器 Origin；CLI/IDE 客户端通常不带 Origin，可正常连接。');
     if (config.enabled && config.allowedTools.length === 0) warnings.push('Remote MCP allowedTools 为空，远程客户端将看不到工具。');
-    if (config.enabled && listTokens().filter((token) => !token.revokedAt).length === 0) warnings.push('Remote MCP 已启用但没有可用专用 Token。');
+    const tokenList = Array.isArray(tokens) ? tokens : listTokens();
+    if (config.enabled && tokenList.filter((token) => !token.revokedAt).length === 0) warnings.push('Remote MCP 已启用但没有可用专用 Token。');
     if (request?.exposure === 'remote' && config.requireHttps && request.protocol !== 'https') warnings.push('当前请求不是 HTTPS，启用 requireHttps 后会被拒绝。');
     return warnings;
+  }
+
+  function pruneToolList(list, known = DEFAULT_ALLOWED_TOOL_SET) {
+    return cleanStringList(list).filter((name) => known.has(name));
   }
 
   function normalizeState(state = {}) {
@@ -285,7 +315,7 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
       requireHttps: state.requireHttps !== false,
       allowedOrigins: cleanStringList(state.allowedOrigins),
       allowedHosts: cleanStringList(state.allowedHosts).map(stripPort).filter(Boolean),
-      allowedTools: Array.isArray(state.allowedTools) ? cleanStringList(state.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
+      allowedTools: Array.isArray(state.allowedTools) ? pruneToolList(state.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
       tokens: Array.isArray(state.tokens) ? state.tokens.map(normalizeTokenRecord).filter(Boolean) : [],
       updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : null,
     };
@@ -298,7 +328,7 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
       requireHttps: state.requireHttps !== false,
       allowedOrigins: cleanStringList(state.allowedOrigins),
       allowedHosts: cleanStringList(state.allowedHosts),
-      allowedTools: Array.isArray(state.allowedTools) ? cleanStringList(state.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
+      allowedTools: Array.isArray(state.allowedTools) ? pruneToolList(state.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
       updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : null,
     };
   }
@@ -314,7 +344,7 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
       lastUsedAt: typeof record.lastUsedAt === 'string' ? record.lastUsedAt : null,
       revokedAt: typeof record.revokedAt === 'string' ? record.revokedAt : null,
       expiresAt: normalizeExpiresAt(record.expiresAt),
-      allowedTools: Array.isArray(record.allowedTools) ? cleanStringList(record.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
+      allowedTools: Array.isArray(record.allowedTools) ? pruneToolList(record.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
       allowedHosts: Array.isArray(record.allowedHosts) ? cleanStringList(record.allowedHosts) : [],
       allowedScripts: Array.isArray(record.allowedScripts) ? cleanStringList(record.allowedScripts) : [],
       allowedPaths: Array.isArray(record.allowedPaths) ? cleanStringList(record.allowedPaths) : [],
@@ -330,7 +360,7 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
       lastUsedAt: record.lastUsedAt,
       revokedAt: record.revokedAt,
       expiresAt: record.expiresAt,
-      allowedTools: Array.isArray(record.allowedTools) ? cleanStringList(record.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
+      allowedTools: Array.isArray(record.allowedTools) ? pruneToolList(record.allowedTools) : [...DEFAULT_ALLOWED_TOOLS],
       allowedHosts: Array.isArray(record.allowedHosts) ? cleanStringList(record.allowedHosts) : [],
       allowedScripts: Array.isArray(record.allowedScripts) ? cleanStringList(record.allowedScripts) : [],
       allowedPaths: Array.isArray(record.allowedPaths) ? cleanStringList(record.allowedPaths) : [],
@@ -384,12 +414,22 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
   }
 
   function isLocalIp(ip) {
-    const clean = String(ip || '').replace(/^::ffff:/, '');
+    const clean = normalizeIp(ip);
     return clean === '127.0.0.1' || clean === '::1' || clean === 'localhost' || clean === '' || clean === 'unknown';
   }
 
-  function getClientIp(req) {
-    const forwarded = req.headers?.['x-forwarded-for'];
+  function normalizeIp(ip) {
+    return String(ip || '').trim().replace(/^::ffff:/, '');
+  }
+
+  function isTrustedProxyIp(ip) {
+    const clean = normalizeIp(ip);
+    if (isLocalIp(clean)) return true;
+    return TRUSTED_PROXY_IPS.map(normalizeIp).includes(clean);
+  }
+
+  function getClientIp(req, trustForwarded = isTrustedProxyIp(getSocketIp(req))) {
+    const forwarded = trustForwarded ? req.headers?.['x-forwarded-for'] : '';
     if (forwarded) return String(forwarded).split(',')[0].trim();
     return getSocketIp(req);
   }
@@ -428,6 +468,7 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
     validateToken,
     isToolAllowed,
     filterTools,
+    pruneAllowedTools,
   };
 }
 

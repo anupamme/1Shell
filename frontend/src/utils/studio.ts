@@ -1,6 +1,8 @@
 // studio.ts — IDE 工作台 (skill-studio) 类型定义
 // 与老 skill-studio.js 字段 1:1 对应
 
+import type { AiLineKind as SharedAiLineKind } from '@/utils/aiMessages';
+
 /* ───── 基础实体 ──────────────────────────────────── */
 
 export interface HostInfo {
@@ -85,7 +87,7 @@ export interface FpItem {
 
 /* ───── chat 消息 / session ───────────────────────── */
 
-export type AiLineKind = 'stdout' | 'stderr' | 'info' | 'thought' | 'error' | 'success' | 'stream';
+export type AiLineKind = SharedAiLineKind;
 
 export interface UserMessage {
   role: 'user';

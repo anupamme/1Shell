@@ -378,6 +378,41 @@ const migrations = [
       `);
     },
   },
+  {
+    version: 8,
+    name: 'harness_traces: security risk metadata',
+    up(db) {
+      const columns = db.prepare('PRAGMA table_info(harness_traces)').all().map((row) => row.name);
+      const addColumn = (name, ddl) => {
+        if (!columns.includes(name)) db.exec(`ALTER TABLE harness_traces ADD COLUMN ${ddl}`);
+      };
+      addColumn('security_mode', 'security_mode TEXT');
+      addColumn('risk_level', 'risk_level TEXT');
+      addColumn('risk_rules', 'risk_rules TEXT');
+      addColumn('risk_action', 'risk_action TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_trace_risk_level ON harness_traces(risk_level);
+        CREATE INDEX IF NOT EXISTS idx_trace_security_mode ON harness_traces(security_mode);
+      `);
+    },
+  },
+  {
+    version: 9,
+    name: 'harness_traces: reasoning chain stages',
+    up(db) {
+      const columns = db.prepare('PRAGMA table_info(harness_traces)').all().map((row) => row.name);
+      const addColumn = (name, ddl) => {
+        if (!columns.includes(name)) db.exec(`ALTER TABLE harness_traces ADD COLUMN ${ddl}`);
+      };
+      addColumn('stage', 'stage TEXT');
+      addColumn('event_type', 'event_type TEXT');
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_trace_stage ON harness_traces(stage);
+        CREATE INDEX IF NOT EXISTS idx_trace_event_type ON harness_traces(event_type);
+        CREATE INDEX IF NOT EXISTS idx_trace_session ON harness_traces(session_id);
+      `);
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

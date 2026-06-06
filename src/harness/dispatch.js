@@ -69,33 +69,53 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
     }
 
     if (!verdict.allow) {
-      trace.end(traceId, { blocked: true, reason: verdict.reason });
+      recordSecurityEvent(trace, toolName, input, context, verdict, 'blocked');
+      trace.end(traceId, { blocked: true, reason: verdict.reason, risk: verdict.risk });
       auditService?.log?.({
         action: 'harness_blocked',
         source: context.source || 'harness',
         hostId: context.hostId || (input && input.hostId) || null,
         command: redactText(String(input.command || summarize(toolName, input)), context.secrets).slice(0, 2000),
         error: verdict.reason,
+        details: formatRiskDetails(verdict.risk),
       });
       return { content: `[harness] 已拦截：${verdict.reason}`, is_error: true };
     }
 
     // ── 2. 人审 gate（仅人在场的上下文）────────────────────────
+    let approvalGranted = false;
     if (verdict.needApproval && context.allowApproval && typeof context.requestApproval === 'function') {
-      let approved = false;
       try {
-        approved = await context.requestApproval(toolName, input, verdict.summary, verdict.riskReason);
+        approvalGranted = await context.requestApproval(toolName, input, verdict.summary, verdict.riskReason);
       } catch (err) {
         // 审批流程异常（如取消）→ 视为拒绝
         trace.end(traceId, { denied: true, reason: `approval error: ${err.message}` });
         return { content: `[harness] 审批中断：${err.message}`, is_error: true };
       }
-      if (!approved) {
-        trace.end(traceId, { denied: true, reason: '用户拒绝' });
+      if (!approvalGranted) {
+        trace.end(traceId, { denied: true, reason: '用户拒绝', risk: verdict.risk });
         return { content: '[harness] 用户拒绝了此操作', is_error: true };
       }
     }
-    // Program AI step：allowApproval=false → 此分支永不进入，零等待
+    if (verdict.approvalRequired && !approvalGranted) {
+      const reason = verdict.riskReason || '当前操作需要人工审批';
+      recordSecurityEvent(trace, toolName, input, context, verdict, 'approval_required');
+      trace.end(traceId, { denied: true, reason: `approval required: ${reason}`, risk: verdict.risk });
+      auditService?.log?.({
+        action: 'harness_approval_required',
+        source: context.source || 'harness',
+        hostId: context.hostId || (input && input.hostId) || null,
+        command: redactText(String(input.command || summarize(toolName, input)), context.secrets).slice(0, 2000),
+        error: reason,
+        details: formatRiskDetails(verdict.risk),
+      });
+      return { content: `[harness] 需要人工审批，已拒绝自动执行：${reason}`, is_error: true };
+    }
+    // Program AI step：allowApproval=false → 需审批风险会在这里拒绝，避免默认放行。
+
+    if (verdict.risk?.risky) {
+      recordSecurityEvent(trace, toolName, input, context, verdict, verdict.risk.action || 'checked');
+    }
 
     // ── 3. 执行（派发底层执行器）────────────────────────────────
     let result;
@@ -119,6 +139,7 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
     trace.end(traceId, {
       result: safe,
       exitCode: typeof safe?.exitCode === 'number' ? safe.exitCode : undefined,
+      risk: verdict.risk,
     });
 
     return toToolResult(safe);
@@ -128,6 +149,45 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
 function summarize(toolName, input) {
   if (input && input.command) return String(input.command);
   try { return `${toolName} ${JSON.stringify(input || {})}`; } catch { return toolName; }
+}
+
+function formatRiskDetails(risk) {
+  if (!risk?.risky) return null;
+  try {
+    return JSON.stringify({
+      securityMode: risk.securityMode,
+      level: risk.level,
+      action: risk.action,
+      reasons: risk.reasons || [],
+      matchedRules: risk.matchedRules || [],
+    });
+  } catch {
+    return null;
+  }
+}
+
+function recordSecurityEvent(trace, toolName, input, context, verdict, action) {
+  if (typeof trace?.recordEvent !== 'function' || !verdict?.risk?.risky) return;
+  const risk = verdict.risk;
+  trace.recordEvent({
+    stage: 'security',
+    eventType: 'security_check',
+    source: context.source || 'harness',
+    runId: context.runId,
+    sessionId: context.sessionId,
+    hostId: context.hostId || input?.hostId,
+    toolName: 'security_check',
+    summary: [
+      `工具=${toolName}`,
+      input?.command ? `命令=${String(input.command).slice(0, 300)}` : '',
+      `动作=${action}`,
+      risk.level ? `风险=${risk.level}` : '',
+      Array.isArray(risk.reasons) && risk.reasons.length ? `规则=${risk.reasons.join('、')}` : '',
+    ].filter(Boolean).join('；'),
+    decision: action,
+    capabilities: context.capabilities,
+    secrets: context.secrets,
+  });
 }
 
 module.exports = { createDispatch, toToolResult, formatExec };

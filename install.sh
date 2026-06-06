@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 #  1Shell 一键安装脚本
-#  用法: curl -fsSL https://raw.githubusercontent.com/weidu12123/1Shell/main/install.sh | bash
+#  用法: curl -fsSL https://raw.githubusercontent.com/your-username/1Shell/main/install.sh | bash
 #  或:   bash install.sh [选项]
 #
 #  选项:
@@ -17,7 +17,7 @@ INSTALL_DIR="/opt/1shell"
 PORT="3301"
 PASSWORD=""
 USE_DOCKER=false
-REPO_URL="https://github.com/weidu12123/1Shell.git"
+REPO_URL="${ONESHELL_REPO_URL:-https://github.com/your-username/1Shell.git}"
 BRANCH="main"
 
 # 颜色

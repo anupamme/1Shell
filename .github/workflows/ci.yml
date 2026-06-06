@@ -1,4 +1,4 @@
-name: CI · 1Shell 2.0
+name: CI - 1Shell 4.1
 
 on:
   push:
@@ -30,6 +30,21 @@ jobs:
         env:
           APP_SECRET: ci-test-secret-key-for-testing
           APP_LOGIN_PASSWORD: ci-test-password
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Build frontend
+        run: npm --prefix frontend run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Test probe agent
+        working-directory: agent
+        run: go test ./...
 
   docker:
     runs-on: ubuntu-latest

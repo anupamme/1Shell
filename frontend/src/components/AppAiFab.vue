@@ -14,6 +14,8 @@ import { useRoute } from 'vue-router';
 import { useAiFab, type ModuleContext } from '@/composables/useAiFab';
 import ToolProgressBar from '@/components/ToolProgressBar.vue';
 import AppIcon from '@/components/AppIcon.vue';
+import { renderMarkdown } from '@/utils/markdown';
+import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
 const route = useRoute();
 const fab = useAiFab();
@@ -142,7 +144,7 @@ const panelOpen = ref(false);
 function togglePanel(): void {
   panelOpen.value = !panelOpen.value;
   if (panelOpen.value) {
-    void nextTick(scrollChatToBottom);
+    void nextTick(() => scrollChatToBottom(true));
   }
 }
 
@@ -193,15 +195,19 @@ const panelPos = computed<{ left: number; top: number }>(() => {
 
 // ── 聊天面板交互 ──
 const chatEl = ref<HTMLElement | null>(null);
+let followOutput = true;
 
-function scrollChatToBottom(): void {
+function onChatScroll(): void {
   const el = chatEl.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
+  followOutput = !el || isNearScrollBottom(el);
 }
 
-watch(() => fab.turns.value.length, () => { void nextTick(scrollChatToBottom); });
-watch(() => fab.turns.value, () => { void nextTick(scrollChatToBottom); }, { deep: true });
+function scrollChatToBottom(force = false): void {
+  scrollToBottomIfPinned(chatEl.value, force || followOutput);
+}
+
+watch(() => fab.turns.value.length, () => { void nextTick(() => scrollChatToBottom()); });
+watch(() => fab.turns.value, () => { void nextTick(() => scrollChatToBottom()); }, { deep: true });
 
 function onInputKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && !event.shiftKey) {
@@ -287,7 +293,7 @@ function onApproveKeydown(event: KeyboardEvent): void {
       </div>
 
       <!-- chat -->
-      <div ref="chatEl" class="ai-fab-chat">
+      <div ref="chatEl" class="ai-fab-chat" @scroll="onChatScroll">
         <div v-if="!fab.hasMessages.value" class="ai-fab-placeholder">
           <div class="ai-fab-placeholder-icon"><AppIcon name="robot" :size="32" :stroke-width="1.6" /></div>
           <div>1Shell AI 助手</div>
@@ -302,8 +308,9 @@ function onApproveKeydown(event: KeyboardEvent): void {
               <div
                 v-for="(line, j) in turn.lines || []"
                 :key="j"
-                :class="['ai-fab-line', lineClass(line.kind)]"
-              >{{ line.text }}</div>
+                :class="['ai-fab-line', 'markdown-body', lineClass(line.kind)]"
+                v-html="renderMarkdown(line.text)"
+              ></div>
             </div>
           </div>
         </template>

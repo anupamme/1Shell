@@ -7,11 +7,11 @@ function createRemoteMcpRouter({ remoteMcpService, mcpService }) {
 
   router.get('/remote-mcp/status', (req, res) => {
     try {
-      const status = remoteMcpService.getStatus(req);
       const allTools = mcpService.getAllToolSchemas();
+      remoteMcpService.pruneAllowedTools?.(allTools.map((tool) => tool.name));
+      const status = remoteMcpService.getStatus(req);
       res.json({
         ...status,
-        tokens: remoteMcpService.listTokens(),
         tools: allTools.map((tool) => ({
           name: tool.name,
           description: tool.description,

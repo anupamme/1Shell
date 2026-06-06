@@ -35,8 +35,23 @@ function createAuditRouter({ auditService }) {
     const hostId = req.query.hostId || undefined;
     const toolName = req.query.toolName || undefined;
     const keyword = req.query.keyword || undefined;
-    const result = auditService.queryHarnessTraces({ limit, offset, decision, source, hostId, toolName, keyword });
+    const runId = req.query.runId || undefined;
+    const sessionId = req.query.sessionId || undefined;
+    const stage = req.query.stage || undefined;
+    const eventType = req.query.eventType || undefined;
+    const result = auditService.queryHarnessTraces({ limit, offset, decision, source, hostId, toolName, keyword, runId, sessionId, stage, eventType });
     return res.json({ ok: true, ...result });
+  });
+
+  router.get('/audit/reasoning-chain', (req, res) => {
+    if (typeof auditService.queryReasoningChain !== 'function') {
+      return res.json({ ok: true, chain: [], total: 0, source: 'unavailable' });
+    }
+    const runId = req.query.runId || undefined;
+    const sessionId = req.query.sessionId || undefined;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+    const result = auditService.queryReasoningChain({ runId, sessionId, limit });
+    return res.json({ ok: !result.error, ...result });
   });
 
   return router;

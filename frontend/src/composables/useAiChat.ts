@@ -10,6 +10,8 @@ import { useHostsStore } from '@/stores/hosts';
 import { useAuthStore } from '@/stores/auth';
 import { useNotifyStore } from '@/stores/notify';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
+import { escapeHtml, renderMarkdown } from '@/utils/markdown';
+import { createStreamDeltaBuffer } from '@/utils/streaming';
 
 const SYSTEM_PROMPT = '你是一位专业的 Linux / DevOps 终端助手。用户通过多主机 Web SSH 控制台操作服务器。回复时优先给出安全、可执行、简洁的建议。';
 const INTRO_MESSAGE = '已切换到多主机控制台。你可以询问当前主机的排障命令、巡检思路或脚本建议。';
@@ -74,36 +76,6 @@ function getCsrfToken(): string {
   return m ? decodeURIComponent(m[1]) : '';
 }
 
-function escapeHtml(s: string): string {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string
-  ));
-}
-
-/**
- * 1:1 复刻 ai-chat.js:40-61 — 先 escapeHtml 防 XSS,再正则插入安全的 HTML 标签
- */
-export function renderMarkdown(text: string): string {
-  return escapeHtml(String(text || ''))
-    .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang: string, code: string) => {
-      const langAttr = lang ? ` data-lang="${lang}"` : '';
-      return `<pre${langAttr}><code>${code.replace(/\n$/, '')}</code></pre>`;
-    })
-    .replace(/`([^`\n]+)`/g, (_, code: string) => `<code>${code}</code>`)
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/(^[ \t]*[-*+] .+(?:\n|$))+/gm, (list: string) => {
-      const items = list.trim().split(/\n/)
-        .map((line) => line.replace(/^[ \t]*[-*+] (.+)$/, '<li>$1</li>'))
-        .join('');
-      return `<ul>${items}</ul>`;
-    })
-    .replace(/\n/g, '<br>');
-}
-
 function create(): AiChatApi {
   const router = useRouter();
   const sessionTerminal = useSessionTerminal();
@@ -122,6 +94,11 @@ function create(): AiChatApi {
   const config = ref<AiConfig>({ apiBase: '', apiKey: '', model: '' });
 
   let currentAbortController: AbortController | null = null;
+  let streamingReply = '';
+  const deltaBuffer = createStreamDeltaBuffer((delta) => {
+    streamingReply += delta;
+    streamingPartial.value = streamingReply;
+  });
 
   // forceVersion：使 displayMessages 在 history.push 后立即重算（Map 内部 mutate Vue 不追踪）
   const historyVersion = ref(0);
@@ -177,6 +154,8 @@ function create(): AiChatApi {
 
   function resetCurrentChat(): void {
     const hostKey = activeHostKey();
+    deltaBuffer.clear();
+    streamingReply = '';
     conversationMap.set(hostKey, [{ role: 'system', content: SYSTEM_PROMPT }]);
     bumpHistory();
   }
@@ -203,10 +182,10 @@ function create(): AiChatApi {
 
     streamingHostKey.value = hostKey;
     streamingPartial.value = '';
+    streamingReply = '';
+    deltaBuffer.clear();
     isStreaming.value = true;
     currentAbortController = new AbortController();
-
-    let fullReply = '';
 
     try {
       const requestBody: Record<string, unknown> = {
@@ -259,25 +238,32 @@ function create(): AiChatApi {
           }
           if (parsed.error) throw new Error(parsed.error);
           const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            fullReply += delta;
-            streamingPartial.value = fullReply;
-          }
+          if (delta) deltaBuffer.push(delta);
         }
       }
 
-      if (fullReply) {
-        history.push({ role: 'assistant', content: fullReply });
+      if (buffer.trim()) {
+        const raw = buffer.trim().startsWith('data:') ? buffer.trim().slice(5).trim() : '';
+        if (raw && raw !== '[DONE]') {
+          const parsed = JSON.parse(raw) as { error?: string; choices?: Array<{ delta?: { content?: string } }> };
+          if (parsed.error) throw new Error(parsed.error);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) deltaBuffer.push(delta);
+        }
+      }
+      deltaBuffer.flushNow();
+      if (streamingReply) {
+        history.push({ role: 'assistant', content: streamingReply });
       } else {
         history.push({ role: 'assistant', content: '（无文字回复）' });
       }
       bumpHistory();
     } catch (err) {
       const isAbort = (err as Error).name === 'AbortError';
+      deltaBuffer.flushNow();
       if (isAbort) {
-        // 用户主动停止 — 保留已收到的部分回复
-        if (fullReply) {
-          history.push({ role: 'assistant', content: fullReply });
+        if (streamingReply) {
+          history.push({ role: 'assistant', content: streamingReply });
         } else {
           history.push({ role: 'assistant', content: '（已停止）' });
         }
@@ -290,6 +276,8 @@ function create(): AiChatApi {
       currentAbortController = null;
       streamingHostKey.value = '';
       streamingPartial.value = '';
+      streamingReply = '';
+      deltaBuffer.clear();
       isStreaming.value = false;
     }
   }

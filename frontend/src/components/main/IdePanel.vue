@@ -8,23 +8,30 @@ import { nextTick, onMounted, ref, watch } from 'vue';
 
 import { useIdePanel } from '@/composables/useIdePanel';
 import ToolProgressBar from '@/components/ToolProgressBar.vue';
+import { renderMarkdown } from '@/utils/markdown';
+import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
 const props = defineProps<{ active?: boolean }>();
 const ide = useIdePanel();
 const chatAreaEl = ref<HTMLElement | null>(null);
+let followOutput = true;
 
 onMounted(() => { ide.initialize(); });
 
-watch(() => ide.turns.value.length, () => { void nextTick(scrollToBottom); });
-watch(() => ide.turns.value, () => { void nextTick(scrollToBottom); }, { deep: true });
+watch(() => ide.turns.value.length, () => { void nextTick(() => scrollToBottom()); });
+watch(() => ide.turns.value, () => { void nextTick(() => scrollToBottom()); }, { deep: true });
 watch(() => props.active, (active) => {
-  if (active) void nextTick(scrollToBottom);
+  if (active) void nextTick(() => scrollToBottom(true));
 });
 
-function scrollToBottom(): void {
+function onChatScroll(): void {
   const el = chatAreaEl.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
+  followOutput = !el || isNearScrollBottom(el);
+}
+
+function scrollToBottom(force = false): void {
+  const el = chatAreaEl.value;
+  scrollToBottomIfPinned(el, force || followOutput);
 }
 
 function onInputKeydown(event: KeyboardEvent): void {
@@ -102,7 +109,7 @@ function lineClass(kind: string): string {
     </div>
 
     <!-- chat area -->
-    <div ref="chatAreaEl" class="ide-panel-chat">
+    <div ref="chatAreaEl" class="ide-panel-chat" @scroll="onChatScroll">
       <div v-if="!ide.hasMessages.value" class="ide-panel-placeholder">
         <span class="ide-panel-placeholder-icon">💻</span>
         <span>1Shell AI 助手<br />输入需求，AI 会在你的主机上执行操作</span>
@@ -118,8 +125,9 @@ function lineClass(kind: string): string {
             <div
               v-for="(line, j) in turn.lines || []"
               :key="j"
-              :class="['ide-line', lineClass(line.kind)]"
-            >{{ line.text }}</div>
+              :class="['ide-line', 'markdown-body', lineClass(line.kind)]"
+              v-html="renderMarkdown(line.text)"
+            ></div>
           </div>
         </div>
       </template>

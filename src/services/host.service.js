@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { decryptText, encryptText } = require('../../lib/crypto');
 const { LOCAL_HOST_ID, ROOT_DIR } = require('../config/env');
@@ -42,6 +43,8 @@ function saveLocalHostConfig(config) {
 }
 
 function createHostService({ hostRepository }) {
+  const pendingOsProbeHosts = new Set();
+
   function normalizeHostLinks(links) {
     if (!Array.isArray(links)) return [];
 
@@ -69,6 +72,7 @@ function createHostService({ hostRepository }) {
       description: config.description || '部署当前项目的控制节点',
       links: config.links || [],
       manualLocation: config.manualLocation || null,
+      osInfo: getLocalOsInfo(),
       createdAt: null,
       updatedAt: null,
     };
@@ -92,12 +96,226 @@ function createHostService({ hostRepository }) {
       proxyHostId: host.proxyHostId || null,
       links: normalizeHostLinks(host.links),
       manualLocation: host.manualLocation || null,
+      osInfo: normalizeOsInfo(host.osInfo),
       hasPassword: Boolean(host.encryptedPassword),
       hasPrivateKey: Boolean(host.encryptedPrivateKey),
       hasPassphrase: Boolean(host.encryptedPassphrase),
       createdAt: host.createdAt || null,
       updatedAt: host.updatedAt || null,
     };
+  }
+
+  function normalizeOsInfo(info) {
+    if (!info || typeof info !== 'object') return null;
+    const detectedAt = String(info.detectedAt || '').trim() || null;
+    const prettyName = String(info.prettyName || '').trim() || null;
+    const distroId = String(info.distroId || '').trim().toLowerCase() || null;
+    const versionId = String(info.versionId || '').trim() || null;
+    const arch = String(info.arch || '').trim() || null;
+    const kernel = String(info.kernel || '').trim() || null;
+    const osName = String(info.os || '').trim().toLowerCase() || null;
+    const source = String(info.source || '').trim().toLowerCase() || null;
+    if (!detectedAt && !prettyName && !distroId && !versionId && !arch && !kernel && !osName) return null;
+    return {
+      os: osName || inferOsName(distroId || prettyName || source),
+      distroId,
+      versionId,
+      prettyName,
+      arch,
+      kernel,
+      source,
+      detectedAt: detectedAt || nowIso(),
+    };
+  }
+
+  function inferOsName(text) {
+    if (!text) return null;
+    if (/win/i.test(text)) return 'windows';
+    if (/darwin|mac/i.test(text)) return 'darwin';
+    if (/linux|ubuntu|debian|centos|rhel|fedora/i.test(text)) return 'linux';
+    return text.toLowerCase();
+  }
+
+  function parseOsRelease(content) {
+    const result = {};
+    for (const line of String(content || '').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) continue;
+      const idx = trimmed.indexOf('=');
+      const key = trimmed.slice(0, idx).trim();
+      let value = trimmed.slice(idx + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      result[key] = value;
+    }
+    return result;
+  }
+
+  function getLocalOsInfo() {
+    const platform = os.platform();
+    if (platform === 'win32') {
+      return normalizeOsInfo({
+        os: 'windows',
+        distroId: 'windows',
+        prettyName: os.version?.() || `Windows ${os.release()}`,
+        arch: os.arch(),
+        kernel: os.release(),
+        source: 'local',
+        detectedAt: nowIso(),
+      });
+    }
+
+    let osRelease = {};
+    try {
+      if (fs.existsSync('/etc/os-release')) {
+        osRelease = parseOsRelease(fs.readFileSync('/etc/os-release', 'utf8'));
+      }
+    } catch {
+      osRelease = {};
+    }
+
+    const prettyName = osRelease.PRETTY_NAME || [osRelease.NAME, osRelease.VERSION].filter(Boolean).join(' ') || null;
+    return normalizeOsInfo({
+      os: 'linux',
+      distroId: osRelease.ID || null,
+      versionId: osRelease.VERSION_ID || null,
+      prettyName,
+      arch: os.arch(),
+      kernel: os.release(),
+      source: 'local',
+      detectedAt: nowIso(),
+    });
+  }
+
+  function runSshCommand(client, command) {
+    return new Promise((resolve, reject) => {
+      client.exec(command, { pty: false }, (err, stream) => {
+        if (err) return reject(err);
+        let stdout = '';
+        let stderr = '';
+        stream.on('data', (data) => { stdout += data.toString('utf8'); });
+        stream.stderr?.on('data', (data) => { stderr += data.toString('utf8'); });
+        stream.on('close', (code) => resolve({ stdout, stderr, exitCode: typeof code === 'number' ? code : 0 }));
+        stream.on('error', reject);
+      });
+    });
+  }
+
+  function parseRemoteOsInfo(output) {
+    const marker = '__1SHELL_OS_SPLIT__';
+    const parts = String(output || '').split(marker);
+    const osRelease = parseOsRelease(parts[0] || '');
+    const arch = String(parts[1] || '').trim() || null;
+    const kernel = String(parts[2] || '').trim() || null;
+    const prettyName = osRelease.PRETTY_NAME || [osRelease.NAME, osRelease.VERSION].filter(Boolean).join(' ') || null;
+    const distroId = String(osRelease.ID || '').trim().toLowerCase() || null;
+    const normalized = normalizeOsInfo({
+      os: 'linux',
+      distroId,
+      versionId: osRelease.VERSION_ID || null,
+      prettyName,
+      arch,
+      kernel,
+      source: 'ssh',
+      detectedAt: nowIso(),
+    });
+    return normalized && (normalized.prettyName || normalized.distroId || normalized.arch || normalized.kernel) ? normalized : null;
+  }
+
+  function isOsInfoFresh(osInfo, ttlMs = 10 * 60 * 1000) {
+    if (!osInfo?.detectedAt) return false;
+    const detectedAt = Date.parse(osInfo.detectedAt);
+    if (!Number.isFinite(detectedAt)) return false;
+    return Date.now() - detectedAt < ttlMs;
+  }
+
+  function updateStoredHostOsInfo(hostId, osInfo) {
+    if (!hostId || !osInfo) return null;
+    const hosts = hostRepository.readStoredHosts();
+    const index = hosts.findIndex((item) => item.id === hostId);
+    if (index === -1) return null;
+    hosts[index] = {
+      ...hosts[index],
+      osInfo: normalizeOsInfo(osInfo),
+      updatedAt: nowIso(),
+    };
+    hostRepository.writeStoredHosts(hosts);
+    return hosts[index].osInfo;
+  }
+
+  async function probeOsInfoFromConnection(client) {
+    const command = "cat /etc/os-release 2>/dev/null; printf '\\n__1SHELL_OS_SPLIT__\\n'; uname -m 2>/dev/null; printf '\\n__1SHELL_OS_SPLIT__\\n'; uname -r 2>/dev/null";
+    const result = await runSshCommand(client, command);
+    if (result.exitCode !== 0 && !String(result.stdout || '').trim()) return null;
+    return parseRemoteOsInfo(result.stdout);
+  }
+
+  async function refreshHostOsInfo(hostId, { force = false, connection = null, ttlMs = 10 * 60 * 1000 } = {}) {
+    const host = findStoredHost(hostId);
+    if (!host) return null;
+    if (host.id === LOCAL_HOST_ID || host.type === 'local') {
+      return getLocalOsInfo();
+    }
+    if (!force && isOsInfoFresh(host.osInfo, ttlMs)) return normalizeOsInfo(host.osInfo);
+
+    let client = connection?.client || null;
+    let proxyClient = connection?.proxyClient || null;
+    let shouldClose = false;
+
+    if (!client) {
+      const conn = await connectToHost(hostId, { readyTimeout: 15000, probeOs: false });
+      client = conn.client;
+      proxyClient = conn.proxyClient;
+      shouldClose = true;
+    }
+
+    try {
+      const osInfo = await probeOsInfoFromConnection(client);
+      if (!osInfo) return null;
+      updateStoredHostOsInfo(hostId, osInfo);
+      return osInfo;
+    } finally {
+      if (shouldClose) {
+        try { client?.end(); } catch { /* ignore */ }
+        try { proxyClient?.end(); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  function maybeRefreshHostOsInfo(host, connection, { force = false } = {}) {
+    if (!host || host.id === LOCAL_HOST_ID || host.type === 'local') return;
+    if (!force && isOsInfoFresh(host.osInfo)) return;
+    setImmediate(() => {
+      refreshHostOsInfo(host.id, { connection, force })
+        .catch((err) => {
+          // OS 感知失败不阻塞连接，也不打断用户操作。
+          // 只在调试日志里保留线索即可。
+          try { console.warn?.(`[host-os] refresh failed for ${host.id}: ${err.message}`); } catch { /* ignore */ }
+        });
+    });
+  }
+
+  function probeHostOsInfo(host) {
+    if (!host) return Promise.resolve(null);
+    if (host.id === LOCAL_HOST_ID || host.type === 'local') return Promise.resolve(getLocalOsInfo());
+    return refreshHostOsInfo(host.id, { force: true });
+  }
+
+  function scheduleHostOsProbe(host) {
+    if (!host || host.id === LOCAL_HOST_ID || host.type === 'local') return;
+    if (isOsInfoFresh(host.osInfo)) return;
+    if (pendingOsProbeHosts.has(host.id)) return;
+    pendingOsProbeHosts.add(host.id);
+    setImmediate(() => {
+      probeHostOsInfo(host)
+        .catch((err) => {
+          try { console.warn?.(`[host-os] probe failed for ${host.id}: ${err.message}`); } catch { /* ignore */ }
+        })
+        .finally(() => {
+          pendingOsProbeHosts.delete(host.id);
+        });
+    });
   }
 
   function listHosts() {
@@ -132,6 +350,7 @@ function createHostService({ hostRepository }) {
       manualLocation: hasOwn(payload, 'manualLocation')
         ? payload.manualLocation
         : (existing?.manualLocation || null),
+      osInfo: normalizeOsInfo(existing?.osInfo),
       createdAt: existing?.createdAt || timestamp,
       updatedAt: timestamp,
       encryptedPassword: null,
@@ -207,6 +426,7 @@ function createHostService({ hostRepository }) {
 
   function connectToHost(hostId, options = {}) {
     const { Client } = require('ssh2');
+    const { probeOs = true } = options;
 
     return new Promise((resolve, reject) => {
       const host = findStoredHost(hostId);
@@ -220,7 +440,10 @@ function createHostService({ hostRepository }) {
 
       if (!proxyHostId) {
         const client = new Client();
-        client.on('ready', () => resolve({ client, proxyClient: null }));
+        client.on('ready', () => {
+          if (probeOs) maybeRefreshHostOsInfo(host, { client, proxyClient: null }, { force: true });
+          resolve({ client, proxyClient: null });
+        });
         client.on('error', (err) => reject(new Error(`SSH 连接失败: ${err.message}`)));
         try {
           client.connect(targetConfig);
@@ -254,7 +477,10 @@ function createHostService({ hostRepository }) {
           delete targetConnConfig.host;
           delete targetConnConfig.port;
 
-          targetClient.on('ready', () => resolve({ client: targetClient, proxyClient }));
+          targetClient.on('ready', () => {
+            if (probeOs) maybeRefreshHostOsInfo(host, { client: targetClient, proxyClient }, { force: true });
+            resolve({ client: targetClient, proxyClient });
+          });
           targetClient.on('error', (err2) => {
             proxyClient.end();
             reject(new Error(`目标主机连接失败（经跳板机）: ${err2.message}`));
@@ -408,6 +634,7 @@ function createHostService({ hostRepository }) {
         lastSampleAt: null,
         alertCount,
         platform: null,
+        systemHealth: null,
       };
     }
     return {
@@ -424,6 +651,7 @@ function createHostService({ hostRepository }) {
       lastSampleAt: probe.checkedAt || probe.agentLastSeenAt || probe.trafficLastSampleAt || probe.lastSuccessAt || null,
       alertCount,
       platform: getProbePlatformText(probe),
+      systemHealth: probe.systemHealth || null,
     };
   }
 
@@ -441,13 +669,16 @@ function createHostService({ hostRepository }) {
       proxyHostId: host.proxyHostId || null,
       links: host.links || [],
       manualLocation: host.manualLocation || null,
+      osInfo: normalizeOsInfo(host.osInfo),
       preference: host.preference,
       probe: toProbeSummary(probe, alertCountMap?.get(host.id) || 0),
     };
   }
 
   function listRepositoryHosts(context = {}) {
-    return listHostsWithPreferences().map((host) => toRepositoryItem(host, context));
+    const hosts = listHostsWithPreferences();
+    hosts.forEach(scheduleHostOsProbe);
+    return hosts.map((host) => toRepositoryItem(host, context));
   }
 
   function updateHostPreference(hostId, patch) {

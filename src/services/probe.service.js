@@ -19,11 +19,11 @@ const {
   REMOTE_PROBE_COMMAND,
 } = require('./probe/commands');
 const {
-  parseDiskBytesText,
   parseInteger,
   parseKeyProcesses,
-  parseNetworkBytesText,
+  parsePlatformInfo,
   parseProbeOutput,
+  parseSystemHealth,
 } = require('./probe/parsers');
 
 function createProbeService({ hostRepository, hostService, sshShellPool, probeAgentService, probeRelayService, probeTrafficService }) {
@@ -104,6 +104,32 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
     return Number((delta / elapsedSeconds).toFixed(2));
   }
 
+  function buildRemoteProbePayload(host, stdout, latencyMs) {
+    const parsed = parseProbeOutput(stdout);
+    const load = splitLoad(parsed.LOAD);
+
+    return {
+      online: true,
+      latencyMs,
+      hostname: parsed.HOSTNAME || host.host,
+      cpuUsage: parseNumber(parsed.CPU),
+      memoryUsage: parseNumber(parsed.MEM),
+      diskUsage: parseNumber(parsed.DISK),
+      uptimeSec: parseInt(parsed.UPTIME, 10) || 0,
+      error: null,
+      processCount: parseInteger(parsed.PROC_COUNT),
+      keyProcesses: parseKeyProcesses(parsed.KEY_PROC),
+      systemHealth: parseSystemHealth(parsed),
+      platformInfo: parsePlatformInfo(parsed),
+      _checkedAtMs: Date.now(),
+      _networkRxBytes: parseInteger(parsed.NET_RX),
+      _networkTxBytes: parseInteger(parsed.NET_TX),
+      _diskReadBytes: parseInteger(parsed.DISK_READ_BYTES),
+      _diskWriteBytes: parseInteger(parsed.DISK_WRITE_BYTES),
+      ...load,
+    };
+  }
+
   function buildTransferRates(previous, currentCheckedAtMs, currentProbe) {
     if (!previous) {
       return {
@@ -141,6 +167,23 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
     }));
   }
 
+  function cloneSystemHealth(systemHealth) {
+    if (!systemHealth || typeof systemHealth !== 'object') return null;
+    return JSON.parse(JSON.stringify(systemHealth));
+  }
+
+  function clonePlatformInfo(platformInfo) {
+    if (!platformInfo || typeof platformInfo !== 'object') return null;
+    return JSON.parse(JSON.stringify(platformInfo));
+  }
+
+  function formatPlatformText(platformInfo) {
+    if (!platformInfo || typeof platformInfo !== 'object') return null;
+    const name = platformInfo.prettyName || [platformInfo.distroId, platformInfo.versionId].filter(Boolean).join(' ') || platformInfo.os;
+    const suffix = [platformInfo.arch, platformInfo.kernel].filter(Boolean).join(' / ');
+    return [name, suffix].filter(Boolean).join(' / ') || null;
+  }
+
   function rememberSuccessfulProbe(probe, checkedAtMs) {
     lastSuccessfulProbeMap.set(probe.hostId, {
       checkedAt: probe.checkedAt,
@@ -155,6 +198,9 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
       load15: probe.load15 ?? null,
       processCount: probe.processCount ?? null,
       keyProcesses: cloneKeyProcesses(probe.keyProcesses),
+      systemHealth: cloneSystemHealth(probe.systemHealth),
+      platform: probe.platform || formatPlatformText(probe.platformInfo) || null,
+      platformInfo: clonePlatformInfo(probe.platformInfo),
       bandwidthRxBps: probe.bandwidthRxBps ?? null,
       bandwidthTxBps: probe.bandwidthTxBps ?? null,
       diskReadBps: probe.diskReadBps ?? null,
@@ -203,6 +249,9 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
       load15: probe.load15 ?? null,
       processCount: probe.processCount ?? null,
       keyProcesses: cloneKeyProcesses(probe.keyProcesses),
+      systemHealth: cloneSystemHealth(probe.systemHealth),
+      platform: probe.platform || formatPlatformText(probe.platformInfo) || null,
+      platformInfo: clonePlatformInfo(probe.platformInfo),
       bandwidthRxBps: transferRates.bandwidthRxBps,
       bandwidthTxBps: transferRates.bandwidthTxBps,
       diskReadBps: transferRates.diskReadBps,
@@ -246,6 +295,9 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
         load15: null,
         processCount: null,
         keyProcesses: [],
+        systemHealth: null,
+        platform: null,
+        platformInfo: null,
         bandwidthRxBps: null,
         bandwidthTxBps: null,
         diskReadBps: null,
@@ -273,6 +325,9 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
       load15: previous.load15,
       processCount: previous.processCount,
       keyProcesses: cloneKeyProcesses(previous.keyProcesses),
+      systemHealth: cloneSystemHealth(previous.systemHealth),
+      platform: previous.platform || formatPlatformText(previous.platformInfo) || null,
+      platformInfo: clonePlatformInfo(previous.platformInfo),
       bandwidthRxBps: null,
       bandwidthTxBps: null,
       diskReadBps: null,
@@ -300,21 +355,23 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
         diskWriteBytes: null,
         processCount: null,
         keyProcesses: [],
+        systemHealth: null,
+        platformInfo: null,
       };
     }
 
     try {
       const output = await execCommand(LOCAL_LINUX_EXTRA_COMMAND);
       const parsed = parseProbeOutput(output);
-      const network = parseNetworkBytesText(output, 'RX', 'TX');
-      const disk = parseDiskBytesText(output, 'DISK_READ_BYTES', 'DISK_WRITE_BYTES');
       return {
-        networkRxBytes: network.rxBytes,
-        networkTxBytes: network.txBytes,
-        diskReadBytes: disk.diskReadBytes,
-        diskWriteBytes: disk.diskWriteBytes,
+        networkRxBytes: parseInteger(parsed.RX),
+        networkTxBytes: parseInteger(parsed.TX),
+        diskReadBytes: parseInteger(parsed.DISK_READ_BYTES),
+        diskWriteBytes: parseInteger(parsed.DISK_WRITE_BYTES),
         processCount: parseInteger(parsed.PROC_COUNT),
         keyProcesses: parseKeyProcesses(parsed.KEY_PROC),
+        systemHealth: parseSystemHealth(parsed),
+        platformInfo: parsePlatformInfo(parsed),
       };
     } catch {
       return {
@@ -324,6 +381,8 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
         diskWriteBytes: null,
         processCount: null,
         keyProcesses: [],
+        systemHealth: null,
+        platformInfo: null,
       };
     }
   }
@@ -331,8 +390,10 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
   async function probeLocalHost() {
     const checkedAtMs = Date.now();
     const checkedAt = new Date(checkedAtMs).toISOString();
-    const diskUsage = await getLocalDiskUsage();
-    const extras = await getLocalLinuxExtras();
+    const [diskUsage, extras] = await Promise.all([
+      getLocalDiskUsage(),
+      getLocalLinuxExtras(),
+    ]);
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
     const memoryUsage = totalMem > 0
@@ -354,6 +415,9 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
       errorCode: null,
       processCount: extras.processCount,
       keyProcesses: extras.keyProcesses,
+      systemHealth: extras.systemHealth,
+      platform: formatPlatformText(extras.platformInfo),
+      platformInfo: extras.platformInfo,
       _checkedAtMs: checkedAtMs,
       _networkRxBytes: extras.networkRxBytes,
       _networkTxBytes: extras.networkTxBytes,
@@ -395,33 +459,14 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
         };
       }
 
-      const parsed = parseProbeOutput(stdout);
-      const disk = parseDiskBytesText(stdout, 'DISK_READ_BYTES', 'DISK_WRITE_BYTES');
-      const load = splitLoad(parsed.LOAD);
-
       recordLatency(host.id, latencyMs);
 
       return {
         hostId: host.id,
         name: host.name,
         checkedAt: nowIso(),
-        online: true,
-        latencyMs,
-        hostname: parsed.HOSTNAME || host.host,
-        cpuUsage: parseNumber(parsed.CPU),
-        memoryUsage: parseNumber(parsed.MEM),
-        diskUsage: parseNumber(parsed.DISK),
-        uptimeSec: parseInt(parsed.UPTIME, 10) || 0,
-        error: null,
         errorCode: null,
-        processCount: parseInteger(parsed.PROC_COUNT),
-        keyProcesses: parseKeyProcesses(parsed.KEY_PROC),
-        _checkedAtMs: Date.now(),
-        _networkRxBytes: parseInteger(parsed.NET_RX),
-        _networkTxBytes: parseInteger(parsed.NET_TX),
-        _diskReadBytes: disk.diskReadBytes,
-        _diskWriteBytes: disk.diskWriteBytes,
-        ...load,
+        ...buildRemoteProbePayload(host, stdout, latencyMs),
       };
     } catch (err) {
       return {
@@ -515,28 +560,7 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
                 return;
               }
 
-              const parsed = parseProbeOutput(stdout);
-              const disk = parseDiskBytesText(stdout, 'DISK_READ_BYTES', 'DISK_WRITE_BYTES');
-              const load = splitLoad(parsed.LOAD);
-
-              finish({
-                online: true,
-                latencyMs,
-                hostname: parsed.HOSTNAME || host.host,
-                cpuUsage: parseNumber(parsed.CPU),
-                memoryUsage: parseNumber(parsed.MEM),
-                diskUsage: parseNumber(parsed.DISK),
-                uptimeSec: parseInt(parsed.UPTIME, 10) || 0,
-                error: null,
-                processCount: parseInteger(parsed.PROC_COUNT),
-                keyProcesses: parseKeyProcesses(parsed.KEY_PROC),
-                _checkedAtMs: Date.now(),
-                _networkRxBytes: parseInteger(parsed.NET_RX),
-                _networkTxBytes: parseInteger(parsed.NET_TX),
-                _diskReadBytes: disk.diskReadBytes,
-                _diskWriteBytes: disk.diskWriteBytes,
-                ...load,
-              });
+              finish(buildRemoteProbePayload(host, stdout, latencyMs));
             });
           });
 
@@ -710,8 +734,10 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
     if (refreshInFlight) return refreshInFlight;
 
     refreshInFlight = (async () => {
-      const relayProbes = probeRelayService ? await probeRelayService.syncAll() : [];
-      const probes = await collectAllProbes();
+      const [relayProbes, probes] = await Promise.all([
+        probeRelayService ? probeRelayService.syncAll() : [],
+        collectAllProbes(),
+      ]);
       return buildSnapshot(probes, relayProbes);
     })()
       .finally(() => {

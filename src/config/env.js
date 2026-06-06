@@ -31,6 +31,7 @@ const AGENT_DEFAULT_PROVIDER = (process.env.AGENT_DEFAULT_PROVIDER || 'claude-co
 const AGENT_DEFAULT_COLS = parsePositiveInt(process.env.AGENT_DEFAULT_COLS, 100);
 const AGENT_DEFAULT_ROWS = parsePositiveInt(process.env.AGENT_DEFAULT_ROWS, 28);
 const AGENT_MAX_SESSIONS_PER_SOCKET = parsePositiveInt(process.env.AGENT_MAX_SESSIONS_PER_SOCKET, 5);
+const ONESHELL_SECURITY_MODE = (process.env.ONESHELL_SECURITY_MODE || 'standard').trim().toLowerCase();
 
 // 受信任的反向代理 IP 列表（逗号分隔），仅从这些 IP 来的请求才信任 X-Forwarded-For
 // 默认为空：不限制，任意 IP 均可直连；部署在 Nginx 反向代理后时填写代理 IP
@@ -85,6 +86,7 @@ module.exports = {
   AGENT_DEFAULT_COLS,
   AGENT_DEFAULT_ROWS,
   AGENT_MAX_SESSIONS_PER_SOCKET,
+  ONESHELL_SECURITY_MODE,
   BRIDGE_TOKEN,
   BRIDGE_EXEC_TIMEOUT_MS,
   PROXY_TOKEN,

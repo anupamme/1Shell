@@ -64,9 +64,15 @@ function createMcpService(deps = {}) {
 
   async function callTool(name, args, context = {}) {
     const startedAt = Date.now();
-    const toolName = name === 'execute_ssh_command' ? 'host_exec' : name;
+    const toolName = String(name || '').trim();
     const argSummary = summarizeArgs(args);
     log.info('[mcp] tools/call IN', { name: toolName, source: context.source || 'mcp', exposure: context.exposure || 'unknown', args: argSummary });
+
+    if (!coreTools.isToolExposed(toolName, 'mcp')) {
+      const result = makeToolError(`MCP 不允许直接调用工具: ${toolName}`);
+      auditToolCall(toolName, args, context, startedAt, result);
+      return result;
+    }
 
     if (remoteMcpService && !remoteMcpService.isToolAllowed(toolName, context)) {
       const result = makeToolError(`Remote MCP 不允许调用工具: ${toolName}`);
@@ -109,7 +115,7 @@ function createMcpService(deps = {}) {
   }
 
   async function callToolImpl(toolName, args, context = {}) {
-    const result = await coreTools.handle(toolName, args || {}, { source: context.source || 'mcp', clientIp: context.clientIp });
+    const result = await coreTools.handle(toolName, args || {}, { ...context, source: context.source || 'mcp', clientIp: context.clientIp });
     return toMcpToolResult(result);
   }
 

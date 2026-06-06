@@ -18,7 +18,7 @@ err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         1Shell v4.0.0                          ║${NC}"
+echo -e "${GREEN}║         1Shell v4.1.0                          ║${NC}"
 echo -e "${GREEN}║     One Shell to rule them all.                ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -38,11 +38,27 @@ if [[ "$NODE_MAJOR" -lt 18 ]]; then
 fi
 log "Node.js v${NODE_VER} 已检测到"
 
-# 安装依赖
+# 安装后端依赖
 if [[ ! -d "node_modules" ]]; then
-  log "首次运行，正在安装依赖..."
+  log "首次运行，正在安装后端依赖..."
   npm install
-  log "依赖安装完成"
+  log "后端依赖安装完成"
+fi
+
+# 缺少生产前端包时自动构建
+if [[ ! -f "frontend/dist/index.html" ]]; then
+  if [[ ! -f "frontend/package.json" ]]; then
+    err "frontend/package.json 不存在"
+    exit 1
+  fi
+  log "未检测到前端构建产物，正在准备前端..."
+  pushd frontend >/dev/null
+  if [[ ! -d "node_modules" ]]; then
+    npm install
+  fi
+  npm run build
+  popd >/dev/null
+  log "前端构建完成"
 fi
 
 # 创建 .env

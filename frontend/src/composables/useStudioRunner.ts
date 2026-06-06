@@ -4,11 +4,14 @@
 // 迭代 2：补 ide:mcp-status / ide:approve-request 监听 + ide:mcp-start/stop / ide:approve-response emit + ApproveBar
 
 import { ref, shallowRef, computed, onMounted, onBeforeUnmount, watch } from 'vue';
-import { useSocket, bindHandlers, type SocketHandler } from '@/composables/useSocket';
+import { useSocket, type SocketHandler } from '@/composables/useSocket';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
 import { useNotifyStore } from '@/stores/notify';
 import { readStorageState, writeStorageState } from '@/composables/usePageState';
+import { bindIdeStreamHandlers } from '@/utils/ideStreamEvents';
+import { createStreamDeltaBuffer } from '@/utils/streaming';
+import { appendAiToolLog, summarizeToolValue, type AiAssistantTurn, type AiToolCallState } from '@/utils/aiMessages';
 import {
   type HostInfo, type SelectedPath, type SelectedContainer,
   type SkillInfo, type McpInfo, type LocalMcpStatus,
@@ -100,8 +103,7 @@ export function useStudioRunner() {
   const authoringSession = ref<AuthoringSessionSnapshot | null>(null);
 
   // 当前 turn 的工具调用列表（每 run 重置；ToolProgressBar 渲染用）
-  interface StudioToolCall { toolUseId: string; name: string; status: 'running' | 'done' | 'error'; startedAt: number; durationMs?: number }
-  const currentToolCalls = ref<StudioToolCall[]>([]);
+  const currentToolCalls = ref<AiToolCallState[]>([]);
 
   // 输入区
   const taskInput = ref(savedPrefs.taskInput);
@@ -354,23 +356,7 @@ export function useStudioRunner() {
     saveMessageToCurrent({ role: 'user', content: text });
   }
 
-  function appendAiLine(kind: AiLineKind, text: string): void {
-    saveMessageToCurrent({ role: 'ai', kind, content: text });
-  }
-
-  function appendAiDelta(text: string): void {
-    pendingDelta += text;
-    if (deltaRaf !== null) return;
-    deltaRaf = requestAnimationFrame(flushDelta);
-  }
-
-  let pendingDelta = '';
-  let deltaRaf: number | null = null;
-  function flushDelta(): void {
-    deltaRaf = null;
-    const flushed = pendingDelta;
-    pendingDelta = '';
-    if (!flushed) return;
+  const deltaBuffer = createStreamDeltaBuffer((flushed) => {
     const s = getSession(currentSessionId.value);
     if (!s) return;
     const last = s.messages[s.messages.length - 1];
@@ -379,16 +365,27 @@ export function useStudioRunner() {
     } else {
       s.messages.push({ role: 'ai', kind: 'stream', content: flushed });
     }
-    // 不重新拷贝数组、不写 localStorage——
-    // Vue 看 last.content 字符串变化已能触发 re-render；
-    // 持久化推迟到 ide:done / ide:error / ide:cancelled。
+    sessions.value = [...sessions.value];
+  });
+
+  function appendAiLine(kind: AiLineKind, text: string): void {
+    deltaBuffer.flushNow();
+    saveMessageToCurrent({ role: 'ai', kind, content: text });
   }
-  function finalizeStreamPersist(): void {
-    if (deltaRaf !== null) {
-      cancelAnimationFrame(deltaRaf);
-      deltaRaf = null;
-      flushDelta();
+
+  function appendAiDelta(text: string): void {
+    deltaBuffer.push(text);
+  }
+
+  function appendToolLog(toolUseId: string, stream: string | undefined, text: string): void {
+    const turn: AiAssistantTurn = { role: 'assistant', status: 'tool_running', lines: [], toolCalls: currentToolCalls.value };
+    if (appendAiToolLog(turn, toolUseId, stream === 'stderr' ? 'stderr' : 'stdout', text)) {
+      currentToolCalls.value = [...currentToolCalls.value];
     }
+  }
+
+  function finalizeStreamPersist(): void {
+    deltaBuffer.flushNow();
     const s = getSession(currentSessionId.value);
     if (!s) return;
     s.messages = [...s.messages];
@@ -436,6 +433,7 @@ export function useStudioRunner() {
   }
 
   function startNewChat(): void {
+    deltaBuffer.clear();
     activeRunId = null;
     stopRequested = false;
     stoppedRunIds.clear();
@@ -448,6 +446,7 @@ export function useStudioRunner() {
     if (!s) return;
     const ok = await confirm({ title: '清空对话', message: '清空当前对话的消息？', okText: '清空' });
     if (!ok) return;
+    deltaBuffer.clear();
     s.messages = [];
     sessions.value = [...sessions.value];
     saveSessionsToStorage();
@@ -574,24 +573,34 @@ export function useStudioRunner() {
       appendAiDelta(m.delta);
     }],
     ['ide:tool-start', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { name?: string; toolUseId?: string };
+      const m = msg as IdeSocketMessage & { name?: string; toolUseId?: string; input?: unknown };
       if (!matchesCurrentRun(m)) return;
       currentToolCalls.value.push({
         toolUseId: m.toolUseId || `tool-${Date.now()}`,
         name: m.name || 'unknown',
         status: 'running',
         startedAt: Date.now(),
+        input: m.input,
       });
       setStatus('running', m.name ? `调用工具：${m.name}` : '调用工具...');
     }],
+    ['ide:tool-delta', (msg: unknown) => {
+      const m = msg as IdeSocketMessage & { toolUseId?: string; stream?: string; text?: string };
+      if (!matchesCurrentRun(m) || !m.toolUseId || !m.text) return;
+      appendToolLog(m.toolUseId, m.stream, m.text);
+      setStatus('running', '工具执行中...');
+    }],
     ['ide:tool-end', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { is_error?: boolean; toolUseId?: string };
+      const m = msg as IdeSocketMessage & { is_error?: boolean; toolUseId?: string; result?: unknown };
       if (!matchesCurrentRun(m)) return;
       if (m.toolUseId) {
         const call = currentToolCalls.value.find((c) => c.toolUseId === m.toolUseId);
         if (call) {
           call.status = m.is_error ? 'error' : 'done';
           call.durationMs = Date.now() - call.startedAt;
+          call.result = m.result;
+          call.error = m.is_error ? summarizeToolValue(m.result) || '工具返回错误' : undefined;
+          currentToolCalls.value = [...currentToolCalls.value];
         }
       }
       setStatus('running', m.is_error ? '工具返回错误，继续分析...' : '思考中...');
@@ -925,6 +934,7 @@ export function useStudioRunner() {
   }
 
   async function sendTask(task: string): Promise<void> {
+    deltaBuffer.clear();
     activeRunId = null;
     stopRequested = false;
     currentToolCalls.value = [];
@@ -999,6 +1009,7 @@ export function useStudioRunner() {
   }
 
   function finalize(): void {
+    deltaBuffer.flushNow();
     isRunning.value = false;
     stopRequested = false;
     pendingApprove.value = null;
@@ -1066,7 +1077,7 @@ export function useStudioRunner() {
 
   /* ─── 生命周期 ────────────────────────────────────── */
 
-  const cleanup = bindHandlers(socket, handlers);
+  const cleanup = bindIdeStreamHandlers(socket, handlers);
 
   watch([
     selectedHosts,

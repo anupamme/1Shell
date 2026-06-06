@@ -4,11 +4,13 @@
 
 **One Shell to rule them all.**
 
-面向个人开发者和小团队的 **AI 时代 VPS 集成管理中枢**。
+**WebSSH + VPS 管理中枢 + MCP Server。**
 
-将多机终端、文件管理、脚本执行、探针监控、诊断审计、智能运维 Agent、MCP 内部扩展与外部协作能力、自动化 Program 集成到一个本地优先的控制台中，让 VPS 不再只是“可连接”，而是成为可观察、可操作、可自动化、可被智能体协同管理的运维对象。
+给人和 AI Agent 共用的多主机运维平台，理论适配 Claude Code、Codex、OpenClaw、Hermes 以及所有支持 MCP 的 Agent 项目。
 
-[![version](https://img.shields.io/badge/version-4.0.0-4f8cff?style=flat-square)](https://github.com/weidu12123/1Shell/releases)
+1Shell 将多机终端、文件管理、脚本执行、探针监控、诊断审计、1Shell AI 网关、标准 MCP Server 和自动化 Program 集成到一个本地优先的控制台中。人可以把它当作 WebSSH / VPS 控制台使用；AI Agent 可以通过 MCP 调用它，让多台 VPS 成为可观察、可操作、可自动化、可被智能体协同管理的运维对象。
+
+[![version](https://img.shields.io/badge/version-4.1.0-4f8cff?style=flat-square)](https://github.com/weidu12123/1Shell/releases)
 [![node](https://img.shields.io/badge/node-%3E%3D18-43a047?style=flat-square&logo=node.js)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-f9a825?style=flat-square)](LICENSE)
 [![docker](https://img.shields.io/badge/docker-ready-2496ed?style=flat-square&logo=docker)](https://hub.docker.com)
@@ -19,24 +21,32 @@
 
 ## 什么是 1Shell？
 
-1Shell 是一个面向个人开发者、小团队和轻量运维场景的 VPS 集成管理中枢。
+1Shell 是一个面向个人开发者、小团队和轻量运维场景的多主机运维平台。它有两个同等重要的身份：
 
-传统 Web SSH 面板解决的是“如何连上服务器”；1Shell 更关注连接之后的完整运维闭环：
+- 对人来说，它是一个 WebSSH / VPS 管理中枢，用来管理终端、文件、脚本、探针、审计和自动化；
+- 对 AI Agent 来说，它是一个标准 MCP Server，把多台 VPS 封装成可被外部智能体调用的运维能力层。
+
+传统 WebSSH 面板解决的是“如何连上服务器”；1Shell 更关注连接之后的人机协同运维闭环：
 
 ```text
-观察状态 → 进入主机 → 查看文件 / 日志 → 执行命令 / 脚本
-       → 调用智能体分析与处理 → 验证结果 → 沉淀为可复用自动化
+人 / AI Agent 发起任务
+        ↓
+1Shell MCP Server / 1Shell AI 网关
+        ↓
+主机发现 → 远程命令 / 文件 / 脚本 / 探针 / 诊断
+        ↓
+验证结果 → 审计留痕 → 沉淀为 Program / Skill
 ```
 
-在 1Shell 中，终端、文件、脚本、探针、诊断、审计、Program、MCP 和 Agent 并不是分散的功能页面，而是围绕 VPS 运维场景组织起来的一套统一能力层。
+在 1Shell 中，终端、文件、脚本、探针、诊断、审计、Program、Skill、MCP 和 Agent 并不是分散的功能页面，而是围绕 VPS 运维场景组织起来的一套统一能力层。
 
 这意味着：
 
 - 你可以像传统控制台一样管理多台 VPS；
-- 也可以让 1Shell 内部智能运维 Agent 在授权范围内调用这些能力；
-- 可以通过内部 MCP 扩展接入数据库、通知、知识库、自定义 API 等外部工具；
-- 还可以在本地电脑、内网或可信网络中，让 Claude Code、VSCode 内的 Claude 或其他外部 Agent 通过 1Shell 协作管理 VPS；
-- 最后，可以把常见运维流程沉淀成 Program，让经验变成可复用的自动化应用。
+- 也可以让 1Shell AI 在授权范围内调用这些能力完成复杂运维任务；
+- 外部 Agent 可以通过 MCP 调用 1Shell，理论适配 Claude Code、Codex、OpenClaw、Hermes 以及所有支持 MCP 的 Agent 项目；
+- 外部 Agent 不必感知 1Shell 内部所有工具，复杂能力可以委托给 1Shell AI 网关编排；
+- 最后，可以把常见运维流程沉淀成 Program / Skill，让经验变成可复用的自动化应用。
 
 ---
 
@@ -59,20 +69,20 @@
 
 ---
 
-### 2. 智能运维 Agent 与上下文感知
+### 2. 1Shell AI 网关与上下文感知
 
-1Shell 内置多种智能交互入口，各自承担不同职责。
+1Shell 内置多种智能交互入口，其中 1Shell AI 是平台内部的运维 Agent，也是外部 Agent 调用复杂能力时的网关。
 
 | 入口 | 定位 |
 |---|---|
-| 1Shell AI | 平台内部智能运维 Agent，可感知页面上下文并调用 1Shell 工具 |
+| 1Shell AI | 平台内部智能运维 Agent，可感知页面上下文、调用 1Shell 工具，并作为外部 Agent 的复杂任务网关 |
 | AI Chat | 独立聊天入口，用于普通问答、解释和上下文分析 |
 | AI Agent 面板 | 在 Web 控制台内运行 Claude Code、OpenCode、Codex 等 AI CLI |
 | 终端选区分析 | 对选中的终端输出进行错误解释和修复建议 |
 | 命令建议 | 根据自然语言生成可检查、可注入终端的命令 |
 | Ghost Text | 在终端输入时提供内联补全建议 |
 
-1Shell AI 与普通聊天机器人的区别在于：它不是只“解释”服务器状态，而是可以在授权、安全审批和审计约束下调用 1Shell 的内部能力，例如：
+1Shell AI 与普通聊天机器人的区别在于：它不是只“解释”服务器状态，而是可以在授权、安全审批和审计约束下调用 1Shell 的内部能力。外部 Agent 也可以把复杂运维目标委托给 1Shell AI，由它在 1Shell 内部编排工具调用，例如：
 
 - 列出主机、执行远程命令、读写远程文件；
 - 调用脚本库、查询探针指标、读取告警；
@@ -83,9 +93,9 @@
 
 ---
 
-### 3. MCP：内部调用与外部协作
+### 3. MCP Server：给 AI Agent 的多主机运维入口
 
-1Shell 的 MCP 能力分为两个方向：**内部 MCP 调用** 和 **外部 MCP 协作**。两者都围绕同一个目标：把 1Shell 的运维能力标准化为智能体可以调用的工具，但调用者和部署场景不同。
+1Shell 可以作为标准 MCP Server 暴露给外部 Agent，也可以作为平台内部的工具总线服务 1Shell AI。两者都围绕同一个目标：把 1Shell 的多主机运维能力标准化为智能体可以调用、但仍受 Harness 和审计约束的工具层。
 
 #### 内部 MCP 调用
 
@@ -105,16 +115,18 @@
 
 #### 外部 MCP 协作（远程 HTTPS 接入）
 
-1Shell 部署在 VPS 上时，可以作为 **远程 MCP Server**，把整套 VPS 运维能力通过 HTTPS 开放给外部 Agent——你在本地电脑用 Claude Code、VSCode 里的 Claude 或其他 MCP 客户端，就能远程调用部署端的 1Shell 管理它所在的 VPS。
+1Shell 部署在 VPS 上时，可以作为 **远程 MCP Server**，把多主机运维能力通过 HTTPS 开放给外部 Agent。Claude Code、Codex、OpenClaw、Hermes 等支持 MCP 的项目，都可以把 1Shell 当作服务器运维工具层来调用。
+
+外部 MCP 默认更适合走“少而硬”的工具暴露方式：保留主机列表、远程命令、文件读写等基础原语；探针、诊断、脚本、Program 等复杂能力可以委托给 `ask_1shell_ai`，由 1Shell AI 在内部编排执行，避免外部 Agent 的上下文被大量细碎工具污染。
 
 ```text
-本地 Claude Code / VSCode Claude / 外部 Agent
+Claude Code / Codex / OpenClaw / Hermes / 其他 MCP Agent
         │  HTTPS + Remote MCP Token
         ▼
 公网 VPS 上的 1Shell MCP Server
-        │  多层准入校验
-        ▼
-主机 / 文件 / 脚本 / 探针 / 告警 / 诊断 / Program / 审计
+        │
+        ├─ 基础工具：主机列表 / 命令执行 / 文件读写
+        └─ 1Shell AI 网关：探针 / 诊断 / 脚本 / Program / 复杂运维任务
 ```
 
 1Shell 会根据访问来源（hostname + 客户端 IP）**自动区分本地访问与远程访问**：本地走 Bridge Token，远程走 Remote MCP Token，两条鉴权路径隔离。
@@ -202,7 +214,7 @@ Program 的执行由 Program Engine 编排：按步骤顺序执行，AI 步骤�
 | Program | 多步骤运维程序，支持 exec / ai / render 步骤混合 |
 | 1Shell Skill | 指导 1Shell AI 完成某类任务的能力包（markdown 工作手册） |
 | Claude Code Skill | 标准 Claude Code Skill 的托管与管理 |
-| MCP Server | 内部工具扩展与外部 Agent 协作 |
+| MCP Server | 标准 MCP Server，对外提供基础运维工具与 1Shell AI 网关 |
 
 创作台（Skill Studio）用于创建和维护这些资产。1Shell AI 可以根据用户需求匹配并加载对应的 Skill，按 Skill 中写明的步骤、约束和风格完成创作，再把生成的 Program / Skill 文件写入并重新加载 registry。
 
@@ -245,7 +257,22 @@ docker compose up -d
 ```bash
 git clone https://github.com/weidu12123/1Shell.git
 cd 1Shell
+
+# Linux / macOS
+bash start.sh
+
+# Windows
+start.bat
+```
+
+启动脚本会自动安装后端依赖、在缺少 `frontend/dist` 时安装并构建前端、从 `.env.example` 创建 `.env`。
+
+手动启动：
+
+```bash
 npm install
+npm --prefix frontend install
+npm --prefix frontend run build
 cp .env.example .env
 npm start
 ```
@@ -297,7 +324,7 @@ PORT=3301
 
 ## 外部 MCP 协作接入示例
 
-如果你希望让外部 Agent 调用 1Shell，可以把它配置为 MCP Server。根据部署位置分两种接入方式。
+如果你希望让外部 Agent 调用 1Shell，可以把它配置为 MCP Server。外部 Agent 可以直接使用主机列表、命令执行、文件读写等基础工具；遇到复杂运维目标时，推荐委托给 `ask_1shell_ai`，由 1Shell AI 在内部调用探针、脚本、诊断、Program 等能力完成编排。根据部署位置分两种接入方式。
 
 **本地 / 同机访问**（用 Bridge Token，无需开启远程开关）：
 
@@ -457,7 +484,7 @@ Browser
 - 小团队统一管理测试机、部署机和服务节点；
 - 需要在浏览器中同时处理终端、文件、脚本和监控的场景；
 - 希望让智能体在授权范围内协助排障、巡检、部署和维护；
-- 希望让内部智能体通过 MCP 调用 1Shell 全部平台能力，或在可信网络中开放给外部 AI 工具协作；
+- 希望通过 MCP 把 1Shell 开放给 Claude Code、Codex、OpenClaw、Hermes 等外部 Agent 协作；
 - 希望把常用运维流程沉淀为可复用 Program；
 - 希望在本地优先、可控、可审计的前提下构建个人运维中枢。
 
@@ -466,6 +493,3 @@ Browser
 ## License
 
 [MIT](LICENSE) © 2025 weidu12123
-
-##友链
-http://linux.do

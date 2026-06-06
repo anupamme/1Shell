@@ -407,6 +407,14 @@ function createProgramEngine({
       platform = hostService.getHostPlatformText?.(hostId, snapshot) || null;
     } catch { /* ignore */ }
     const host = platform ? { ...baseHost, platform } : baseHost;
+    recordTraceEvent('instruction', 'instruction_received', {
+      source: 'program-ai-workflow',
+      runId: runState.runId,
+      hostId,
+      toolName: 'program_instruction',
+      summary: `${program.name || program.id || 'Program'} / ${step.label || step.id || 'AI step'}: ${step.goal || step.result || action.label || action.name || ''}`,
+      secrets: runState.secretValues || [],
+    });
     return aiService.requestProgramWorkflowStep({
       program,
       action: { name: action.name, label: action.label },
@@ -419,6 +427,14 @@ function createProgramEngine({
         if (!command) return { content: '[ERROR] command 参数为空', is_error: true };
         const redactedCommand = redactRunText(runState, command);
         const resolvedTimeout = timeout || 120000;
+        recordTraceEvent('reasoning', 'tool_decision', {
+          source: 'program-ai-workflow',
+          runId: runState.runId,
+          hostId,
+          toolName: 'execute_command',
+          summary: `AI 决定执行命令：${redactedCommand}`,
+          secrets: runState.secretValues || [],
+        });
 
         // 经 harness 统一边界：guard（capability + 灾难拦截）→ 人审(此路关闭) → 执行 → 打码 → 轨迹
         if (harness?.dispatch) {
@@ -458,6 +474,14 @@ function createProgramEngine({
         return { content: formatAiCommandResult(redactedResult), is_error: redactedResult.exitCode !== 0 };
       },
       reportPhase: async ({ phase, status, message }) => {
+        recordTraceEvent('reasoning', 'phase_decision', {
+          source: 'program-ai-workflow',
+          runId: runState.runId,
+          hostId,
+          toolName: 'report_phase',
+          summary: `${phase || 'phase'} ${status || 'running'} ${message || ''}`.trim(),
+          secrets: runState.secretValues || [],
+        });
         emitProgramPhase({
           runId: runState.runId,
           programId: program.id,
@@ -469,6 +493,15 @@ function createProgramEngine({
         });
       },
       updateResult: async ({ title, status, content, final }) => {
+        recordTraceEvent(final ? 'result' : 'reasoning', final ? 'final_result' : 'reasoning_summary', {
+          source: 'program-ai-workflow',
+          runId: runState.runId,
+          hostId,
+          toolName: final ? 'publish_result' : 'update_result',
+          summary: `${title || program.name || step.label || 'AI 执行结果'} ${status || ''}`.trim(),
+          resultSummary: redactRunText(runState, content),
+          secrets: runState.secretValues || [],
+        });
         emitAiResultDraft({
           runState,
           runId: runState.runId,
@@ -486,6 +519,12 @@ function createProgramEngine({
 
   function emitWorkflow(payload) {
     io?.emit?.('program:workflow', payload);
+  }
+
+  function recordTraceEvent(stage, eventType, payload = {}) {
+    try {
+      harness?.recordEvent?.({ stage, eventType, ...payload });
+    } catch { /* trace must not block Program execution */ }
   }
 
   function setInstanceEnabled(programId, hostId, enabled) {

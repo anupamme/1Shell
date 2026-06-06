@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package collector samples host metrics from /proc and /sys.
 //
 // CPU and network rates use the dstatus-style 0.1s double-sample technique:
@@ -29,6 +31,7 @@ type Snapshot struct {
 	Disk         DiskInfo
 	Network      NetworkInfo
 	ProcessCount int
+	SystemHealth SystemHealthInfo
 }
 
 type CPUInfo struct {
@@ -70,6 +73,45 @@ type PlatformInfo struct {
 	DistroID   string
 	VersionID  string
 	PrettyName string
+}
+
+type SystemHealthInfo struct {
+	Network  SystemNetworkInfo
+	Process  SystemProcessInfo
+	Service  SystemServiceInfo
+	Logs     SystemLogsInfo
+	Security SystemSecurityInfo
+}
+
+type SystemNetworkInfo struct {
+	ListeningPortCount int
+	TCPConnectionCount int
+	TopListeningPorts  []ListeningPortInfo
+}
+
+type ListeningPortInfo struct {
+	Protocol string `json:"protocol"`
+	Port     string `json:"port"`
+	Process  string `json:"process"`
+}
+
+type SystemProcessInfo struct {
+	ZombieCount int
+}
+
+type SystemServiceInfo struct {
+	FailedServiceCount int
+	FailedServices     []string
+}
+
+type SystemLogsInfo struct {
+	RecentErrorCount int
+	RecentErrors     []string
+}
+
+type SystemSecurityInfo struct {
+	FirewallState string
+	SELinuxState  string
 }
 
 const sampleInterval = 1 * time.Second
@@ -123,6 +165,9 @@ func Collect() (Snapshot, error) {
 	}
 	if pc, err := readProcessCount(); err == nil {
 		snap.ProcessCount = pc
+	}
+	if sh, err := readSystemHealth(); err == nil {
+		snap.SystemHealth = sh
 	}
 
 	return snap, nil

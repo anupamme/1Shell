@@ -1,5 +1,7 @@
 'use strict';
 
+const { isReadonlyCommand } = require('./capabilities');
+
 /**
  * Harness Trace — 结构化执行轨迹。
  *
@@ -15,23 +17,39 @@ function genTraceId() {
 
 function createTrace({ db, logger, redact } = {}) {
   const redactText = typeof redact === 'function' ? redact : (v) => String(v || '');
-  const insertStmt = db
-    ? db.prepare(`
-        INSERT INTO harness_traces
-          (trace_id, ts_start, source, run_id, session_id, host_id, tool_name,
-           input_summary, capabilities, decision, block_reason, needed_approval)
-        VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-    : null;
-
-  const updateStmt = db
-    ? db.prepare(`
+  const hasColumn = createColumnChecker(db, 'harness_traces');
+  const riskColumnsReady = hasColumn('security_mode') && hasColumn('risk_level') && hasColumn('risk_rules') && hasColumn('risk_action');
+  const chainColumnsReady = hasColumn('stage') && hasColumn('event_type');
+  const insertColumns = [
+    'trace_id', 'ts_start', 'source', 'run_id', 'session_id', 'host_id', 'tool_name',
+    'input_summary', 'capabilities', 'decision', 'block_reason', 'needed_approval',
+  ];
+  if (riskColumnsReady) insertColumns.push('security_mode', 'risk_level', 'risk_rules', 'risk_action');
+  if (chainColumnsReady) insertColumns.push('stage', 'event_type');
+  const insertSql = `
+    INSERT INTO harness_traces
+      (${insertColumns.join(', ')})
+    VALUES (${insertColumns.map((column) => column === 'ts_start' ? "datetime('now')" : '?').join(', ')})
+  `;
+  const updateSql = riskColumnsReady
+    ? `
+        UPDATE harness_traces
+        SET ts_end = datetime('now'),
+            decision = ?, block_reason = ?, exit_code = ?, duration_ms = ?, result_summary = ?,
+            security_mode = COALESCE(?, security_mode),
+            risk_level = COALESCE(?, risk_level),
+            risk_rules = COALESCE(?, risk_rules),
+            risk_action = COALESCE(?, risk_action)
+        WHERE trace_id = ? AND id = (SELECT MAX(id) FROM harness_traces WHERE trace_id = ?)
+      `
+    : `
         UPDATE harness_traces
         SET ts_end = datetime('now'),
             decision = ?, block_reason = ?, exit_code = ?, duration_ms = ?, result_summary = ?
         WHERE trace_id = ? AND id = (SELECT MAX(id) FROM harness_traces WHERE trace_id = ?)
-      `)
-    : null;
+      `;
+  const insertStmt = db ? db.prepare(insertSql) : null;
+  const updateStmt = db ? db.prepare(updateSql) : null;
 
   // 内存态：trace_id -> { startedAt, rowReady }
   const pending = new Map();
@@ -41,7 +59,8 @@ function createTrace({ db, logger, redact } = {}) {
     pending.set(traceId, { startedAt: Date.now() });
     try {
       if (insertStmt) {
-        insertStmt.run(
+        const stage = classifyStage(toolName, input);
+        const args = [
           traceId,
           context.source || 'unknown',
           context.runId || null,
@@ -53,7 +72,14 @@ function createTrace({ db, logger, redact } = {}) {
           'pending',
           null,
           context.allowApproval ? 1 : 0,
-        );
+        ];
+        if (riskColumnsReady) {
+          args.push(context.securityMode || null, null, null, null);
+        }
+        if (chainColumnsReady) {
+          args.push(stage, 'tool_call');
+        }
+        insertStmt.run(...args);
       }
     } catch (err) {
       logger?.warn?.(`[harness-trace] start write failed: ${err.message}`);
@@ -61,7 +87,7 @@ function createTrace({ db, logger, redact } = {}) {
     return traceId;
   }
 
-  function end(traceId, { blocked, denied, error, reason, result, exitCode } = {}) {
+  function end(traceId, { blocked, denied, error, reason, result, exitCode, risk } = {}) {
     const meta = pending.get(traceId);
     pending.delete(traceId);
     const durationMs = meta ? Date.now() - meta.startedAt : null;
@@ -70,21 +96,31 @@ function createTrace({ db, logger, redact } = {}) {
     if (blocked) decision = 'blocked';
     else if (denied) decision = 'denied';
     else if (error) decision = 'error';
+    else if (risk?.risky) decision = risk.action === 'warn' ? 'allowed_with_warning' : 'allowed_after_security_check';
 
-    const blockReason = reason || error || null;
+    const riskSummary = summarizeRisk(risk);
+    const blockReason = reason || error || riskSummary || null;
     const resultSummary = summarizeResult(result, error);
 
     try {
       if (updateStmt) {
-        updateStmt.run(
+        const args = [
           decision,
           blockReason ? String(blockReason).slice(0, 1000) : null,
           typeof exitCode === 'number' ? exitCode : null,
           durationMs,
           resultSummary ? resultSummary.slice(0, 2000) : null,
-          traceId,
-          traceId,
-        );
+        ];
+        if (riskColumnsReady) {
+          args.push(
+            risk?.securityMode || null,
+            risk?.level || null,
+            risk?.matchedRules ? JSON.stringify(risk.matchedRules) : null,
+            risk?.action || null,
+          );
+        }
+        args.push(traceId, traceId);
+        updateStmt.run(...args);
       }
     } catch (err) {
       logger?.warn?.(`[harness-trace] end write failed: ${err.message}`);
@@ -92,7 +128,57 @@ function createTrace({ db, logger, redact } = {}) {
     return { traceId, decision, durationMs };
   }
 
-  return { start, end };
+  function recordEvent({ stage, eventType, source, runId, sessionId, hostId, toolName, summary, resultSummary, decision = 'event', capabilities = [], secrets = [] } = {}) {
+    if (!insertStmt || !chainColumnsReady) return null;
+    const traceId = genTraceId();
+    try {
+      const args = [
+        traceId,
+        source || 'unknown',
+        runId || null,
+        sessionId || null,
+        hostId || null,
+        toolName || eventType || stage || 'event',
+        redactText(summary || '', secrets).slice(0, 2000),
+        JSON.stringify(Array.isArray(capabilities) ? capabilities : []),
+        decision,
+        null,
+        0,
+      ];
+      if (riskColumnsReady) {
+        args.push(null, null, null, null);
+      }
+      args.push(normalizeStage(stage), eventType || 'event');
+      insertStmt.run(...args);
+      if (resultSummary && updateStmt) {
+        const updateArgs = [decision, null, null, 0, redactText(resultSummary, secrets).slice(0, 2000)];
+        if (riskColumnsReady) updateArgs.push(null, null, null, null);
+        updateArgs.push(traceId, traceId);
+        updateStmt.run(...updateArgs);
+      }
+      return traceId;
+    } catch (err) {
+      logger?.warn?.(`[harness-trace] event write failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  return { start, end, recordEvent };
+}
+
+function createColumnChecker(db, table) {
+  let columns = null;
+  return function hasColumn(name) {
+    if (!db) return false;
+    try {
+      if (!columns) {
+        columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+      }
+      return columns.has(name);
+    } catch {
+      return false;
+    }
+  };
 }
 
 function summarizeInput(toolName, input) {
@@ -116,4 +202,27 @@ function summarizeResult(result, error) {
   return `exit=${code} ${head.slice(0, 400)}`;
 }
 
-module.exports = { createTrace };
+function summarizeRisk(risk) {
+  if (!risk?.risky) return '';
+  const reasons = Array.isArray(risk.reasons) ? risk.reasons.join('、') : '';
+  const parts = [reasons, risk.level ? `风险等级=${risk.level}` : '', risk.securityMode ? `安全档位=${risk.securityMode}` : ''].filter(Boolean);
+  return parts.join('；');
+}
+
+function classifyStage(toolName, input = {}) {
+  if (toolName === 'execute_command' || toolName === 'host_exec') {
+    const command = String(input.command || '');
+    return isReadonlyCommand(command) ? 'perception' : 'execution';
+  }
+  if (/probe|list_hosts|read_remote_file|list_remote_dir|query_audit/i.test(String(toolName || ''))) {
+    return 'perception';
+  }
+  return 'execution';
+}
+
+function normalizeStage(stage) {
+  const value = String(stage || '').trim().toLowerCase();
+  return ['instruction', 'perception', 'reasoning', 'security', 'execution', 'result'].includes(value) ? value : 'execution';
+}
+
+module.exports = { createTrace, classifyStage };

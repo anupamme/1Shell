@@ -690,6 +690,9 @@ func buildProbe(agent Agent, latest LatestPayload, hasLatest bool) map[string]an
 	probe["load5"] = nestedNumber(payload, "load", "load5")
 	probe["load15"] = nestedNumber(payload, "load", "load15")
 	probe["processCount"] = numberValue(payload, "processCount")
+	if systemHealth, ok := payload["systemHealth"].(map[string]any); ok {
+		probe["systemHealth"] = systemHealth
+	}
 	probe["bandwidthRxBps"] = nestedNumber(payload, "network", "rxBps")
 	probe["bandwidthTxBps"] = nestedNumber(payload, "network", "txBps")
 	probe["networkRxBytes"] = nestedNumber(payload, "network", "rxBytes")

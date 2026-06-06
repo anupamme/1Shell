@@ -11,28 +11,27 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import { io, type Socket } from 'socket.io-client';
 
 import { useNotifyStore } from '@/stores/notify';
+import { bindIdeStreamHandlers } from '@/utils/ideStreamEvents';
+import { createStreamDeltaBuffer } from '@/utils/streaming';
+import {
+  appendAiLine,
+  appendAiStreamDelta,
+  appendAiToolLog,
+  createAiAssistantTurn,
+  createAiUserTurn,
+  finishAiToolCall,
+  markAiAssistantStatus,
+  startAiToolCall,
+  type AiAgentTurn,
+  type AiAssistantTurn,
+  type AiLineKind,
+  type AiTextLine,
+  type AiToolCallState,
+} from '@/utils/aiMessages';
 
-type LineKind = 'stdout' | 'stderr' | 'info' | 'error' | 'success' | 'stream';
-
-export interface FabLine {
-  kind: LineKind;
-  text: string;
-}
-
-export interface FabToolCall {
-  toolUseId: string;
-  name: string;
-  status: 'running' | 'done' | 'error';
-  startedAt: number;
-  durationMs?: number;
-}
-
-export interface FabTurn {
-  role: 'user' | 'assistant';
-  text?: string;
-  lines?: FabLine[];
-  toolCalls?: FabToolCall[];
-}
+export type FabLine = AiTextLine;
+export type FabToolCall = AiToolCallState;
+export type FabTurn = AiAgentTurn;
 
 export interface FabApproveRequest {
   requestId: string;
@@ -73,7 +72,9 @@ export interface AiFabApi {
   prefillAndSend(message: string, onOpen?: () => void): void;
 }
 
-let _instance: AiFabApi | null = null;
+type InternalAiFabApi = AiFabApi & { dispose(): void };
+
+let _instance: InternalAiFabApi | null = null;
 
 export function useAiFab(): AiFabApi {
   if (!_instance) _instance = create();
@@ -81,6 +82,7 @@ export function useAiFab(): AiFabApi {
 }
 
 export function _resetAiFabSingleton(): void {
+  _instance?.dispose();
   _instance = null;
 }
 
@@ -93,14 +95,14 @@ function genSessionId(): string {
   return 'fab-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
-function create(): AiFabApi {
+function create(): InternalAiFabApi {
   const notify = useNotifyStore();
 
   const turns = ref<FabTurn[]>([]);
   const isRunning = ref(false);
   const inputText = ref('');
   const statusText = ref('待命');
-  const safeMode = ref(true);
+  const safeMode = ref(false);
   const approveRequest = ref<FabApproveRequest | null>(null);
   const approveCustomText = ref('');
   const moduleCtx = ref<ModuleContext>({ name: '1Shell', icon: '🖥', hint: '' });
@@ -108,7 +110,7 @@ function create(): AiFabApi {
   const hasMessages = computed(() => turns.value.length > 0);
 
   let sessionId: string | null = null;
-  let currentAssistant: FabTurn | null = null;
+  let currentAssistant: AiAssistantTurn | null = null;
   let socket: Socket | null = null;
   let socketBound = false;
   let approveTickHandle: number | null = null;
@@ -117,6 +119,7 @@ function create(): AiFabApi {
   let sendAckHandle: number | null = null;
   let sendConnectHandle: number | null = null;
   let pendingConnectSend: (() => void) | null = null;
+  let streamCleanup: (() => void) | null = null;
   let activeRunId: string | null = null;
   let stopRequested = false;
   const stoppedRunIds = new Set<string>();
@@ -158,51 +161,40 @@ function create(): AiFabApi {
   function setStatus(text: string): void { statusText.value = text; }
 
   function pushUser(text: string): void {
-    turns.value.push({ role: 'user', text });
+    turns.value.push(createAiUserTurn(text));
     currentAssistant = null;
   }
 
-  function ensureAssistant(): FabTurn {
+  function ensureAssistant(): AiAssistantTurn {
     if (!currentAssistant) {
-      const t: FabTurn = { role: 'assistant', lines: [] };
+      const t = createAiAssistantTurn();
       turns.value.push(t);
       currentAssistant = t;
     }
     return currentAssistant;
   }
 
-  function appendLine(kind: LineKind, text: string): void {
-    const t = ensureAssistant();
-    t.lines!.push({ kind, text });
+  function touchTurns(): void {
+    turns.value = [...turns.value];
   }
 
-  /** 流式增量追加 — 只拼接到最后一个 'stream' line。
-   *  用专门的 'stream' kind 与 'stdout'（工具结果）区分，避免在
-   *  text-delta → tool-end → text-delta 序列里把第二段 AI 文本拼到工具结果末尾。 */
-  /** 流式增量追加 — RAF batched 避免高频 reactive 更新。 */
-  let pendingDelta = '';
-  let deltaRaf: number | null = null;
-  function flushDelta(): void {
-    deltaRaf = null;
-    const flushed = pendingDelta;
-    pendingDelta = '';
-    if (!flushed) return;
-    const t = ensureAssistant();
-    const lines = t.lines!;
-    const last = lines[lines.length - 1];
-    if (last && last.kind === 'stream') {
-      last.text += flushed;
-    } else {
-      lines.push({ kind: 'stream', text: flushed });
-    }
+  function appendLine(kind: AiLineKind, text: string): void {
+    deltaBuffer.flushNow();
+    appendAiLine(ensureAssistant(), kind, text);
+    touchTurns();
   }
+
+  const deltaBuffer = createStreamDeltaBuffer((flushed) => {
+    appendAiStreamDelta(ensureAssistant(), flushed);
+    touchTurns();
+  });
+
   function appendDelta(text: string): void {
-    pendingDelta += text;
-    if (deltaRaf !== null) return;
-    deltaRaf = requestAnimationFrame(flushDelta);
+    deltaBuffer.push(text);
   }
 
   function finalize(): void {
+    deltaBuffer.flushNow();
     isRunning.value = false;
     stopRequested = false;
     currentAssistant = null;
@@ -267,99 +259,103 @@ function create(): AiFabApi {
     if (!socket) return;
     socketBound = true;
 
-    // 1:1 复刻 ai-fab.js:286-321 — 与 ide-panel.js 同一 ide:* 协议
-    socket.on('ide:thinking', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage;
-      if (!matchesCurrentRun(m)) return;
-      currentTextHadDelta = false;
-      setStatus('思考中...');
-    });
-    socket.on('ide:text', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage & { text?: string };
-      if (!matchesCurrentRun(m) || !m.text || currentTextHadDelta) return;
-      appendDelta(m.text);
-    });
-    socket.on('ide:text-delta', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage & { delta?: string };
-      if (!matchesCurrentRun(m) || !m.delta) return;
-      currentTextHadDelta = true;
-      setStatus('生成中...');
-      appendDelta(m.delta);
-    });
-    socket.on('ide:tool-start', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage & { name?: string; input?: unknown; toolUseId?: string };
-      if (!matchesCurrentRun(m)) return;
-      const t = ensureAssistant();
-      if (!t.toolCalls) t.toolCalls = [];
-      t.toolCalls.push({
-        toolUseId: m.toolUseId || `tool-${Date.now()}`,
-        name: m.name || 'unknown',
-        status: 'running',
-        startedAt: Date.now(),
-      });
-      setStatus(m.name ? `调用 ${m.name}...` : '调用工具...');
-    });
-    socket.on('ide:tool-end', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage & { result?: unknown; is_error?: boolean; toolUseId?: string };
-      if (!matchesCurrentRun(m)) return;
-      const t = currentAssistant;
-      if (t?.toolCalls && m.toolUseId) {
-        const call = t.toolCalls.find((c) => c.toolUseId === m.toolUseId);
-        if (call) {
-          call.status = m.is_error ? 'error' : 'done';
-          call.durationMs = Date.now() - call.startedAt;
+    streamCleanup = bindIdeStreamHandlers(socket, [
+      ['ide:thinking', (msg: unknown) => {
+        const m = msg as IdeSocketMessage;
+        if (!matchesCurrentRun(m)) return;
+        currentTextHadDelta = false;
+        setStatus('思考中...');
+      }],
+      ['ide:text', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { text?: string };
+        if (!matchesCurrentRun(m) || !m.text || currentTextHadDelta) return;
+        appendDelta(m.text);
+      }],
+      ['ide:text-delta', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { delta?: string };
+        if (!matchesCurrentRun(m) || !m.delta) return;
+        currentTextHadDelta = true;
+        setStatus('生成中...');
+        appendDelta(m.delta);
+      }],
+      ['ide:tool-start', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { name?: string; input?: unknown; toolUseId?: string };
+        if (!matchesCurrentRun(m)) return;
+        deltaBuffer.flushNow();
+        startAiToolCall(ensureAssistant(), m.toolUseId || `tool-${Date.now()}`, m.name || 'unknown', m.input);
+        touchTurns();
+        setStatus(m.name ? `调用 ${m.name}...` : '调用工具...');
+      }],
+      ['ide:tool-delta', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { toolUseId?: string; stream?: string; text?: string };
+        if (!matchesCurrentRun(m) || !m.toolUseId || !m.text || !currentAssistant) return;
+        deltaBuffer.flushNow();
+        if (appendAiToolLog(currentAssistant, m.toolUseId, m.stream === 'stderr' ? 'stderr' : 'stdout', m.text)) {
+          touchTurns();
+          setStatus('工具执行中...');
         }
-      }
-      setStatus(m.is_error ? '工具返回错误' : '思考中...');
-    });
-    socket.on('ide:done', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage & { round?: number };
-      if (!matchesCurrentRun(m)) return;
-      setStatus(`完成 (${m.round ?? 0} 轮)`);
-      finalize();
-    });
-    socket.on('ide:error', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage & { error?: string };
-      if (!matchesCurrentRun(m)) return;
-      setStatus('出错');
-      appendLine('error', `✘ ${m.error || '未知错误'}`);
-      finalize();
-    });
-    socket.on('ide:cancelled', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage;
-      if (!matchesCurrentRun(m, { allowStopped: true, allowAfterStop: true })) return;
-      rememberStoppedRun(m.runId);
-      setStatus('已取消');
-      finalize();
-    });
+      }],
+      ['ide:tool-end', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { result?: unknown; is_error?: boolean; toolUseId?: string };
+        if (!matchesCurrentRun(m)) return;
+        if (currentAssistant && m.toolUseId && finishAiToolCall(currentAssistant, m.toolUseId, Boolean(m.is_error), m.result)) {
+          touchTurns();
+        }
+        setStatus(m.is_error ? '工具返回错误' : '思考中...');
+      }],
+      ['ide:done', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { round?: number };
+        if (!matchesCurrentRun(m)) return;
+        deltaBuffer.flushNow();
+        markAiAssistantStatus(currentAssistant, 'done');
+        touchTurns();
+        setStatus(`完成 (${m.round ?? 0} 轮)`);
+        finalize();
+      }],
+      ['ide:error', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & { error?: string };
+        if (!matchesCurrentRun(m)) return;
+        setStatus('出错');
+        appendLine('error', `✘ ${m.error || '未知错误'}`);
+        finalize();
+      }],
+      ['ide:cancelled', (msg: unknown) => {
+        const m = msg as IdeSocketMessage;
+        if (!matchesCurrentRun(m, { allowStopped: true, allowAfterStop: true })) return;
+        deltaBuffer.flushNow();
+        markAiAssistantStatus(currentAssistant, 'cancelled');
+        touchTurns();
+        rememberStoppedRun(m.runId);
+        setStatus('已取消');
+        finalize();
+      }],
+      ['ide:approve-request', (msg: unknown) => {
+        const m = msg as IdeSocketMessage & {
+          requestId?: string;
+          title?: string;
+          toolName?: string;
+          detail?: string;
+        };
+        if (!matchesCurrentRun(m) || !m.requestId) return;
 
-    // 安全模式审批（1:1 复刻 ai-fab.js:318-321 + 434-468 — 120s 倒计时）
-    socket.on('ide:approve-request', (...args: unknown[]) => {
-      const m = args[0] as IdeSocketMessage & {
-        requestId?: string;
-        title?: string;
-        toolName?: string;
-        detail?: string;
-      };
-      if (!matchesCurrentRun(m) || !m.requestId) return;
-
-      clearApproveTick();
-      approveCustomText.value = '';
-      approveRequest.value = {
-        requestId: m.requestId,
-        sessionId: m.sessionId!,
-        title: m.title || '安全模式',
-        toolName: m.toolName || '操作',
-        detail: m.detail || '',
-        countdown: 120,
-      };
-      approveTickHandle = window.setInterval(() => {
-        const req = approveRequest.value;
-        if (!req) { clearApproveTick(); return; }
-        req.countdown -= 1;
-        if (req.countdown <= 0) respondApprove('deny');
-      }, 1000);
-    });
+        clearApproveTick();
+        approveCustomText.value = '';
+        approveRequest.value = {
+          requestId: m.requestId,
+          sessionId: m.sessionId!,
+          title: m.title || '安全模式',
+          toolName: m.toolName || '操作',
+          detail: m.detail || '',
+          countdown: 120,
+        };
+        approveTickHandle = window.setInterval(() => {
+          const req = approveRequest.value;
+          if (!req) { clearApproveTick(); return; }
+          req.countdown -= 1;
+          if (req.countdown <= 0) respondApprove('deny');
+        }, 1000);
+      }],
+    ]);
   }
 
   function setSafeMode(v: boolean): void {
@@ -493,6 +489,7 @@ function create(): AiFabApi {
     stopRequested = false;
     stoppedRunIds.clear();
     currentAssistant = null;
+    deltaBuffer.clear();
     turns.value = [];
     setStatus('待命');
   }
@@ -507,8 +504,15 @@ function create(): AiFabApi {
   function initialize(): void {
     if (initialized) return;
     initialized = true;
-    // 老版懒连接：socket 在第一次 sendMessage / setSafeMode 时才建立。
-    // 这里不主动建,避免 7 个非排除页一进就建 socket 浪费连接。
+  }
+
+  function dispose(): void {
+    streamCleanup?.();
+    streamCleanup = null;
+    finalize();
+    socketBound = false;
+    socket?.disconnect();
+    socket = null;
   }
 
   return {
@@ -531,5 +535,6 @@ function create(): AiFabApi {
     approveDeny,
     approveCustom,
     prefillAndSend,
+    dispose,
   };
 }

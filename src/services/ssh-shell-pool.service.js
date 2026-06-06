@@ -68,11 +68,37 @@ function createSshShellPool({ hostService }) {
 
   // ─── Shell 数据处理 ──────────────────────────────────────────────────────
 
+  function emitPendingOutput(entry) {
+    const cmd = entry.pendingCmd;
+    if (!cmd || typeof cmd.onOutput !== 'function') return;
+
+    const endIdx = entry.buffer.indexOf(`${cmd.endMarker} `);
+    const outputEnd = endIdx >= 0 ? endIdx : entry.buffer.length;
+
+    if (!cmd.startSeen) {
+      const startIdx = entry.buffer.indexOf(cmd.startMarker);
+      if (startIdx < 0) return;
+      const lineEnd = entry.buffer.indexOf('\n', startIdx);
+      if (lineEnd < 0) return;
+      cmd.startSeen = true;
+      cmd.outputStart = lineEnd + 1;
+      cmd.streamedLength = 0;
+    }
+
+    if (outputEnd <= cmd.outputStart) return;
+    const output = entry.buffer.substring(cmd.outputStart, outputEnd);
+    const delta = output.substring(cmd.streamedLength || 0);
+    if (!delta) return;
+    cmd.streamedLength = output.length;
+    try { cmd.onOutput({ stream: 'stdout', text: delta }); } catch { /* ignore */ }
+  }
+
   function onShellData(hostId, chunk) {
     const entry = pool.get(hostId);
     if (!entry || !entry.pendingCmd) return;
 
     entry.buffer += chunk.toString('utf8');
+    emitPendingOutput(entry);
 
     const { endMarker } = entry.pendingCmd;
     const endPattern = `${endMarker} `;
@@ -125,7 +151,7 @@ function createSshShellPool({ hostService }) {
       processQueue(hostId);
       return;
     }
-    _execOnEntry(hostId, entry, next.command, next.timeoutMs, next.startAt, next.signal)
+    _execOnEntry(hostId, entry, next.command, next.timeoutMs, next.startAt, next.signal, next.onOutput)
       .then(next.resolve)
       .catch(next.reject);
   }
@@ -195,7 +221,7 @@ function createSshShellPool({ hostService }) {
    * @param {number} [timeoutMs=30000]
    * @returns {Promise<{stdout: string, stderr: string, exitCode: number, durationMs: number}>}
    */
-  async function exec(hostId, command, timeoutMs = 30000, { signal } = {}) {
+  async function exec(hostId, command, timeoutMs = 30000, { signal, onOutput } = {}) {
     if (signal?.aborted) throw makeAbortError();
     const startAt = Date.now();
 
@@ -204,7 +230,7 @@ function createSshShellPool({ hostService }) {
     // shell 正忙 → 排队等待，不销毁正在运行的命令
     if (entry && entry.busy) {
       return new Promise((resolve, reject) => {
-        const queued = { command, timeoutMs, startAt, resolve, reject, signal };
+        const queued = { command, timeoutMs, startAt, resolve, reject, signal, onOutput };
         const onAbort = () => {
           entry.queue = entry.queue.filter((item) => item !== queued);
           reject(makeAbortError());
@@ -220,10 +246,10 @@ function createSshShellPool({ hostService }) {
       entry = await createShellEntry(hostId);
     }
 
-    return _execOnEntry(hostId, entry, command, timeoutMs, startAt, signal);
+    return _execOnEntry(hostId, entry, command, timeoutMs, startAt, signal, onOutput);
   }
 
-  function _execOnEntry(hostId, entry, command, timeoutMs, startAt, signal) {
+  function _execOnEntry(hostId, entry, command, timeoutMs, startAt, signal, onOutput) {
     if (signal?.aborted) return Promise.reject(makeAbortError());
     const startMarker = makeMarker();
     const endMarker   = makeMarker();
@@ -266,6 +292,10 @@ function createSshShellPool({ hostService }) {
           reject(err);
         },
         timer,
+        onOutput,
+        startSeen: false,
+        outputStart: 0,
+        streamedLength: 0,
       };
 
       // 发送命令到 shell:

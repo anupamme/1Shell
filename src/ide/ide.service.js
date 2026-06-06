@@ -1,6 +1,8 @@
 'use strict';
 
+const { EventEmitter } = require('events');
 const fetch = require('node-fetch');
+const { emitIdeEvent } = require('./ide.events');
 const {
   ONESHELL_CORE_SYSTEM_PROMPT,
   ONESHELL_AUTHORING_SYSTEM_PROMPT,
@@ -9,7 +11,7 @@ const {
 
 function emitToSession(session, fallbackSocket, event, payload) {
   const target = session?.socket || fallbackSocket;
-  try { target?.emit?.(event, payload); } catch { /* ignore */ }
+  try { emitIdeEvent(target, event, payload); } catch { /* ignore */ }
 }
 
 // ─── 增量 SSE 解析（实时推送 text delta + 随时可中断） ─────────────────────
@@ -74,6 +76,8 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
 
       if (evt.type === 'error') {
         resolved = true;
+        cleanup();
+        try { stream.destroy(); } catch { /* ignore */ }
         reject(new Error(evt.error?.message || 'SSE error'));
         return;
       }
@@ -299,7 +303,7 @@ function promptForEntry(entry) {
  *   - 工具集更广（read_file / list_artifacts / trigger_program / query_format 等）
  *   - 用户是对话主体，AI 响应用户指令而非自驱执行
  */
-function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry }) {
+function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry, harness }) {
 
   // sessionId → { messages[], system, hostId, abortController }
   const sessions = new Map();
@@ -361,6 +365,16 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
     return err?.name === 'AbortError' || err?.code === 'CANCELLED' || err?.code === 'RUN_REPLACED';
   }
 
+  function recordTraceEvent(stage, eventType, payload = {}) {
+    try {
+      harness?.recordEvent?.({ stage, eventType, ...payload });
+    } catch { /* trace must not block IDE execution */ }
+  }
+
+  function summarizeToolInput(input) {
+    try { return JSON.stringify(input || {}).slice(0, 500); } catch { return ''; }
+  }
+
   function newRunId() {
     return `run-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
   }
@@ -409,10 +423,140 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
     }
   }
 
-  function waitForApproval(socket, sessionId, tc, session, runId) {
+  function cleanPolicyList(value) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))];
+  }
+
+  function normalizeToolPolicy(policy = {}) {
+    const gatewayMode = String(policy.gatewayMode || '').trim();
+    return {
+      allowedTools: cleanPolicyList(policy.allowedTools),
+      allowedHosts: cleanPolicyList(policy.allowedHosts),
+      allowedScripts: cleanPolicyList(policy.allowedScripts),
+      allowedPaths: cleanPolicyList(policy.allowedPaths),
+      gatewayMode: ['answer', 'plan', 'execute'].includes(gatewayMode) ? gatewayMode : 'answer',
+    };
+  }
+
+  function allowsValue(value, allowed) {
+    if (!Array.isArray(allowed) || allowed.length === 0 || allowed.includes('*')) return true;
+    return allowed.includes(String(value || '').trim());
+  }
+
+  function normalizePolicyPath(value) {
+    return String(value || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+  }
+
+  function wildcardPolicyPathMatch(targetPath, rulePath) {
+    const escaped = rulePath.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}($|/)`).test(targetPath);
+  }
+
+  function allowsPath(value, allowedPaths) {
+    if (!Array.isArray(allowedPaths) || allowedPaths.length === 0 || allowedPaths.includes('*')) return true;
+    const target = normalizePolicyPath(value);
+    return allowedPaths.some((rule) => {
+      const normalizedRule = normalizePolicyPath(rule);
+      if (normalizedRule.includes('*')) return wildcardPolicyPathMatch(target, normalizedRule);
+      return target === normalizedRule || target.startsWith(`${normalizedRule}/`);
+    });
+  }
+
+  function deniedByPolicy(message) {
+    return { content: `[ERROR] ${message}`, is_error: true };
+  }
+
+  function filteredHostsForPolicy(policy) {
+    const hosts = hostService?.listHosts?.() || [];
+    const allowedHosts = policy.allowedHosts || [];
+    const visible = hosts.filter((host) => allowsValue(host.id, allowedHosts));
+    const lines = visible.map(h => `id=${h.id}  name=${h.name}  ${h.host || '127.0.0.1'}:${h.port || '-'}  type=${h.type || 'ssh'}`);
+    return { content: lines.length > 0 ? lines.join('\n') : '（无允许访问的主机）', is_error: false };
+  }
+
+  function applyToolPolicy(tc, session) {
+    const policy = session?.toolPolicy;
+    if (!policy) return null;
+    const input = tc.input || {};
+    const requiredDirectToolByInternalTool = {
+      execute_command: 'host_exec',
+      list_hosts: 'list_hosts',
+      list_remote_dir: 'list_remote_dir',
+      read_remote_file: 'read_remote_file',
+      write_remote_file: 'write_remote_file',
+      upload_file: 'upload_file',
+      download_file: 'download_file',
+    };
+    const directTool = requiredDirectToolByInternalTool[tc.name];
+    if (directTool && policy.allowedTools.length > 0 && !policy.allowedTools.includes('*') && !policy.allowedTools.includes(directTool)) {
+      return deniedByPolicy(`Remote MCP Token 不允许 1Shell AI 使用能力: ${directTool}`);
+    }
+    const writeTools = new Set([
+      'execute_command', 'write_file', 'write_program', 'run_skill', 'trigger_program',
+      'run_script', 'write_remote_file', 'upload_file', 'download_file', 'add_mcp_server',
+      'remove_mcp_server', 'deploy_local_mcp', 'ack_probe_alert', 'install_probe_agent',
+      'restart_probe_agent', 'uninstall_probe_agent', 'invoke_claude_code',
+    ]);
+    if ((policy.gatewayMode === 'answer' || policy.gatewayMode === 'plan') && writeTools.has(tc.name)) {
+      return deniedByPolicy(`mode=${policy.gatewayMode} 不允许执行变更型工具: ${tc.name}`);
+    }
+    if (tc.name === 'list_hosts' && policy.allowedHosts.length > 0 && !policy.allowedHosts.includes('*')) {
+      return filteredHostsForPolicy(policy);
+    }
+    const hostFieldsByTool = {
+      execute_command: ['hostId'],
+      run_skill: ['hostId'],
+      run_script: ['hostId'],
+      trigger_program: ['hostId'],
+      list_remote_dir: ['hostId'],
+      read_remote_file: ['hostId'],
+      write_remote_file: ['hostId'],
+      upload_file: ['hostId'],
+      download_file: ['hostId'],
+      get_probe: ['hostId'],
+      get_probe_samples: ['hostId'],
+      get_probe_timeseries: ['hostId'],
+      get_probe_traffic: ['hostId'],
+      install_probe_agent: ['hostId'],
+      restart_probe_agent: ['hostId'],
+      uninstall_probe_agent: ['hostId'],
+      probe_diag_ping: ['hostId'],
+      probe_diag_http: ['hostId'],
+      probe_diag_dns: ['hostId'],
+    };
+    for (const field of hostFieldsByTool[tc.name] || []) {
+      const value = String(input[field] || '').trim();
+      if (!value) continue;
+      if (value === 'all' && policy.allowedHosts.length > 0 && !policy.allowedHosts.includes('*')) {
+        return deniedByPolicy('Remote MCP Token 不允许访问全部主机');
+      }
+      if (!allowsValue(value, policy.allowedHosts)) return deniedByPolicy(`Remote MCP Token 不允许访问主机: ${value}`);
+    }
+    if (tc.name === 'run_script') {
+      const scriptId = String(input.scriptId || '').trim();
+      if (scriptId && !allowsValue(scriptId, policy.allowedScripts)) return deniedByPolicy(`Remote MCP Token 不允许运行脚本: ${scriptId}`);
+    }
+    const pathFieldsByTool = {
+      list_remote_dir: ['path'],
+      read_remote_file: ['path'],
+      write_remote_file: ['path'],
+      upload_file: ['dirPath', 'localPath'],
+      download_file: ['path', 'localPath'],
+    };
+    for (const field of pathFieldsByTool[tc.name] || []) {
+      const value = String(input[field] || '').trim();
+      if (value && !allowsPath(value, policy.allowedPaths)) return deniedByPolicy(`Remote MCP Token 不允许访问路径: ${value}`);
+    }
+    return null;
+  }
+
+  function waitForApproval(socket, sessionId, tc, session, runId, options = {}) {
     return new Promise((resolve, reject) => {
       const requestId = `apr-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-      const summary = getApprovalSummary(tc);
+      const baseSummary = getApprovalSummary(tc);
+      const summary = options.summary || baseSummary;
+      const riskReason = String(options.riskReason || '').trim();
       let unregisterCancel = null;
       let settled = false;
 
@@ -445,8 +589,8 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
           runId,
           requestId,
           toolName: tc.name,
-          title: summary.title,
-          detail: summary.detail,
+          title: options.title || summary.title,
+          detail: [summary.detail, riskReason ? `风险原因：${riskReason}` : ''].filter(Boolean).join('\n\n'),
         });
       } catch (err) {
         settle(reject, err);
@@ -466,6 +610,7 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
       applyPromptEntry(session, entry);
+      if (context?.toolPolicy) session.toolPolicy = normalizeToolPolicy(context.toolPolicy);
       return session;
     }
 
@@ -518,6 +663,7 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
       safeMode: true,
       unlimitedTurns: false,
       claudeCodeEnabled: false,
+      toolPolicy: context?.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null,
     };
     sessions.set(sessionId, session);
     return session;
@@ -549,6 +695,14 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
     const userContent = firstContextBlock + message;
 
     session.messages.push({ role: 'user', content: userContent });
+    recordTraceEvent('instruction', 'instruction_received', {
+      source: 'ide',
+      runId,
+      sessionId,
+      hostId: session.hostId,
+      toolName: 'ide_message',
+      summary: message,
+    });
 
     const provider = proxyConfigStore.getActiveProvider('skills')
                   || proxyConfigStore.getActiveProvider('claude-code');
@@ -704,6 +858,14 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
             emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: fullText });
           }
           emitToSession(session, socket, 'ide:text', { sessionId, runId, text: fullText });
+          recordTraceEvent('reasoning', toolCalls.length > 0 ? 'tool_decision' : 'reasoning_summary', {
+            source: 'ide',
+            runId,
+            sessionId,
+            hostId: session.hostId,
+            toolName: toolCalls.length > 0 ? 'ai_tool_decision' : 'ai_response',
+            summary: fullText,
+          });
         }
 
         session.messages.push({ role: 'assistant', content: data.content });
@@ -718,11 +880,26 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
         const runToolCall = async (tc) => {
           throwIfStopped(session, runId);
 
+          recordTraceEvent('reasoning', 'tool_decision', {
+            source: 'ide',
+            runId,
+            sessionId,
+            hostId: session.hostId,
+            toolName: tc.name,
+            summary: `AI 决定调用工具 ${tc.name}: ${summarizeToolInput(tc.input)}`,
+          });
           emitToSession(session, socket, 'ide:tool-start', { sessionId, runId, toolUseId: tc.id, name: tc.name, input: tc.input });
 
           let result;
 
-          if (session.safeMode && !READONLY_TOOLS.has(tc.name)) {
+          const policyResult = applyToolPolicy(tc, session);
+          if (policyResult) {
+            result = policyResult;
+            emitToSession(session, socket, 'ide:tool-end', { sessionId, runId, toolUseId: tc.id, name: tc.name, result: toolContentPreview(result.content).substring(0, 4000), is_error: result.is_error });
+            return { type: 'tool_result', tool_use_id: tc.id, content: compactToolResultForModel(tc.name, result.content), ...(result.is_error ? { is_error: true } : {}) };
+          }
+
+          if (session.safeMode && !READONLY_TOOLS.has(tc.name) && tc.name !== 'execute_command') {
             const approval = await waitForApproval(socket, sessionId, tc, session, runId);
             throwIfStopped(session, runId);
             if (approval.action === 'deny') {
@@ -736,6 +913,28 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
               return { type: 'tool_result', tool_use_id: tc.id, content: compactToolResultForModel(tc.name, result.content) };
             }
           }
+
+          const requestHarnessApproval = async (toolName, input, summary, riskReason) => {
+            const approval = await waitForApproval(socket, sessionId, { name: toolName, input: input || {} }, session, runId, {
+              summary,
+              riskReason,
+              title: '高风险操作确认',
+            });
+            throwIfStopped(session, runId);
+            return approval.action === 'allow';
+          };
+
+          const emitToolDelta = ({ stream = 'stdout', text = '' } = {}) => {
+            if (!text || !isRunCurrent(session, runId)) return;
+            emitToSession(session, socket, 'ide:tool-delta', {
+              sessionId,
+              runId,
+              toolUseId: tc.id,
+              name: tc.name,
+              stream: stream === 'stderr' ? 'stderr' : 'stdout',
+              text: String(text),
+            });
+          };
 
           const toolAc = new AbortController();
           const unregisterToolCancel = registerCancelHandler(session, () => toolAc.abort());
@@ -755,9 +954,12 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
               result = await ideTools.handle(tc.name, tc.input || {}, {
                 socket,
                 sessionId,
+                runId,
                 safeMode: session.safeMode,
                 session,
                 signal: toolAc.signal,
+                requestApproval: requestHarnessApproval,
+                onToolDelta: emitToolDelta,
               });
             }
           } finally {
@@ -806,6 +1008,91 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
       }
       logger?.error?.('IDE 执行异常', { sessionId, error: err.message });
       if (isRunCurrent(session, runId)) emitToSession(session, socket, 'ide:error', { sessionId, runId, error: err.message });
+    }
+  }
+
+  async function ask({ message, context = null, safeMode = true, claudeCodeEnabled = false, unlimitedTurns = false, entry = 'core', timeoutMs = 300000, approvalAction = 'deny' } = {}) {
+    const text = String(message || '').trim();
+    if (!text) throw new Error('message 为空');
+    const sessionId = `mcp-ai-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    const socket = new EventEmitter();
+    socket.id = sessionId;
+    const events = [];
+    const toolCalls = [];
+    const maxEvents = 100;
+    const maxOutputChars = 200000;
+    let output = '';
+    let outputTruncated = false;
+    let sawDelta = false;
+    let error = null;
+    const appendOutput = (value) => {
+      if (outputTruncated) return;
+      const textValue = String(value || '');
+      const remaining = maxOutputChars - output.length;
+      if (textValue.length <= remaining) {
+        output += textValue;
+        return;
+      }
+      output += textValue.slice(0, Math.max(0, remaining));
+      output += '\n...(1Shell AI 输出已截断)';
+      outputTruncated = true;
+    };
+    const redactInput = (value) => {
+      try {
+        return JSON.parse(JSON.stringify(value || {}, (key, item) => {
+          if (/token|key|secret|password|auth|content|base64/i.test(key)) return '<redacted>';
+          if (typeof item === 'string' && item.length > 500) return `${item.slice(0, 500)}…`;
+          return item;
+        }));
+      } catch { return {}; }
+    };
+    const summarizeEventPayload = (payload = {}) => {
+      const summary = { ...payload };
+      if (summary.delta) summary.delta = String(summary.delta).slice(0, 200);
+      if (summary.text) summary.text = String(summary.text).slice(0, 200);
+      if (summary.result) summary.result = String(summary.result).slice(0, 500);
+      if (summary.input) summary.input = redactInput(summary.input);
+      return summary;
+    };
+    const originalEmit = socket.emit.bind(socket);
+    socket.emit = (event, payload = {}) => {
+      if (events.length < maxEvents) events.push({ event, payload: summarizeEventPayload(payload) });
+      if (event === 'ide:text-delta' && payload.delta) {
+        sawDelta = true;
+        appendOutput(payload.delta);
+      }
+      if (event === 'ide:text' && !sawDelta && payload.text) {
+        appendOutput(payload.text);
+      }
+      if (event === 'ide:tool-start') {
+        toolCalls.push({ name: payload.name, input: redactInput(payload.input || {}) });
+      }
+      if (event === 'ide:error') {
+        error = String(payload.error || '1Shell AI 执行失败');
+      }
+      if (event === 'ide:approve-request') {
+        setImmediate(() => originalEmit('ide:approve-response', { requestId: payload.requestId, action: approvalAction }));
+      }
+      return originalEmit(event, payload);
+    };
+
+    const timeout = Number(timeoutMs) > 0 ? Math.min(Number(timeoutMs), 600000) : 300000;
+    let timer = null;
+    try {
+      await Promise.race([
+        handleMessage({ socket, sessionId, message: text, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            cancelSession(sessionId);
+            reject(new Error(`1Shell AI 超时 (${timeout}ms)`));
+          }, timeout);
+        }),
+      ]);
+      if (error) throw new Error(error);
+      return { text: output.trim(), events, toolCalls };
+    } finally {
+      if (timer) clearTimeout(timer);
+      sessions.delete(sessionId);
     }
   }
 
@@ -877,12 +1164,12 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
     session.socket = socket;
     session.socketId = socket.id;
     if (session.currentRunId && !session.cancelled) {
-      socket.emit('ide:thinking', { sessionId, runId: session.currentRunId });
+      emitIdeEvent(socket, 'ide:thinking', { sessionId, runId: session.currentRunId });
     }
     return { ok: true, running: !!session.currentRunId && !session.cancelled, runId: session.currentRunId };
   }
 
-  return { handleMessage, cancelSession, cancelSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession };
+  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession };
 }
 
 module.exports = { createIdeService };

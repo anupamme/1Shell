@@ -2,7 +2,7 @@
 // 左栏 - 主机列表 — 老 [public/index.html#L294-L308](public/index.html#L294-L308) + [public/hosts.js#L100-L152](public/hosts.js#L100-L152) 1:1
 // 含搜索 + 折叠 + 主机卡片（切换/编辑/删除/快捷链接）
 import type { MainHost } from '@/utils/mainConsole';
-import { isLocalHost } from '@/utils/mainConsole';
+import { formatOsInfo, isLocalHost } from '@/utils/mainConsole';
 
 interface Props {
   hosts: MainHost[];
@@ -31,6 +31,10 @@ function onSearchInput(e: Event): void {
 function metaText(h: MainHost): string {
   if (isLocalHost(h)) return '本地 Shell';
   return `${h.username || 'root'}@${h.host}:${h.port || 22}`;
+}
+
+function osText(h: MainHost): string {
+  return formatOsInfo(h.osInfo);
 }
 </script>
 
@@ -89,6 +93,7 @@ function metaText(h: MainHost): string {
             <span>{{ metaText(h) }}</span>
             <span v-if="h.proxyHostId" class="host-proxy-badge">经跳板机中继</span>
           </div>
+          <div class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">OS {{ osText(h) }}</div>
           <div v-if="h.links && h.links.length" class="host-links">
             <div class="host-links-title">网站任意门</div>
             <div class="host-links-list">

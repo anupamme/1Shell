@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { Readable } = require('stream');
 
 /**
  * 文件浏览服务
@@ -183,6 +184,177 @@ function createFileService({ hostService, probeAgentService = null }) {
   const SFTP_LIVENESS_SKIP_MS = 10000; // 10 秒内用过的连接跳过健康检测
   // Map<hostId, { client, proxyClient, sftp, timer, busy, lastUsed }>
   const sftpPool = new Map();
+
+  const DEFAULT_DOWNLOAD_CONCURRENCY = 32;
+  const DEFAULT_DOWNLOAD_CHUNK_SIZE = 256 * 1024;
+  const DEFAULT_DOWNLOAD_BUFFERED_CHUNKS = 64;
+
+  function clampInt(value, fallback, min, max) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, Math.floor(n)));
+  }
+
+  function getSftpReadTuning(sftp) {
+    const maxReadLen = clampInt(sftp?._maxReadLen, DEFAULT_DOWNLOAD_CHUNK_SIZE, 16 * 1024, DEFAULT_DOWNLOAD_CHUNK_SIZE);
+    const envChunkSize = clampInt(process.env.ONESHELL_SFTP_DOWNLOAD_CHUNK_SIZE, DEFAULT_DOWNLOAD_CHUNK_SIZE, 16 * 1024, DEFAULT_DOWNLOAD_CHUNK_SIZE);
+    const chunkSize = Math.min(envChunkSize, maxReadLen);
+    const concurrency = clampInt(process.env.ONESHELL_SFTP_DOWNLOAD_CONCURRENCY, DEFAULT_DOWNLOAD_CONCURRENCY, 1, 128);
+    const bufferedChunks = clampInt(process.env.ONESHELL_SFTP_DOWNLOAD_BUFFERED_CHUNKS, DEFAULT_DOWNLOAD_BUFFERED_CHUNKS, concurrency, 256);
+    return { chunkSize, concurrency, bufferedChunks };
+  }
+
+  function shellQuote(value) {
+    return `'${String(value).replace(/'/g, `'\\''`)}'`;
+  }
+
+  function parsePositiveSize(value) {
+    const size = Number(String(value || '').trim());
+    return Number.isFinite(size) && size >= 0 ? size : null;
+  }
+
+  function createParallelSftpReadStream(sftp, filePath, fileSize, options = {}) {
+    const totalSize = Math.max(0, Number(fileSize) || 0);
+    const chunkSize = clampInt(options.chunkSize, DEFAULT_DOWNLOAD_CHUNK_SIZE, 16 * 1024, DEFAULT_DOWNLOAD_CHUNK_SIZE);
+    const concurrency = clampInt(options.concurrency, DEFAULT_DOWNLOAD_CONCURRENCY, 1, 128);
+    const bufferedChunks = clampInt(options.bufferedChunks, DEFAULT_DOWNLOAD_BUFFERED_CHUNKS, concurrency, 256);
+
+    let handle = null;
+    let opened = false;
+    let opening = true;
+    let closing = false;
+    let ended = false;
+    let failed = false;
+    let nextOffset = 0;
+    let nextIndex = 0;
+    let expectedIndex = 0;
+    let deliveredBytes = 0;
+    let inflight = 0;
+    let effectiveSize = totalSize;
+    let backpressured = false;
+    const pending = new Map();
+
+    const stream = new Readable({
+      highWaterMark: Math.max(512 * 1024, chunkSize * 2),
+      read() {
+        backpressured = false;
+        flushReady();
+        scheduleReads();
+      },
+      destroy(err, cb) {
+        failed = Boolean(err);
+        closeHandle(() => cb(err));
+      },
+    });
+
+    function fail(err) {
+      if (failed || stream.destroyed) return;
+      failed = true;
+      stream.destroy(err);
+    }
+
+    function closeHandle(cb = () => {}) {
+      if (!handle || closing) {
+        cb();
+        return;
+      }
+      const h = handle;
+      handle = null;
+      closing = true;
+      sftp.close(h, () => {
+        closing = false;
+        cb();
+      });
+    }
+
+    function maybeEnd() {
+      if (ended || failed || opening || inflight > 0 || pending.size > 0) return;
+      if (nextOffset < effectiveSize || deliveredBytes < effectiveSize) return;
+      ended = true;
+      closeHandle(() => {
+        if (!stream.destroyed) stream.push(null);
+      });
+    }
+
+    function flushReady() {
+      if (failed || stream.destroyed || backpressured) return;
+      while (pending.has(expectedIndex)) {
+        const chunk = pending.get(expectedIndex);
+        pending.delete(expectedIndex);
+        expectedIndex += 1;
+        if (chunk.length === 0) continue;
+        deliveredBytes += chunk.length;
+        if (!stream.push(chunk)) {
+          backpressured = true;
+          break;
+        }
+      }
+      maybeEnd();
+    }
+
+    function scheduleReads() {
+      if (!opened || failed || stream.destroyed || ended || backpressured) return;
+      while (
+        inflight < concurrency
+        && pending.size + inflight < bufferedChunks
+        && nextOffset < effectiveSize
+      ) {
+        const offset = nextOffset;
+        const index = nextIndex;
+        const len = Math.min(chunkSize, effectiveSize - offset);
+        const buffer = Buffer.allocUnsafe(len);
+        nextOffset += len;
+        nextIndex += 1;
+        inflight += 1;
+
+        sftp.read(handle, buffer, 0, len, offset, (err, bytesRead, data) => {
+          inflight -= 1;
+          if (failed || stream.destroyed) return;
+          if (err) {
+            fail(new Error(`SFTP read failed: ${err.message}`));
+            return;
+          }
+
+          const n = Math.max(0, Number(bytesRead) || 0);
+          const chunk = n > 0
+            ? (Buffer.isBuffer(data) ? data.subarray(0, n) : buffer.subarray(0, n))
+            : Buffer.alloc(0);
+          if (n < len) {
+            effectiveSize = Math.min(effectiveSize, offset + n);
+            if (nextOffset > effectiveSize) nextOffset = effectiveSize;
+          }
+          pending.set(index, chunk);
+          flushReady();
+          scheduleReads();
+        });
+      }
+      maybeEnd();
+    }
+
+    sftp.open(filePath, 'r', (err, openedHandle) => {
+      opening = false;
+      if (stream.destroyed) {
+        if (openedHandle) {
+          handle = openedHandle;
+          closeHandle();
+        }
+        return;
+      }
+      if (err) {
+        fail(new Error(`SFTP open failed: ${err.message}`));
+        return;
+      }
+      handle = openedHandle;
+      opened = true;
+      if (effectiveSize === 0) {
+        maybeEnd();
+        return;
+      }
+      scheduleReads();
+    });
+
+    return stream;
+  }
 
   function releaseSftp(hostId) {
     const entry = sftpPool.get(hostId);
@@ -463,6 +635,7 @@ function createFileService({ hostService, probeAgentService = null }) {
       stream: fs.createReadStream(resolved),
       size: stat.size,
       filename: path.basename(resolved),
+      source: 'local',
     };
   }
 
@@ -470,7 +643,75 @@ function createFileService({ hostService, probeAgentService = null }) {
    * 下载远程文件，返回可读流和元信息
    * 注意：下载使用独立连接，因为流生命周期不可控
    */
-  async function downloadRemote(hostId, filePath) {
+  function statRemoteFileViaExec(client, filePath) {
+    const quotedPath = shellQuote(filePath);
+    const command = [
+      `p=${quotedPath}`,
+      'if [ -d "$p" ]; then printf "%s\\n" "DIR" >&2; exit 2; fi',
+      'if [ ! -r "$p" ]; then printf "%s\\n" "UNREADABLE" >&2; exit 3; fi',
+      'stat -Lc "%s" -- "$p"',
+    ].join('; ');
+
+    return new Promise((resolve, reject) => {
+      client.exec(command, { pty: false }, (err, stream) => {
+        if (err) return reject(err);
+        let stdout = '';
+        let stderr = '';
+        stream.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+        stream.stderr?.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+        stream.on('close', (code) => {
+          if (code !== 0) {
+            const reason = stderr.trim() || `exit ${code}`;
+            if (reason === 'DIR') return reject(new Error('不能下载目录'));
+            if (reason === 'UNREADABLE') return reject(new Error('文件不可读'));
+            return reject(new Error(`远程文件检查失败: ${reason}`));
+          }
+          const size = parsePositiveSize(stdout);
+          if (size === null) return reject(new Error(`远程文件大小解析失败: ${stdout.trim()}`));
+          resolve(size);
+        });
+        stream.on('error', reject);
+      });
+    });
+  }
+
+  async function downloadRemoteViaExec(hostId, filePath) {
+    assertSafeFilePath(filePath, '下载');
+    const { client, proxyClient } = await hostService.connectToHost(hostId, { readyTimeout: 15000, probeOs: false });
+    let closed = false;
+
+    function closeConnection() {
+      if (closed) return;
+      closed = true;
+      try { client.end(); } catch { /* ignore */ }
+      try { proxyClient?.end(); } catch { /* ignore */ }
+    }
+
+    try {
+      const size = await statRemoteFileViaExec(client, filePath);
+      const command = `exec cat < ${shellQuote(filePath)}`;
+      const stream = await new Promise((resolve, reject) => {
+        client.exec(command, { pty: false }, (err, execStream) => {
+          if (err) return reject(err);
+          execStream.stderr?.on('data', () => { /* keep stderr out of the file stream */ });
+          resolve(execStream);
+        });
+      });
+      stream.on('close', closeConnection);
+      stream.on('error', closeConnection);
+      return {
+        stream,
+        size,
+        filename: filePath.split('/').pop() || 'download',
+        source: 'ssh-exec',
+      };
+    } catch (err) {
+      closeConnection();
+      throw err;
+    }
+  }
+
+  async function downloadRemoteViaSftp(hostId, filePath) {
     assertSafeFilePath(filePath, '下载');
     const { client, proxyClient } = await hostService.connectToHost(hostId, { readyTimeout: 15000 });
 
@@ -491,7 +732,8 @@ function createFileService({ hostService, probeAgentService = null }) {
             return reject(new Error('不能下载目录'));
           }
 
-          const stream = sftp.createReadStream(filePath);
+          const tuning = getSftpReadTuning(sftp);
+          const stream = createParallelSftpReadStream(sftp, filePath, stats.size, tuning);
           const filename = filePath.split('/').pop() || 'download';
 
           stream.on('close', () => {
@@ -501,7 +743,7 @@ function createFileService({ hostService, probeAgentService = null }) {
             sftp.end(); client.end(); proxyClient?.end();
           });
 
-          resolve({ stream, size: stats.size, filename });
+          resolve({ stream, size: stats.size, filename, source: 'sftp' });
         });
       });
     });
@@ -510,6 +752,17 @@ function createFileService({ hostService, probeAgentService = null }) {
   /**
    * 统一入口：下载文件
    */
+  async function downloadRemote(hostId, filePath) {
+    if (process.env.ONESHELL_FILE_DOWNLOAD_MODE !== 'sftp') {
+      try {
+        return await downloadRemoteViaExec(hostId, filePath);
+      } catch (err) {
+        if (process.env.ONESHELL_FILE_DOWNLOAD_MODE === 'exec') throw err;
+      }
+    }
+    return downloadRemoteViaSftp(hostId, filePath);
+  }
+
   async function downloadFile(hostId, filePath) {
     const host = hostService.findHost(hostId);
     if (!host) throw new Error('主机不存在');

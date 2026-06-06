@@ -7,6 +7,7 @@ const yaml = require('js-yaml');
 const { EventEmitter } = require('events');
 const { ROOT_DIR } = require('../config/env');
 const { createOneShellCoreTools } = require('../tools/oneshell-core.tools');
+const { emitIdeEvent } = require('./ide.events');
 const { parseFrontmatter } = require('../skills/registry');
 const { normalizeProgram } = require('../programs/program-schema');
 
@@ -962,12 +963,12 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     return validation;
   }
 
-  async function handle(name, input, { socket, sessionId, safeMode, session, signal }) {
+  async function handle(name, input, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta }) {
     const authoringBlocked = null;
     if (authoringBlocked) return authoringBlocked;
 
     if (CORE_DELEGATED_TOOL_NAMES.has(name)) {
-      return coreTools.handle(name, input || {}, { socket, sessionId, safeMode, session, signal, source: 'ide' });
+      return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta, source: 'ide' });
     }
 
     switch (name) {
@@ -1406,7 +1407,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
         return handleInvokeClaudeCode(input, { session });
 
       default: {
-        const coreResult = await coreTools.handle(name, input || {}, { socket, sessionId, safeMode, session, source: 'ide' });
+        const coreResult = await coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta, source: 'ide' });
         if (!coreResult.is_error || !String(coreResult.content || '').startsWith('[ERROR] 未知工具:')) return coreResult;
         return err(`未知工具: ${name}`);
       }
@@ -1518,7 +1519,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
 
   function emitTool(socket, sessionId, toolName, input, result) {
     if (!socket) return;
-    socket.emit('ide:tool-call', { sessionId, tool: toolName, input, result: {
+    emitIdeEvent(socket, 'ide:tool-call', { sessionId, tool: toolName, input, result: {
       stdout: result.stdout?.substring(0, 4000),
       stderr: result.stderr?.substring(0, 2000),
       exitCode: result.exitCode,

@@ -5,6 +5,8 @@ import { computed, nextTick, ref, watch } from 'vue';
 import AppIcon from '@/components/AppIcon.vue';
 import ToolProgressBar, { type ToolCallItem } from '@/components/ToolProgressBar.vue';
 import type { SessionMessage, AiLineKind, AuthoringArtifact, AuthoringInteraction, AuthoringOption } from '@/utils/studio';
+import { renderMarkdown } from '@/utils/markdown';
+import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
 interface Props {
   messages: SessionMessage[];
@@ -130,15 +132,21 @@ function asStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
 }
 
-// 自动滚到底
 const scrollRef = ref<HTMLElement | null>(null);
-async function scrollToBottom(): Promise<void> {
-  await nextTick();
-  if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight;
+let followOutput = true;
+
+function onScroll(): void {
+  const el = scrollRef.value;
+  followOutput = !el || isNearScrollBottom(el);
 }
-watch(() => props.messages.length, scrollToBottom);
-watch(() => props.messages, scrollToBottom, { deep: true });
-watch(() => props.toolCalls, scrollToBottom, { deep: true });
+
+async function scrollToBottom(force = false): Promise<void> {
+  await nextTick();
+  scrollToBottomIfPinned(scrollRef.value, force || followOutput);
+}
+watch(() => props.messages.length, () => { void scrollToBottom(); });
+watch(() => props.messages, () => { void scrollToBottom(); }, { deep: true });
+watch(() => props.toolCalls, () => { void scrollToBottom(); }, { deep: true });
 </script>
 
 <template>
@@ -154,7 +162,7 @@ watch(() => props.toolCalls, scrollToBottom, { deep: true });
         @click="emit('clear')"
       >清空</button>
     </div>
-    <div ref="scrollRef" class="flex-1 overflow-auto p-4 flex flex-col gap-3">
+    <div ref="scrollRef" class="flex-1 overflow-auto p-4 flex flex-col gap-3" @scroll="onScroll">
       <div v-if="isEmpty" class="text-[11px] text-slate-400 text-center py-10 flex flex-col items-center gap-2">
         <AppIcon name="terminal" :size="36" class="opacity-50" />
         <span>选好主机和上下文后，在下方输入你的需求<br/>AI 会自由探索、创建、测试、迭代，支持多轮对话</span>
@@ -344,9 +352,10 @@ watch(() => props.toolCalls, scrollToBottom, { deep: true });
             <div
               v-for="(line, j) in t.lines"
               :key="j"
-              class="run-line"
+              class="run-line markdown-body"
               :class="line.kind"
-            >{{ line.content }}</div>
+              v-html="renderMarkdown(line.content)"
+            ></div>
           </div>
         </div>
       </template>

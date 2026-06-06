@@ -198,7 +198,7 @@ function createSessionService({ hostService }) {
       try { proxyClient?.end(); } catch { /* ignore */ }
     };
 
-    hostService.connectToHost(host.id)
+    hostService.connectToHost(host.id, { probeOs: true })
       .then(({ client, proxyClient: proxy }) => {
         sshClient = client;
         proxyClient = proxy;

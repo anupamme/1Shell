@@ -1,14 +1,37 @@
 node_modules
+frontend/node_modules
 npm-debug.log
+npm-cache
+.npm-cache
+
+# Local runtime secrets and state. The image creates /app/data and expects users
+# to mount their own data volume at runtime.
 .env
+.env.*
+!.env.example
 data/*.db
+data/*.db-*
 data/*.json
 data/*.log
+data/cli-sandbox
+data/programs
+data/claude-code-skills
+data/local-mcp
+data/geoip
+
+# Generated and local-only artifacts
+agent/.gocache
+agent/dist
+frontend/dist
 test
 test-results
-docs
 artifacts
-*.png
-*.md
+/*.png
+*.tmp
+*.bak
+evil.txt
+
 .git
+.github
 .claude
+.playwright-mcp
