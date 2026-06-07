@@ -19,8 +19,8 @@ const ASSETS = [
   },
   {
     sourceName: '1shell-4.1.0-windows-x64-with-deps-20260606-211813.zip',
-    outputName: '1shell-4.1.0-win-x64.zip',
-    packageName: '1shell-4.1.0-win-x64',
+    outputName: '1shell-4.1.0-windows-x64.zip',
+    packageName: '1shell-4.1.0-windows-x64',
   },
 ];
 

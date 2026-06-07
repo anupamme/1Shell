@@ -77,17 +77,14 @@ jobs:
           PACKAGE_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          stamp="$(date -u +'%Y%m%d-%H%M%S')"
-          node scripts/package-macos-release.js --arch "$PACKAGE_ARCH" --flavor starter --timestamp "$stamp"
-          node scripts/package-macos-release.js --arch "$PACKAGE_ARCH" --flavor with-deps --timestamp "$stamp"
-          node scripts/package-macos-release.js --arch "$PACKAGE_ARCH" --flavor offline --timestamp "$stamp"
+          node scripts/package-macos-release.js --arch "$PACKAGE_ARCH" --flavor offline
 
       - name: Smoke test offline package
         env:
           PACKAGE_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          offline="$(ls release/1shell-*-macos-${PACKAGE_ARCH}-offline-*.tar.gz | head -n 1)"
+          offline="$(ls release/1shell-*-macos-${PACKAGE_ARCH}.tar.gz | head -n 1)"
           tmp="$(mktemp -d)"
           tar -xzf "$offline" -C "$tmp"
           package_dir="$(find "$tmp" -maxdepth 1 -type d -name '1shell-*' | head -n 1)"
@@ -111,8 +108,8 @@ jobs:
         with:
           name: 1shell-macos-${{ matrix.arch }}-release
           path: |
-            release/1shell-*-macos-${{ matrix.arch }}-*.tar.gz
-            release/1shell-*-macos-${{ matrix.arch }}-*.sha256.txt
+            release/1shell-*-macos-${{ matrix.arch }}.tar.gz
+            release/1shell-*-macos-${{ matrix.arch }}.tar.gz.sha256.txt
           if-no-files-found: error
 
       - name: Upload assets to GitHub Release
@@ -125,6 +122,6 @@ jobs:
           set -euo pipefail
           gh release view "$RELEASE_TAG" >/dev/null
           gh release upload "$RELEASE_TAG" \
-            release/1shell-*-macos-${PACKAGE_ARCH}-*.tar.gz \
-            release/1shell-*-macos-${PACKAGE_ARCH}-*.sha256.txt \
+            release/1shell-*-macos-${PACKAGE_ARCH}.tar.gz \
+            release/1shell-*-macos-${PACKAGE_ARCH}.tar.gz.sha256.txt \
             --clobber

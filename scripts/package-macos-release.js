@@ -7,7 +7,8 @@
  * Flavors:
  * - starter: source package with bootstrap start.sh; installs deps on first run.
  * - with-deps: includes production node_modules built on macOS.
- * - offline: includes production node_modules plus runtime/node.
+ * - offline: includes production node_modules plus runtime/node; this is the
+ *   public release flavor and uses the short 1shell-version-macos-arch name.
  */
 
 const { execFileSync } = require('child_process');
@@ -150,7 +151,9 @@ function main() {
 
   validateInputs(flavor);
 
-  const packageName = `1shell-${pkg.version}-macos-${arch}-${flavor}-${stamp}`;
+  const packageName = flavor === 'offline'
+    ? `1shell-${pkg.version}-macos-${arch}`
+    : `1shell-${pkg.version}-macos-${arch}-${flavor}-${stamp}`;
   const workBase = args['work-dir'] ? path.resolve(args['work-dir']) : (process.env.RUNNER_TEMP || os.tmpdir());
   const workDir = path.join(workBase, `1shell-work-macos-${arch}-${flavor}-${stamp}`);
   const outDir = path.join(workDir, packageName);
