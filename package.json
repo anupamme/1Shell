@@ -80,7 +80,8 @@
     "win": {
       "artifactName": "1shell-desktop-${version}-windows-${arch}.${ext}",
       "target": [
-        "nsis"
+        "nsis",
+        "zip"
       ]
     },
     "nsis": {

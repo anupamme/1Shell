@@ -130,7 +130,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           gh release view "$env:RELEASE_TAG" | Out-Null
           $files = @(Get-ChildItem -Path release/desktop -File | Where-Object {
-            $_.Name -match '^1shell-desktop-.*\.(exe|dmg|AppImage)$'
+            $_.Name -match '^1shell-desktop-.*\.(exe|zip|dmg|AppImage)$'
           } | ForEach-Object { $_.FullName })
           if ($files.Count -eq 0) { throw 'No desktop release files found.' }
           gh release upload "$env:RELEASE_TAG" @files --clobber
