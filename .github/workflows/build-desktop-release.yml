@@ -104,6 +104,7 @@ jobs:
           if ($platform -eq 'win') {
             & runtime/node/node.exe -v
           } else {
+            Remove-Item -LiteralPath runtime/node/bin/npm,runtime/node/bin/npx,runtime/node/bin/corepack -Force -ErrorAction SilentlyContinue
             & runtime/node/bin/node -v
           }
 

@@ -54,6 +54,8 @@
     "appId": "com.oneshell.app",
     "productName": "1Shell",
     "asar": false,
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
     "directories": {
       "output": "release/desktop"
     },
