@@ -13,6 +13,7 @@
 const { execFileSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -150,7 +151,8 @@ function main() {
   validateInputs(flavor);
 
   const packageName = `1shell-${pkg.version}-macos-${arch}-${flavor}-${stamp}`;
-  const workDir = path.join(RELEASE_DIR, `work-macos-${arch}-${flavor}-${stamp}`);
+  const workBase = args['work-dir'] ? path.resolve(args['work-dir']) : (process.env.RUNNER_TEMP || os.tmpdir());
+  const workDir = path.join(workBase, `1shell-work-macos-${arch}-${flavor}-${stamp}`);
   const outDir = path.join(workDir, packageName);
   const tarball = path.join(RELEASE_DIR, `${packageName}.tar.gz`);
   const checksumFile = `${tarball}.sha256.txt`;
