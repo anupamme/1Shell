@@ -12,8 +12,16 @@ const RELEASE_DIR = path.join(ROOT, 'release');
 const OUTPUT_DIR = process.argv[2] ? path.resolve(process.argv[2]) : path.join(RELEASE_DIR, 'repacked');
 
 const ASSETS = [
-  '1shell-4.1.0-linux-x64-with-deps-20260606-211813.tar.gz',
-  '1shell-4.1.0-windows-x64-with-deps-20260606-211813.zip',
+  {
+    sourceName: '1shell-4.1.0-linux-x64-with-deps-20260606-211813.tar.gz',
+    outputName: '1shell-4.1.0-linux-x64.tar.gz',
+    packageName: '1shell-4.1.0-linux-x64',
+  },
+  {
+    sourceName: '1shell-4.1.0-windows-x64-with-deps-20260606-211813.zip',
+    outputName: '1shell-4.1.0-win-x64.zip',
+    packageName: '1shell-4.1.0-win-x64',
+  },
 ];
 
 const FILES = [
@@ -126,8 +134,8 @@ function sha256File(filePath) {
   return hash.digest('hex');
 }
 
-function repack(assetName) {
-  const source = path.join(RELEASE_DIR, assetName);
+function repack(asset) {
+  const source = path.join(RELEASE_DIR, asset.sourceName);
   if (!fs.existsSync(source)) {
     throw new Error(`Missing local asset: ${source}`);
   }
@@ -135,25 +143,36 @@ function repack(assetName) {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneshell-repack-'));
   try {
     const extractArgs = ['-xf', source, '-C', workDir];
-    if (assetName.endsWith('.tar.gz') && process.platform === 'win32') {
+    if (asset.sourceName.endsWith('.tar.gz') && process.platform === 'win32') {
       extractArgs.push('--exclude=*/node_modules/.bin/*');
     }
     execFileSync('tar', extractArgs, { stdio: 'inherit' });
-    const packageDir = findPackageDir(workDir);
+    let packageDir = findPackageDir(workDir);
     overlay(packageDir);
+    if (path.basename(packageDir) !== asset.packageName) {
+      const renamedPackageDir = path.join(workDir, asset.packageName);
+      rm(renamedPackageDir);
+      fs.renameSync(packageDir, renamedPackageDir);
+      packageDir = renamedPackageDir;
+    }
 
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-    const output = path.join(OUTPUT_DIR, assetName);
+    const output = path.join(OUTPUT_DIR, asset.outputName);
     rm(output);
-    if (assetName.endsWith('.zip')) {
+    if (asset.outputName.endsWith('.zip')) {
       execFileSync('tar', ['-a', '-cf', output, '-C', workDir, path.basename(packageDir)], { stdio: 'inherit' });
     } else {
       execFileSync('tar', ['-czf', output, '-C', workDir, path.basename(packageDir)], { stdio: 'inherit' });
     }
 
     const digest = sha256File(output);
-    fs.writeFileSync(`${output}.sha256.txt`, `${digest}  ${assetName}\n`, 'utf8');
-    console.log(JSON.stringify({ asset: assetName, sha256: digest, output }, null, 2));
+    fs.writeFileSync(`${output}.sha256.txt`, `${digest}  ${asset.outputName}\n`, 'utf8');
+    console.log(JSON.stringify({
+      source: asset.sourceName,
+      asset: asset.outputName,
+      sha256: digest,
+      output,
+    }, null, 2));
   } finally {
     rm(workDir);
   }
