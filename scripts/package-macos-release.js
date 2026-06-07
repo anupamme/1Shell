@@ -160,6 +160,7 @@ function main() {
   fs.rmSync(workDir, { recursive: true, force: true });
   fs.rmSync(tarball, { force: true });
   fs.rmSync(checksumFile, { force: true });
+  fs.mkdirSync(RELEASE_DIR, { recursive: true });
   fs.mkdirSync(outDir, { recursive: true });
 
   fs.cpSync(ROOT, outDir, {
