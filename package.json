@@ -81,8 +81,7 @@
       "target": [
         "nsis",
         "zip"
-      ],
-      "icon": "public/favicon.ico"
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -101,7 +100,6 @@
         "AppImage",
         "tar.gz"
       ],
-      "icon": "frontend/public/favicon.png",
       "category": "Utility"
     }
   }
