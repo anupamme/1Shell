@@ -7,6 +7,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "build:agent": "node scripts/build-agent.js",
+    "package:macos": "node scripts/package-macos-release.js",
     "test": "node scripts/test-risk-rules.js"
   },
   "keywords": [

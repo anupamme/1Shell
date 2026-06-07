@@ -1,0 +1,130 @@
+name: Build macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to upload assets to. Leave empty to keep artifacts only.
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-13
+            node_arch: x64
+          - arch: arm64
+            runner: macos-14
+            node_arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.3
+          architecture: ${{ matrix.node_arch }}
+          cache: npm
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Install backend production dependencies
+        run: npm ci --omit=dev --include=optional --no-audit --fund=false
+
+      - name: Verify native modules
+        run: node -e "require('better-sqlite3'); require('node-pty'); console.log('native modules ok')"
+
+      - name: Build frontend
+        run: |
+          npm --prefix frontend ci --include=dev --include=optional --no-audit --fund=false
+          npm --prefix frontend run build
+
+      - name: Build probe agent binaries
+        run: npm run build:agent
+
+      - name: Download bundled macOS Node.js runtime
+        env:
+          NODE_VERSION: v20.18.3
+          NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          set -euo pipefail
+          base="${NODE_DIST_BASE:-https://nodejs.org/dist}"
+          archive="node-${NODE_VERSION}-darwin-${NODE_ARCH}.tar.gz"
+          curl -fsSLO "${base%/}/${NODE_VERSION}/SHASUMS256.txt"
+          curl -fsSLO "${base%/}/${NODE_VERSION}/${archive}"
+          grep "  ${archive}$" SHASUMS256.txt | shasum -a 256 -c -
+          mkdir -p runtime
+          rm -rf runtime/node
+          tar -xzf "$archive"
+          mv "node-${NODE_VERSION}-darwin-${NODE_ARCH}" runtime/node
+          runtime/node/bin/node -v
+
+      - name: Package release archives
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          stamp="$(date -u +'%Y%m%d-%H%M%S')"
+          node scripts/package-macos-release.js --arch "$PACKAGE_ARCH" --flavor starter --timestamp "$stamp"
+          node scripts/package-macos-release.js --arch "$PACKAGE_ARCH" --flavor with-deps --timestamp "$stamp"
+          node scripts/package-macos-release.js --arch "$PACKAGE_ARCH" --flavor offline --timestamp "$stamp"
+
+      - name: Smoke test offline package
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          offline="$(ls release/1shell-*-macos-${PACKAGE_ARCH}-offline-*.tar.gz | head -n 1)"
+          tmp="$(mktemp -d)"
+          tar -xzf "$offline" -C "$tmp"
+          package_dir="$(find "$tmp" -maxdepth 1 -type d -name '1shell-*' | head -n 1)"
+          cd "$package_dir"
+          ./runtime/node/bin/node -e "require('better-sqlite3'); require('node-pty'); console.log('native modules ok')"
+          APP_SECRET=ci-test-secret APP_LOGIN_PASSWORD=ci-test-password PORT=3399 ./runtime/node/bin/node server.js >server.out.log 2>server.err.log &
+          pid="$!"
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:3399/api/health | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat server.out.log
+          cat server.err.log >&2
+          exit 1
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 1shell-macos-${{ matrix.arch }}-release
+          path: |
+            release/1shell-*-macos-${{ matrix.arch }}-*.tar.gz
+            release/1shell-*-macos-${{ matrix.arch }}-*.sha256.txt
+          if-no-files-found: error
+
+      - name: Upload assets to GitHub Release
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null
+          gh release upload "$RELEASE_TAG" \
+            release/1shell-*-macos-${PACKAGE_ARCH}-*.tar.gz \
+            release/1shell-*-macos-${PACKAGE_ARCH}-*.sha256.txt \
+            --clobber
