@@ -78,17 +78,20 @@
       "package.json"
     ],
     "win": {
+      "artifactName": "1shell-desktop-${version}-windows-${arch}.${ext}",
       "target": [
         "nsis",
         "zip"
       ]
     },
     "nsis": {
+      "artifactName": "1shell-desktop-${version}-windows-${arch}-setup.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
     },
     "mac": {
+      "artifactName": "1shell-desktop-${version}-macos-${arch}.${ext}",
       "target": [
         "dmg",
         "zip"
@@ -96,6 +99,7 @@
       "category": "public.app-category.utilities"
     },
     "linux": {
+      "artifactName": "1shell-desktop-${version}-linux-${arch}.${ext}",
       "target": [
         "AppImage",
         "tar.gz"
