@@ -15,6 +15,8 @@
 [![license](https://img.shields.io/badge/license-MIT-f9a825?style=flat-square)](LICENSE)
 [![docker](https://img.shields.io/badge/docker-ready-2496ed?style=flat-square&logo=docker)](https://hub.docker.com)
 
+[使用说明文档](https://docs.1shell.pro)
+
 </div>
 
 ---
