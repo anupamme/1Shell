@@ -80,8 +80,7 @@
     "win": {
       "artifactName": "1shell-desktop-${version}-windows-${arch}.${ext}",
       "target": [
-        "nsis",
-        "zip"
+        "nsis"
       ]
     },
     "nsis": {
@@ -93,16 +92,14 @@
     "mac": {
       "artifactName": "1shell-desktop-${version}-macos-${arch}.${ext}",
       "target": [
-        "dmg",
-        "zip"
+        "dmg"
       ],
       "category": "public.app-category.utilities"
     },
     "linux": {
-      "artifactName": "1shell-desktop-${version}-linux-${arch}.${ext}",
+      "artifactName": "1shell-desktop-${version}-linux-x64.${ext}",
       "target": [
-        "AppImage",
-        "tar.gz"
+        "AppImage"
       ],
       "category": "Utility"
     }
