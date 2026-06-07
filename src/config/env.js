@@ -1,21 +1,28 @@
 'use strict';
 
-require('dotenv').config();
-
 const fs = require('fs');
 const path = require('path');
+
+const ROOT_DIR = path.resolve(__dirname, '..', '..');
+const DATA_DIR = process.env.ONESHELL_DATA_DIR
+  ? path.resolve(process.env.ONESHELL_DATA_DIR)
+  : path.join(ROOT_DIR, 'data');
+const ENV_FILE = process.env.ONESHELL_ENV_FILE
+  ? path.resolve(process.env.ONESHELL_ENV_FILE)
+  : path.join(ROOT_DIR, '.env');
+
+require('dotenv').config({ path: ENV_FILE });
 
 function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const ROOT_DIR = path.resolve(__dirname, '..', '..');
 const PORT = Math.max(1, parseInt(process.env.PORT || '3301', 10)) || 3301;
 const ENV_API_BASE = (process.env.OPENAI_API_BASE || 'https://api.openai.com/v1').replace(/\/$/, '');
 const ENV_API_KEY = process.env.OPENAI_API_KEY || '';
 const ENV_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
-const HOSTS_FILE = path.join(ROOT_DIR, 'data', 'hosts.json');
+const HOSTS_FILE = path.join(DATA_DIR, 'hosts.json');
 const LOCAL_HOST_ID = 'local';
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 36;
@@ -44,9 +51,8 @@ const BRIDGE_EXEC_TIMEOUT_MS = parsePositiveInt(process.env.BRIDGE_EXEC_TIMEOUT_
 const PROXY_TOKEN = (process.env.PROXY_TOKEN || '').trim();
 
 function updateCredentials(username, password) {
-  const envPath = path.join(ROOT_DIR, '.env');
   let content = '';
-  try { content = fs.readFileSync(envPath, 'utf8'); } catch { /* no .env yet */ }
+  try { content = fs.readFileSync(ENV_FILE, 'utf8'); } catch { /* no .env yet */ }
 
   const updates = {};
   if (username !== undefined) updates.APP_LOGIN_USERNAME = username;
@@ -62,14 +68,17 @@ function updateCredentials(username, password) {
     }
   }
 
-  fs.writeFileSync(envPath, content, 'utf8');
+  fs.mkdirSync(path.dirname(ENV_FILE), { recursive: true });
+  fs.writeFileSync(ENV_FILE, content, 'utf8');
 }
 
 module.exports = {
   AUTH_USERNAME,
   AUTH_PASSWORD,
+  DATA_DIR,
   DEFAULT_COLS,
   DEFAULT_ROWS,
+  ENV_FILE,
   ENV_API_BASE,
   ENV_API_KEY,
   ENV_MODEL,

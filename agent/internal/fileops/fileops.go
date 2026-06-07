@@ -1,7 +1,6 @@
 package fileops
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -50,9 +49,6 @@ func ListDir(opt ListDirOptions) (DirList, error) {
 		target = abs
 	}
 	target = filepath.Clean(target)
-	if isProtectedPath(target) {
-		return DirList{}, errors.New("访问被拒绝：该路径为 agent 敏感路径")
-	}
 
 	entries, err := os.ReadDir(target)
 	if err != nil {
@@ -70,9 +66,6 @@ func ListDir(opt ListDirOptions) (DirList, error) {
 			continue
 		}
 		fullPath := filepath.Join(target, name)
-		if isProtectedPath(fullPath) {
-			continue
-		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -146,18 +139,4 @@ func compareInt64(a, b int64) int {
 		return 1
 	}
 	return 0
-}
-
-func isProtectedPath(target string) bool {
-	clean := filepath.Clean(target)
-	protected := []string{
-		"/etc/1shell-probe-agent.env",
-		"/opt/1shell/probe-agent",
-	}
-	for _, item := range protected {
-		if clean == item || strings.HasPrefix(clean, item+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	return false
 }

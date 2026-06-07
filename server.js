@@ -1,22 +1,30 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 
 // 先加载 .env，让 .env 中的 BRIDGE_TOKEN 成为权威源。
 // 必须在 ensureBridgeToken / env.js 之前，
 // 否则 ensureBridgeToken 会从 data/bridge-token.json 读旧值并占住 process.env，
 // 之后 dotenv 默认不覆盖已存在的 env，.env 就形同虚设。
-require('dotenv').config();
+const envFile = process.env.ONESHELL_ENV_FILE
+  ? path.resolve(process.env.ONESHELL_ENV_FILE)
+  : path.join(__dirname, '.env');
+const envDataDir = process.env.ONESHELL_DATA_DIR
+  ? path.resolve(process.env.ONESHELL_DATA_DIR)
+  : path.join(__dirname, 'data');
+require('dotenv').config({ path: envFile });
 
 // BRIDGE_TOKEN 必须在 env.js 加载之前写入 process.env，
 // 否则 env.js 缓存的 BRIDGE_TOKEN 常量会是空字符串。
 const { ensureBridgeToken } = require('./lib/bridge-token');
-ensureBridgeToken(path.join(__dirname, 'data'));
+ensureBridgeToken(envDataDir);
 
 const { isUsingFallbackSecret } = require('./lib/crypto');
 const log = require('./lib/logger');
 const {
   BRIDGE_TOKEN,
+  DATA_DIR,
   HOSTS_FILE,
   PORT,
   PROXY_TOKEN,
@@ -104,7 +112,8 @@ const { createLocalMcpService } = require('./src/services/local-mcp.service');
 const { createLocalMcpDeployer } = require('./src/services/local-mcp-deployer.service');
 
 // ─── 初始化核心服务 ─────────────────────────────────────────────────────
-const dataDir = path.join(ROOT_DIR, 'data');
+const dataDir = DATA_DIR;
+fs.mkdirSync(dataDir, { recursive: true });
 const db = createDatabase(path.join(dataDir, '1shell.db'), { logger: log });
 const app = createApp(ROOT_DIR);
 const { io, server } = createServer(app);

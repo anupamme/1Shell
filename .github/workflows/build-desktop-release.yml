@@ -1,0 +1,133 @@
+name: Build Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to upload assets to. Leave empty to keep artifacts only.
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Desktop ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win
+            runner: windows-latest
+            arch: x64
+            node_arch: x64
+          - platform: linux
+            runner: ubuntu-22.04
+            arch: x64
+            node_arch: x64
+          - platform: mac
+            runner: macos-15
+            arch: x64
+            node_arch: x64
+          - platform: mac
+            runner: macos-14
+            arch: arm64
+            node_arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.3
+          architecture: ${{ matrix.node_arch }}
+          cache: npm
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Install dependencies
+        run: npm ci --include=dev --include=optional --no-audit --fund=false
+
+      - name: Verify native modules
+        run: node -e "require('better-sqlite3'); require('node-pty'); console.log('native modules ok')"
+
+      - name: Build frontend
+        run: |
+          npm --prefix frontend ci --include=dev --include=optional --no-audit --fund=false
+          npm --prefix frontend run build
+
+      - name: Build probe agent binaries
+        run: npm run build:agent
+
+      - name: Download bundled Node.js runtime
+        shell: pwsh
+        env:
+          NODE_VERSION: v20.18.3
+          NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = if ($env:NODE_DIST_BASE) { $env:NODE_DIST_BASE.TrimEnd('/') } else { 'https://nodejs.org/dist' }
+          $platform = '${{ matrix.platform }}'
+          if ($platform -eq 'win') {
+            $archive = "node-$env:NODE_VERSION-win-$env:NODE_ARCH.zip"
+            $folder = "node-$env:NODE_VERSION-win-$env:NODE_ARCH"
+          } elseif ($platform -eq 'linux') {
+            $archive = "node-$env:NODE_VERSION-linux-$env:NODE_ARCH.tar.xz"
+            $folder = "node-$env:NODE_VERSION-linux-$env:NODE_ARCH"
+          } else {
+            $archive = "node-$env:NODE_VERSION-darwin-$env:NODE_ARCH.tar.gz"
+            $folder = "node-$env:NODE_VERSION-darwin-$env:NODE_ARCH"
+          }
+
+          Invoke-WebRequest -UseBasicParsing "$base/$env:NODE_VERSION/SHASUMS256.txt" -OutFile SHASUMS256.txt
+          Invoke-WebRequest -UseBasicParsing "$base/$env:NODE_VERSION/$archive" -OutFile $archive
+          $line = Get-Content SHASUMS256.txt | Where-Object { $_ -match "\s+$([regex]::Escape($archive))$" } | Select-Object -First 1
+          if (-not $line) { throw "Missing checksum for $archive" }
+          $expected = ($line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Checksum mismatch for $archive" }
+
+          New-Item -ItemType Directory -Path runtime -Force | Out-Null
+          if (Test-Path runtime/node) { Remove-Item -LiteralPath runtime/node -Recurse -Force }
+          if ($platform -eq 'win') {
+            Expand-Archive -Path $archive -DestinationPath .
+          } else {
+            tar -xf $archive
+          }
+          Move-Item -LiteralPath $folder -Destination runtime/node
+          if ($platform -eq 'win') {
+            & runtime/node/node.exe -v
+          } else {
+            & runtime/node/bin/node -v
+          }
+
+      - name: Build desktop package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run desktop:build -- --${{ matrix.platform }} --${{ matrix.arch }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 1shell-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/desktop/**
+          if-no-files-found: error
+
+      - name: Upload assets to GitHub Release
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release view "$env:RELEASE_TAG" | Out-Null
+          $files = Get-ChildItem -Path release/desktop -File | ForEach-Object { $_.FullName }
+          if (-not $files) { throw 'No desktop release files found.' }
+          gh release upload "$env:RELEASE_TAG" @files --clobber

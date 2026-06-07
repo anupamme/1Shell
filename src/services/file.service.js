@@ -16,72 +16,13 @@ const { Readable } = require('stream');
  * sshPool 为 exec 模式设计，SFTP 需要长连接且操作模式不同。
  */
 function createFileService({ hostService, probeAgentService = null }) {
-  // 应用敏感路径：阻止文件浏览 API 访问自身凭据和配置
-  const APP_ROOT = path.resolve(__dirname, '..', '..');
-  const SENSITIVE_PATHS = [
-    path.join(APP_ROOT, 'data'),
-    path.join(APP_ROOT, '.env'),
-  ];
-
-  const SENSITIVE_BASENAMES = new Set([
-    '.env',
-    '.netrc',
-    '.npmrc',
-    '.pypirc',
-    'id_rsa',
-    'id_dsa',
-    'id_ecdsa',
-    'id_ed25519',
-    'identity',
-    'authorized_keys',
-    'shadow',
-    'gshadow',
-    'opasswd',
-  ]);
-
-  const SENSITIVE_EXTENSIONS = new Set(['.pem', '.key', '.p12', '.pfx']);
-
-  function normalizePortablePath(targetPath) {
-    return String(targetPath || '').replace(/\\/g, '/').replace(/\/+/g, '/');
-  }
-
   function hasPathTraversalSegment(targetPath) {
     return /(?:^|[\\/])\.\.(?:[\\/]|$)/.test(String(targetPath || ''));
-  }
-
-  /**
-   * 检查路径是否指向应用自身的敏感目录/文件
-   */
-  function isSensitivePath(targetPath) {
-    const resolved = path.resolve(targetPath);
-    return SENSITIVE_PATHS.some((sensitive) =>
-      resolved === sensitive || resolved.startsWith(sensitive + path.sep),
-    ) || isSensitivePortablePath(resolved);
-  }
-
-  function isSensitivePortablePath(targetPath) {
-    const normalized = normalizePortablePath(targetPath).toLowerCase();
-    const parts = normalized.split('/').filter(Boolean);
-    const basename = parts[parts.length - 1] || '';
-    const ext = path.posix.extname(basename);
-
-    if (basename.startsWith('.env')) return true;
-    if (SENSITIVE_BASENAMES.has(basename)) return true;
-    if (SENSITIVE_EXTENSIONS.has(ext)) return true;
-    if (/^ssh_host_.*_key$/.test(basename)) return true;
-
-    return normalized === '/etc/shadow'
-      || normalized === '/etc/gshadow'
-      || normalized === '/etc/security/opasswd'
-      || /\/(?:root|home\/[^/]+)\/\.ssh\/(?:id_[^/]+|config)$/.test(normalized);
   }
 
   function assertSafeFilePath(filePath, action = '访问') {
     if (hasPathTraversalSegment(filePath)) {
       throw new Error(`${action}被拒绝：路径包含 .. 穿越片段`);
-    }
-    if (isSensitivePortablePath(filePath)) {
-      throw new Error(`${action}被拒绝：该文件疑似凭据或密钥文件`);
     }
   }
 
@@ -133,10 +74,6 @@ function createFileService({ hostService, probeAgentService = null }) {
 
     const resolvedPath = dirPath ? path.resolve(dirPath) : os.homedir();
 
-    if (isSensitivePath(resolvedPath)) {
-      throw new Error('访问被拒绝：该路径为应用敏感目录');
-    }
-
     const entries = await fs.promises.readdir(resolvedPath, { withFileTypes: true });
 
     // 并发 stat 所有文件，避免串行阻塞
@@ -144,7 +81,6 @@ function createFileService({ hostService, probeAgentService = null }) {
       entries.map(async (entry) => {
         try {
           const fullPath = path.join(resolvedPath, entry.name);
-          if (isSensitivePath(fullPath)) return null;
           const isDir = entry.isDirectory();
           const stat = await fs.promises.stat(fullPath).catch(() => null);
           return {
@@ -445,7 +381,6 @@ function createFileService({ hostService, probeAgentService = null }) {
     });
     if (!result || !Array.isArray(result.items)) return null;
     const items = result.items
-      .filter((item) => !isSensitivePortablePath(item.path || item.name))
       .map((item) => ({
         name: item.name,
         path: item.path,
@@ -490,8 +425,7 @@ function createFileService({ hostService, probeAgentService = null }) {
                   size: e.attrs.size || 0,
                   mtime: (e.attrs.mtime || 0) * 1000,
                 };
-              })
-              .filter((item) => !isSensitivePortablePath(item.path));
+              });
 
             items.sort((a, b) => {
               if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
@@ -568,10 +502,6 @@ function createFileService({ hostService, probeAgentService = null }) {
     assertSafeFilePath(filePath, '读取');
     const resolved = path.resolve(filePath);
 
-    if (isSensitivePath(resolved)) {
-      throw new Error('访问被拒绝：该文件为应用敏感文件');
-    }
-
     const stat = await fs.promises.stat(resolved);
 
     if (stat.size > maxBytes) {
@@ -628,7 +558,6 @@ function createFileService({ hostService, probeAgentService = null }) {
   async function downloadLocal(filePath) {
     assertSafeFilePath(filePath, '下载');
     const resolved = path.resolve(filePath);
-    if (isSensitivePath(resolved)) throw new Error('访问被拒绝');
     const stat = await fs.promises.stat(resolved);
     if (stat.isDirectory()) throw new Error('不能下载目录');
     return {
@@ -780,7 +709,6 @@ function createFileService({ hostService, probeAgentService = null }) {
   async function uploadLocal(dirPath, filename, buffer) {
     const safeName = safeUploadFilename(filename);
     const resolved = path.resolve(dirPath, safeName);
-    if (isSensitivePath(resolved)) throw new Error('访问被拒绝');
     await fs.promises.writeFile(resolved, buffer);
     return { path: resolved, size: buffer.length };
   }
@@ -837,7 +765,6 @@ function createFileService({ hostService, probeAgentService = null }) {
   async function writeLocal(filePath, content) {
     assertSafeFilePath(filePath, '写入');
     const resolved = path.resolve(filePath);
-    if (isSensitivePath(resolved)) throw new Error('访问被拒绝');
     await fs.promises.writeFile(resolved, content, 'utf8');
     const stat = await fs.promises.stat(resolved);
     return { path: resolved, size: stat.size };

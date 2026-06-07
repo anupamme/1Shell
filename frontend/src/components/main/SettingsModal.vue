@@ -50,7 +50,7 @@ const SECURITY_MODE_LABELS: Record<SecurityMode, string> = {
   trusted: '信任直通 trusted',
 };
 
-type Tab = 'account' | 'ipfilter' | 'aiconfig' | 'security';
+type Tab = 'account' | 'ipfilter' | 'aiconfig' | 'security' | 'desktop';
 const tab = ref<Tab>('account');
 
 const username = ref('');
@@ -77,6 +77,15 @@ const initHostId = ref('local');
 const initLoading = ref(false);
 const initResult = ref('');
 
+type DesktopBooleanKey = 'startAtLogin' | 'backgroundOnClose';
+
+const desktopAvailable = ref(false);
+const desktopLoading = ref(false);
+const desktopSaving = ref(false);
+const desktopError = ref('');
+const desktopSettingsLoaded = ref(false);
+const desktopSettings = ref<OneShellDesktopSettings | null>(null);
+
 watch(() => props.open, (v) => {
   if (v) {
     tab.value = 'account';
@@ -85,6 +94,8 @@ watch(() => props.open, (v) => {
     passwordConfirm.value = '';
     errorMsg.value = '';
     securitySettingsLoaded.value = false;
+    desktopSettingsLoaded.value = false;
+    desktopError.value = '';
   }
 });
 
@@ -97,6 +108,8 @@ watch(tab, (t) => {
     modelsHints.value = [];
   } else if (t === 'security') {
     void loadSecuritySettings();
+  } else if (t === 'desktop') {
+    void loadDesktopSettings();
   }
 });
 
@@ -251,6 +264,48 @@ async function onInitAgentUser(): Promise<void> {
     initLoading.value = false;
   }
 }
+
+async function loadDesktopSettings(force = false): Promise<void> {
+  const bridge = window.oneshellDesktop;
+  desktopAvailable.value = Boolean(bridge?.isDesktop);
+  if (!bridge?.isDesktop) {
+    desktopSettings.value = null;
+    desktopSettingsLoaded.value = true;
+    desktopError.value = '';
+    return;
+  }
+  if (!force && (desktopSettingsLoaded.value || desktopLoading.value)) return;
+  desktopError.value = '';
+  desktopLoading.value = true;
+  try {
+    desktopSettings.value = await bridge.getSettings();
+    desktopAvailable.value = true;
+    desktopSettingsLoaded.value = true;
+  } catch (err) {
+    desktopError.value = (err as Error).message || '加载桌面设置失败';
+  } finally {
+    desktopLoading.value = false;
+  }
+}
+
+async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<void> {
+  const bridge = window.oneshellDesktop;
+  const checked = (event.target as HTMLInputElement).checked;
+  if (!bridge?.isDesktop || !desktopSettings.value) return;
+  const previous = { ...desktopSettings.value };
+  desktopSettings.value = { ...desktopSettings.value, [key]: checked };
+  desktopSaving.value = true;
+  desktopError.value = '';
+  try {
+    desktopSettings.value = await bridge.updateSettings({ [key]: checked });
+    notify.success('桌面设置已保存');
+  } catch (err) {
+    desktopSettings.value = previous;
+    desktopError.value = (err as Error).message || '保存桌面设置失败';
+  } finally {
+    desktopSaving.value = false;
+  }
+}
 </script>
 
 <template>
@@ -271,7 +326,7 @@ async function onInitAgentUser(): Promise<void> {
         </div>
 
         <!-- Tab 切换 -->
-        <div class="flex gap-1 px-5 pt-4">
+        <div class="flex flex-wrap gap-1 px-5 pt-4">
           <button
             class="h-8 px-4 rounded-lg text-xs font-semibold transition-all"
             :class="tab === 'account' ? 'bg-blue-500 text-white' : 'border border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500'"
@@ -292,6 +347,11 @@ async function onInitAgentUser(): Promise<void> {
             :class="tab === 'security' ? 'bg-blue-500 text-white' : 'border border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500'"
             @click="tab = 'security'"
           >安全</button>
+          <button
+            class="h-8 px-4 rounded-lg text-xs font-semibold transition-all"
+            :class="tab === 'desktop' ? 'bg-blue-500 text-white' : 'border border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500'"
+            @click="tab = 'desktop'"
+          >桌面版</button>
         </div>
 
         <div class="mx-5 mt-3 flex items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50/70 px-3 py-2 dark:border-cyan-500/20 dark:bg-cyan-500/10">
@@ -404,7 +464,7 @@ async function onInitAgentUser(): Promise<void> {
         </form>
 
         <!-- 安全设置 -->
-        <form v-else class="p-5 flex flex-col gap-4" autocomplete="off" @submit="onSecuritySubmit">
+        <form v-else-if="tab === 'security'" class="p-5 flex flex-col gap-4" autocomplete="off" @submit="onSecuritySubmit">
           <div v-if="securityLoading" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-[#1e293b] dark:bg-[#0b1324] dark:text-slate-400">
             正在加载安全设置…
           </div>
@@ -476,6 +536,94 @@ async function onInitAgentUser(): Promise<void> {
             >{{ securitySaving ? '保存中…' : '保存安全设置' }}</button>
           </div>
         </form>
+
+        <!-- 桌面版设置 -->
+        <div v-else-if="tab === 'desktop'" class="p-5 flex flex-col gap-4">
+          <div v-if="desktopLoading" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-[#1e293b] dark:bg-[#0b1324] dark:text-slate-400">
+            正在加载桌面设置…
+          </div>
+
+          <div v-else-if="!desktopAvailable" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600 dark:border-[#1e293b] dark:bg-[#0b1324] dark:text-slate-300">
+            仅桌面版可配置。当前浏览器模式不会启用开机自启和窗口关闭后的后台运行。
+          </div>
+
+          <template v-else-if="desktopSettings">
+            <div class="rounded-xl border border-cyan-200 bg-cyan-50/70 px-3 py-3 dark:border-cyan-500/20 dark:bg-cyan-500/10">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold text-cyan-800 dark:text-cyan-200">本地服务</div>
+                  <div class="mt-1 text-xs text-cyan-700/75 dark:text-cyan-200/75">MCP 与 API 继续通过本机 HTTP 端口提供。</div>
+                </div>
+                <div class="shrink-0 rounded-lg bg-white/70 px-2.5 py-1 text-xs font-semibold text-cyan-700 dark:bg-white/10 dark:text-cyan-200">
+                  {{ desktopSettings.serviceRunning ? '运行中' : '未运行' }}
+                </div>
+              </div>
+              <div class="mt-3 grid grid-cols-1 gap-2 text-xs text-cyan-800 dark:text-cyan-100">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-cyan-700/70 dark:text-cyan-200/70">端口</span>
+                  <span class="font-mono">{{ desktopSettings.port }}</span>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="shrink-0 text-cyan-700/70 dark:text-cyan-200/70">地址</span>
+                  <span class="break-all font-mono text-right">{{ desktopSettings.url }}</span>
+                </div>
+              </div>
+            </div>
+
+            <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324]">
+              <input
+                type="checkbox"
+                class="mt-1"
+                :checked="desktopSettings.startAtLogin"
+                :disabled="desktopSaving"
+                @change="onDesktopToggle('startAtLogin', $event)"
+              />
+              <span>
+                <span class="block text-sm font-semibold text-slate-700 dark:text-slate-200">开机自启</span>
+                <span class="mt-1 block text-xs text-slate-500 dark:text-slate-400">登录系统后自动启动 1Shell 桌面版。</span>
+              </span>
+            </label>
+
+            <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324]">
+              <input
+                type="checkbox"
+                class="mt-1"
+                :checked="desktopSettings.backgroundOnClose"
+                :disabled="desktopSaving"
+                @change="onDesktopToggle('backgroundOnClose', $event)"
+              />
+              <span>
+                <span class="block text-sm font-semibold text-slate-700 dark:text-slate-200">关闭窗口后后台运行</span>
+                <span class="mt-1 block text-xs text-slate-500 dark:text-slate-400">关闭主窗口时隐藏到托盘，本地 MCP/API 服务继续保留。</span>
+              </span>
+            </label>
+
+            <div class="rounded-xl border border-slate-200 bg-white/70 px-3 py-3 text-xs text-slate-500 dark:border-[#1e293b] dark:bg-white/[0.03] dark:text-slate-400">
+              <div class="flex items-start justify-between gap-3">
+                <span class="shrink-0 font-semibold text-slate-600 dark:text-slate-300">数据目录</span>
+                <span class="break-all text-right font-mono">{{ desktopSettings.dataDir }}</span>
+              </div>
+              <div class="mt-2 flex items-start justify-between gap-3">
+                <span class="shrink-0 font-semibold text-slate-600 dark:text-slate-300">环境文件</span>
+                <span class="break-all text-right font-mono">{{ desktopSettings.envFile }}</span>
+              </div>
+            </div>
+          </template>
+
+          <div v-else class="rounded-xl border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-600 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-200">
+            {{ desktopError || '桌面设置不可用' }}
+          </div>
+
+          <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-[#1e293b]">
+            <div class="text-red-500 text-xs">{{ desktopError }}</div>
+            <button
+              type="button"
+              class="h-9 px-4 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#1a2332] text-xs font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 transition-all disabled:opacity-50"
+              :disabled="desktopLoading || desktopSaving"
+              @click="loadDesktopSettings(true)"
+            >刷新</button>
+          </div>
+        </div>
       </div>
     </div>
   </Teleport>
