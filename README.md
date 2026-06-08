@@ -495,3 +495,6 @@ Browser
 ## License
 
 [MIT](LICENSE) © 2025 weidu12123
+
+## 友链
+http://linux.do
