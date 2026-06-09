@@ -1,7 +1,7 @@
 'use strict';
 
 const { Router } = require('express');
-const { BRIDGE_TOKEN, PORT } = require('../config/env');
+const { BRIDGE_TOKEN, PORT, PUBLIC_SERVER_URL } = require('../config/env');
 const { getAllManifests, getManifest, UPSTREAM_LABELS } = require('../agents/cli-manifest');
 
 /**
@@ -27,8 +27,9 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
     if (reqBody?.serverUrl && typeof reqBody.serverUrl === 'string') {
       return reqBody.serverUrl.replace(/\/$/, '');
     }
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+    if (/^https?:\/\//i.test(PUBLIC_SERVER_URL)) return PUBLIC_SERVER_URL;
+    const proto = String(req.headers['x-forwarded-proto'] || req.headers.origin?.split('://')[0] || req.protocol || 'http').split(',')[0].trim();
+    const host = String(req.headers['x-forwarded-host'] || req.headers.origin?.split('://')[1] || req.headers.host || `localhost:${PORT}`).split(',')[0].trim();
     return `${proto}://${host}`;
   }
 
