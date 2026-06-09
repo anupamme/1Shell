@@ -1,12 +1,43 @@
 'use strict';
 
 const express = require('express');
-const { PORT } = require('../config/env');
+const { PORT, PUBLIC_SERVER_URL } = require('../config/env');
+
+function firstHeaderValue(value) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return String(raw || '').split(',')[0].trim();
+}
+
+function normalizeServerUrl(value) {
+  const text = String(value || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(text)) return '';
+  try {
+    const url = new URL(text);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return '';
+  }
+}
 
 function resolveServerUrl(req) {
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
-  return `${proto}://${host}`.replace(/\/$/, '');
+  const explicit = normalizeServerUrl(req.body?.serverUrl);
+  if (explicit) return explicit;
+  const configured = normalizeServerUrl(PUBLIC_SERVER_URL);
+  if (configured) return configured;
+
+  const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto']);
+  const forwardedHost = firstHeaderValue(req.headers['x-forwarded-host']);
+  const forwarded = forwardedProto && forwardedHost
+    ? normalizeServerUrl(`${forwardedProto}://${forwardedHost}`)
+    : '';
+  if (forwarded) return forwarded;
+
+  const origin = normalizeServerUrl(req.headers.origin);
+  if (origin) return origin;
+
+  const proto = firstHeaderValue(req.protocol) || 'http';
+  const host = firstHeaderValue(req.headers.host) || `localhost:${PORT}`;
+  return normalizeServerUrl(`${proto}://${host}`) || `http://localhost:${PORT}`;
 }
 
 function parseTimeQuery(value, fallback) {
@@ -71,7 +102,7 @@ function createProbeAgentAdminRouter({ probeAgentService, probeAgentInstallerSer
   router.post('/probe-agents/:hostId/install-token', (req, res, next) => {
     try {
       const result = probeAgentService.generateInstallToken(req.params.hostId);
-      const serverUrl = String(req.body?.serverUrl || resolveServerUrl(req)).replace(/\/$/, '');
+      const serverUrl = resolveServerUrl(req);
       res.json({
         ok: true,
         ...result,
@@ -92,7 +123,7 @@ function createProbeAgentAdminRouter({ probeAgentService, probeAgentInstallerSer
   router.post('/probe-agents/:hostId/install', async (req, res, next) => {
     try {
       if (!probeAgentInstallerService) return res.status(501).json({ ok: false, error: 'Agent 安装器未启用' });
-      const serverUrl = String(req.body?.serverUrl || resolveServerUrl(req)).replace(/\/$/, '');
+      const serverUrl = resolveServerUrl(req);
       const intervalSec = typeof req.body?.intervalSec === 'number' ? req.body.intervalSec : undefined;
       const relayUpstreamId = typeof req.body?.relayUpstreamId === 'string' ? req.body.relayUpstreamId : undefined;
       const install = await probeAgentInstallerService.install(req.params.hostId, {
