@@ -19,6 +19,7 @@ function parsePositiveInt(value, fallback) {
 }
 
 const PORT = Math.max(1, parseInt(process.env.PORT || '3301', 10)) || 3301;
+const PUBLIC_SERVER_URL = (process.env.PUBLIC_SERVER_URL || process.env.ONESHELL_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const ENV_API_BASE = (process.env.OPENAI_API_BASE || 'https://api.openai.com/v1').replace(/\/$/, '');
 const ENV_API_KEY = process.env.OPENAI_API_KEY || '';
 const ENV_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
@@ -85,6 +86,7 @@ module.exports = {
   HOSTS_FILE,
   LOCAL_HOST_ID,
   PORT,
+  PUBLIC_SERVER_URL,
   PROBE_INTERVAL_MS,
   PROBE_REMOTE_CONCURRENCY,
   PROBE_TIMEOUT_MS,
