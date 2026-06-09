@@ -304,8 +304,11 @@ function createSshShellPool({ hostService }) {
       // 3. echo 结束标记 + 退出码
       const wrappedCommand = [
         `echo '${startMarker}'`,
+        '(',
         command,
-        `echo "${endMarker} $?"`,
+        ')',
+        `__1shell_exit_code=$?`,
+        `echo "${endMarker} $__1shell_exit_code"`,
       ].join('\n');
 
       entry.shell.write(wrappedCommand + '\n');
