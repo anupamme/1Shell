@@ -16,13 +16,32 @@ services:
       # 本机管理：宿主 docker socket + CLI + 1Panel 目录
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/bin/docker:/usr/bin/docker:ro
+      #
+      # ── 宿主目录挂载：容器视角说明 ─────────────────────────────────────
+      # Docker 部署时，1Shell（以及它内部的 AI、文件管理器、MCP 工具）看到的
+      # 是"容器视角"的文件系统，不是宿主机本身：
+      #   - 挂载为 :ro 的目录 → 只读浏览，任何写入都会失败（read-only file system）
+      #   - 挂载为 :rw 的目录 → 可写管理，1Shell 可以直接修改宿主机对应目录
+      # 默认配置选择"只读浏览"，更安全；如需 1Shell 直接修改这些目录，
+      # 把对应行的 :ro 改为 :rw 后执行 docker compose up -d 重启。
+      # 更推荐的做法：把这台 VPS 以 SSH 主机方式添加进 1Shell（主机仓库 → 添加主机），
+      # 通过主机视角操作宿主机文件，不依赖挂载且权限边界更清晰。
+      #
+      # 方案 A（默认）：只读浏览
       - /opt/1panel:/opt/1panel:ro
-      # 常见 Web 服务/证书路径（存在则挂载；不存在也不影响启动）
       - /etc/nginx:/etc/nginx:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /etc/caddy:/etc/caddy:ro
       - /root/.acme.sh:/root/.acme.sh:ro
       - /www:/www:ro
+      # 方案 B：可写管理（按需取消注释并删除上面对应的 :ro 行）
+      # - /opt/1panel:/opt/1panel:rw
+      # - /etc/nginx:/etc/nginx:rw
+      # - /etc/letsencrypt:/etc/letsencrypt:rw
+      # - /etc/caddy:/etc/caddy:rw
+      # - /root/.acme.sh:/root/.acme.sh:rw
+      # - /www:/www:rw
+      #
       # 将宿主机的 AI CLI 工具挂载进容器（只读），无需在镜像内安装
       - /root/.claude:/root/.claude
       - /root/.claude.json:/root/.claude.json
@@ -36,3 +55,4 @@ services:
       - .env
     environment:
       - NODE_ENV=production
+      - ONESHELL_IN_DOCKER=1

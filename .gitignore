@@ -63,3 +63,4 @@ docs/sections/images/
 # OS files
 .DS_Store
 Thumbs.db
+.ace-tool/

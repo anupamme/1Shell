@@ -145,7 +145,7 @@ defineExpose({ setError });
                 placeholder="例如：东京节点"
                 required
                 autocomplete="off"
-                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
               />
             </div>
             <div v-if="!editingIsLocal" class="flex-1 flex flex-col gap-1.5">
@@ -156,7 +156,7 @@ defineExpose({ setError });
                 placeholder="root"
                 required
                 autocomplete="username"
-                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
               />
             </div>
           </div>
@@ -170,7 +170,7 @@ defineExpose({ setError });
                   type="text"
                   placeholder="example.com 或 1.2.3.4"
                   required
-                  class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                  class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
                 />
               </div>
               <div class="flex-1 flex flex-col gap-1.5">
@@ -181,7 +181,7 @@ defineExpose({ setError });
                   min="1"
                   max="65535"
                   required
-                  class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                  class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
                 />
               </div>
             </div>
@@ -190,7 +190,7 @@ defineExpose({ setError });
               <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">中继跳板 (ProxyJump)</label>
               <select
                 v-model="proxyHostId"
-                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none cursor-pointer focus:border-blue-400"
+                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none cursor-pointer focus:border-blue-400"
               >
                 <option value="">直连（无跳板）</option>
                 <option v-for="h in proxyOptions" :key="h.id" :value="h.id">{{ h.name }} ({{ h.host }})</option>
@@ -223,7 +223,7 @@ defineExpose({ setError });
                 type="password"
                 :placeholder="isEditing ? '编辑时留空表示保持不变' : '请输入密码'"
                 autocomplete="new-password"
-                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
               />
             </div>
 
@@ -234,7 +234,7 @@ defineExpose({ setError });
                   v-model="privateKey"
                   rows="5"
                   :placeholder="isEditing ? '编辑时留空表示保持不变' : '粘贴私钥（PEM 格式）'"
-                  class="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none resize-y font-mono focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                  class="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none resize-y font-mono focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
                 ></textarea>
               </div>
               <div class="flex flex-col gap-1.5">
@@ -244,7 +244,7 @@ defineExpose({ setError });
                   type="password"
                   :placeholder="isEditing ? '可选，编辑时留空表示保持不变' : '可选'"
                   autocomplete="new-password"
-                  class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                  class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
                 />
               </div>
             </div>
@@ -264,13 +264,13 @@ defineExpose({ setError });
                     v-model="lk.name"
                     type="text"
                     placeholder="链接名称"
-                    class="flex-1 h-8 px-2 rounded border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
+                    class="flex-1 h-8 px-2 rounded border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
                   />
                   <input
                     v-model="lk.url"
                     type="text"
                     placeholder="https://..."
-                    class="flex-1 h-8 px-2 rounded border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
+                    class="flex-1 h-8 px-2 rounded border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
                   />
                 </div>
                 <div class="flex gap-2 items-center">
@@ -278,7 +278,7 @@ defineExpose({ setError });
                     v-model="lk.description"
                     type="text"
                     placeholder="描述（可选）"
-                    class="flex-1 h-8 px-2 rounded border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
+                    class="flex-1 h-8 px-2 rounded border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
                   />
                   <button
                     type="button"

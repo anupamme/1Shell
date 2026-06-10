@@ -19,7 +19,8 @@ const { classifyCommandRisk, assessMediumRisk, COMMAND_RISK_RULES } = require('.
 
 // 写类工具默认建议人审（人在场时）
 const WRITE_TOOLS_NEEDING_APPROVAL = new Set([
-  'write_remote_file', 'upload_file', 'download_file', 'deploy_local_mcp',
+  'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
+  'upload_file', 'download_file', 'deploy_local_mcp',
   'add_mcp_server', 'remove_mcp_server', 'install_probe_agent',
   'restart_probe_agent', 'uninstall_probe_agent', 'run_script',
 ]);

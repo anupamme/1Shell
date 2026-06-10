@@ -416,6 +416,12 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
         return { title: '执行命令', detail: `主机: ${input.hostId || 'local'}\n命令: ${input.command || ''}` };
       case 'write_file':
         return { title: '写入文件', detail: `路径: ${input.path || ''}\n内容: ${(input.content || '').substring(0, 300)}` };
+      case 'create_directory':
+        return { title: '创建目录', detail: `主机: ${input.hostId || 'local'}\n路径: ${input.path || ''}` };
+      case 'delete_path':
+        return { title: '删除文件/目录（不可恢复）', detail: `主机: ${input.hostId || 'local'}\n路径: ${input.path || ''}` };
+      case 'rename_path':
+        return { title: '重命名/移动', detail: `主机: ${input.hostId || 'local'}\n原路径: ${input.path || ''}\n新路径: ${input.newPath || ''}` };
       case 'deploy_local_mcp':
         return { title: '部署本地 MCP', detail: `仓库: ${input.repoUrl || ''}\n名称: ${input.name || ''}` };
       default:
@@ -485,6 +491,9 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
       list_remote_dir: 'list_remote_dir',
       read_remote_file: 'read_remote_file',
       write_remote_file: 'write_remote_file',
+      create_directory: 'create_directory',
+      delete_path: 'delete_path',
+      rename_path: 'rename_path',
       upload_file: 'upload_file',
       download_file: 'download_file',
     };
@@ -494,7 +503,8 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
     }
     const writeTools = new Set([
       'execute_command', 'write_file', 'write_program', 'run_skill', 'trigger_program',
-      'run_script', 'write_remote_file', 'upload_file', 'download_file', 'add_mcp_server',
+      'run_script', 'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
+      'upload_file', 'download_file', 'add_mcp_server',
       'remove_mcp_server', 'deploy_local_mcp', 'ack_probe_alert', 'install_probe_agent',
       'restart_probe_agent', 'uninstall_probe_agent', 'invoke_claude_code',
     ]);
@@ -512,6 +522,9 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
       list_remote_dir: ['hostId'],
       read_remote_file: ['hostId'],
       write_remote_file: ['hostId'],
+      create_directory: ['hostId'],
+      delete_path: ['hostId'],
+      rename_path: ['hostId'],
       upload_file: ['hostId'],
       download_file: ['hostId'],
       get_probe: ['hostId'],
@@ -541,6 +554,9 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
       list_remote_dir: ['path'],
       read_remote_file: ['path'],
       write_remote_file: ['path'],
+      create_directory: ['path'],
+      delete_path: ['path'],
+      rename_path: ['path', 'newPath'],
       upload_file: ['dirPath', 'localPath'],
       download_file: ['path', 'localPath'],
     };

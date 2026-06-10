@@ -124,7 +124,9 @@ const proxyConfigStore = createProxyConfigStore(dataDir);
 const skillRegistry = createSkillRegistry(path.join(dataDir, 'skills'), { kind: 'skill' });
 const claudeCodeSkillRegistry = createClaudeCodeSkillRegistry({ dataDir, logger: log });
 const aiService = createAIService({ skillsProxyUrl: `http://127.0.0.1:${PORT}/api/proxy/skills/v1/messages`, proxyConfigStore, skillRegistry });
-const authService = createAuthService();
+const { createTwoFactorService } = require('./src/services/twofactor.service');
+const twoFactorService = createTwoFactorService();
+const authService = createAuthService({ twoFactorService });
 const hostService = createHostService({ hostRepository });
 const auditService = createAuditService({ db, dataDir });
 const sessionService = createSessionService({ hostService });
@@ -257,7 +259,7 @@ app.use('/api', createHealthRouter({ isUsingFallbackSecret }));
 // 默认全关（无规则时放行），一旦配置白/黑名单即覆盖全部端点，避免被 token 路由绕过。
 app.use(ipFilterService.ipFilterMiddleware);
 
-app.use('/api/auth', createAuthRouter(authService));
+app.use('/api/auth', createAuthRouter(authService, twoFactorService));
 
 // Bridge 内部 API 和 MCP 使用 BRIDGE_TOKEN 鉴权，不走 Web session
 app.use('/api', createBridgeRouter({ bridgeService }));

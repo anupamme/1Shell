@@ -4,14 +4,12 @@ import { RouterView } from 'vue-router';
 import { useApiClient, ApiError } from '@/composables/useApiClient';
 import { prefetchProbePageState } from '@/composables/useProbePrefetch';
 import { useAuthStore } from '@/stores/auth';
-import { useSettingsModal } from '@/composables/useSettingsModal';
 import AppSidebar from './components/AppSidebar.vue';
 import ToastHost from './components/ToastHost.vue';
 import AppAiFab from './components/AppAiFab.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
 import AppBackground from './components/AppBackground.vue';
 import LoginScreen from './components/main/LoginScreen.vue';
-import SettingsModal from './components/main/SettingsModal.vue';
 
 interface AuthStatusResp {
   enabled?: boolean;
@@ -20,7 +18,6 @@ interface AuthStatusResp {
 
 const auth = useAuthStore();
 const { requestJson } = useApiClient();
-const settings = useSettingsModal();
 
 const bootstrapping = ref(true);
 const bootstrapError = ref<string | null>(null);
@@ -87,6 +84,5 @@ onMounted(() => {
     <ToastHost />
     <AppAiFab />
     <ConfirmModal />
-    <SettingsModal :open="settings.open.value" @close="settings.closeSettings" />
   </div>
 </template>

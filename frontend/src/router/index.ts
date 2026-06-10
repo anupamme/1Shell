@@ -12,6 +12,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/mcp-hub',      name: 'mcp-hub',     component: () => import('@/views/McpHubView.vue') },
   { path: '/programs',     name: 'programs',    component: () => import('@/views/ProgramsView.vue') },
   { path: '/skill-studio', name: 'skill-studio', component: () => import('@/views/SkillStudioView.vue') },
+  { path: '/settings',     name: 'settings',    component: () => import('@/views/SettingsView.vue') },
 ];
 
 const router = createRouter({

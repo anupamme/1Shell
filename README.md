@@ -254,6 +254,8 @@ cp .env.example .env
 docker compose up -d
 ```
 
+> **容器视角与宿主机视角**：Docker 部署时，1Shell（包括内部 AI、文件管理器和 MCP 工具）操作的是容器内的文件系统。`docker-compose.yml` 默认把 `/opt/1panel`、`/www`、`/etc/nginx` 等宿主目录以 `:ro` 只读方式挂载——可以浏览但无法修改，写入会得到明确的"只读挂载"提示。如需让 1Shell 直接修改这些目录，把对应挂载改为 `:rw` 后重启容器；更推荐把这台 VPS 以 SSH 主机方式添加进 1Shell，通过主机视角读写，权限边界更清晰。可访问 `/api/files/write-check` 验证写入工具链状态。
+
 ### 源码运行
 
 ```bash

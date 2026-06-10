@@ -9,15 +9,52 @@ export interface ToolInfo {
   gradient?: string;
   status: CliStatus;
   supportedUpstream?: UpstreamProtocol[];
-  binary?: { name?: string; path?: string; installed: boolean };
-  sandbox?: { sandboxed: boolean; sandboxDir?: string };
+  supportedOS?: string[];
+  install?: { command?: string; globalCommand?: string; executable?: string; args?: string[]; docsUrl?: string; hint?: string };
+  binary?: {
+    name?: string;
+    candidates?: string[];
+    path?: string;
+    installed: boolean;
+    version?: string;
+    override?: boolean;
+    managed?: boolean;
+    attempted?: string[];
+    error?: string;
+  };
+  sandbox?: {
+    sandboxed: boolean;
+    sandboxDir?: string;
+    files?: Array<{ name: string; path: string; exists: boolean }>;
+  };
   proxy?: {
     providerCount: number;
     activeProvider?: ProviderInfo;
   };
+  readiness?: CliReadiness;
 }
 
 export type CliStatus = 'sandboxed' | 'detected' | 'missing';
+
+export interface CliReadinessStep {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail?: string;
+}
+
+export interface CliReadiness {
+  installed: boolean;
+  providerReady: boolean;
+  sandboxReady: boolean;
+  bridgeTokenReady: boolean;
+  mcpReady: boolean;
+  launchReady: boolean;
+  steps: CliReadinessStep[];
+  issues: string[];
+  warnings: string[];
+  nextAction?: { id: string; label: string };
+}
 
 export interface ProviderInfo {
   id: string;
@@ -64,6 +101,13 @@ export interface DiagnosticsResponse {
   checks: DiagnosticsCheck[];
 }
 
+export interface CliDiagnosticsResponse {
+  ok: boolean;
+  cliId: string;
+  tool: ToolInfo;
+  checks: DiagnosticsCheck[];
+}
+
 export interface ProvidersResponse {
   ok: boolean;
   providers: ProviderInfo[];
@@ -83,6 +127,35 @@ export interface SandboxOpResponse {
   cliId?: string;
   sandboxDir?: string;
   error?: string;
+}
+
+export interface BinaryOverrideResponse {
+  ok: boolean;
+  cliId?: string;
+  tool?: ToolInfo;
+  error?: string;
+}
+
+export interface InstallCliResponse {
+  ok: boolean;
+  cliId: string;
+  command?: string;
+  installRoot?: string;
+  stdout?: string;
+  stderr?: string;
+  installed?: boolean;
+  binary?: ToolInfo['binary'];
+  tool?: ToolInfo;
+  error?: string;
+  result?: {
+    command?: string;
+    installRoot?: string;
+    stdout?: string;
+    stderr?: string;
+    installed?: boolean;
+    binary?: ToolInfo['binary'];
+    tool?: ToolInfo;
+  } | null;
 }
 
 export const UPSTREAM_LABELS: Record<UpstreamProtocol, string> = {

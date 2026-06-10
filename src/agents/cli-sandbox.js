@@ -3,10 +3,12 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFile, execFileSync } = require('child_process');
 const { getManifest, getAllManifests, UPSTREAM_LABELS } = require('./cli-manifest');
 
 function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claudeCodeSkillRegistry, logger }) {
   const sandboxRoot = path.join(dataDir, 'cli-sandbox');
+  const binaryOverridesPath = path.join(sandboxRoot, 'binary-overrides.json');
   const serverOrigin = `http://127.0.0.1:${port}`;
   const home = os.homedir();
 
@@ -16,6 +18,134 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     } catch {
       return null;
     }
+  }
+
+  function readBinaryOverrides() {
+    return safeReadJSON(binaryOverridesPath) || {};
+  }
+
+  function writeBinaryOverrides(overrides) {
+    safeWriteJSON(binaryOverridesPath, overrides || {});
+  }
+
+  function getBinaryOverride(cliId) {
+    const value = readBinaryOverrides()[cliId];
+    return typeof value === 'string' && value.trim() ? value.trim() : '';
+  }
+
+  function setBinaryOverride(cliId, binaryPath) {
+    if (!getManifest(cliId)) throw new Error(`未知 CLI: ${cliId}`);
+    const cleanPath = normalizeManualBinaryPath(binaryPath);
+    if (!cleanPath) throw new Error('可执行文件路径不能为空');
+    const overrides = readBinaryOverrides();
+    overrides[cliId] = cleanPath;
+    writeBinaryOverrides(overrides);
+    return getScanInfo().find((tool) => tool.id === cliId) || null;
+  }
+
+  function clearBinaryOverride(cliId) {
+    const overrides = readBinaryOverrides();
+    if (Object.prototype.hasOwnProperty.call(overrides, cliId)) {
+      delete overrides[cliId];
+      writeBinaryOverrides(overrides);
+    }
+    return getScanInfo().find((tool) => tool.id === cliId) || null;
+  }
+
+  function installCli(cliId) {
+    const manifest = getManifest(cliId);
+    if (!manifest) throw new Error(`未知 CLI: ${cliId}`);
+    const installInfo = getInstallInfo(manifest);
+    const command = installInfo.command;
+    if (!command) throw new Error(`${manifest.name} 暂未配置自动安装命令`);
+    fs.mkdirSync(getManagedInstallRoot(manifest.id), { recursive: true });
+
+    return new Promise((resolve, reject) => {
+      execFile(installInfo.executable || command, installInfo.args || [], {
+        cwd: process.cwd(),
+        timeout: manifest.install?.timeoutMs || 10 * 60 * 1000,
+        maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          npm_config_audit: process.env.npm_config_audit || 'false',
+          npm_config_fund: process.env.npm_config_fund || 'false',
+        },
+      }, (err, stdout = '', stderr = '') => {
+        const isWindows = os.platform() === 'win32';
+        const binary = detectBinary(manifest, isWindows, getBinaryOverride(manifest.id), getManagedBinaryCandidates(manifest));
+        const result = {
+          command,
+          installRoot: getManagedInstallRoot(manifest.id),
+          stdout: tailInstallOutput(stdout),
+          stderr: tailInstallOutput(stderr),
+          installed: Boolean(binary.installed),
+          binary,
+          tool: getScanInfo().find((tool) => tool.id === cliId) || null,
+        };
+        if (err) {
+          err.message = buildInstallErrorMessage(err, stdout, stderr);
+          err.result = result;
+          reject(err);
+          return;
+        }
+        resolve(result);
+      });
+    });
+  }
+
+  function getManagedInstallRoot(cliId) {
+    return path.join(sandboxRoot, 'managed-cli', cliId);
+  }
+
+  function getManagedBinaryCandidates(manifest) {
+    const binDir = path.join(getManagedInstallRoot(manifest.id), 'node_modules', '.bin');
+    const names = [manifest.binary, ...(manifest.binaries || [])]
+      .filter(Boolean)
+      .filter((name) => !path.isAbsolute(name) && !name.includes('/') && !name.includes('\\'));
+    return [...new Set(names)].map((name) => path.join(binDir, name));
+  }
+
+  function getManagedBinaryPath(manifest) {
+    const isWindows = os.platform() === 'win32';
+    for (const candidate of getManagedBinaryCandidates(manifest)) {
+      const resolved = resolveExecutablePath(candidate, isWindows);
+      if (resolved) return resolved;
+    }
+    return '';
+  }
+
+  function getInstallInfo(manifest) {
+    const pkg = manifest.install?.npmPackage;
+    if (!pkg) return manifest.install || {};
+    return {
+      ...manifest.install,
+      executable: getNpmExecutable(),
+      args: ['install', '--prefix', getManagedInstallRoot(manifest.id), pkg, '--no-audit', '--no-fund'],
+      command: buildManagedNpmInstallCommand(manifest, pkg),
+      globalCommand: manifest.install.command,
+    };
+  }
+
+  function getNpmExecutable() {
+    return os.platform() === 'win32' ? 'npm.cmd' : 'npm';
+  }
+
+  function buildManagedNpmInstallCommand(manifest, pkg) {
+    const installRoot = getManagedInstallRoot(manifest.id);
+    return [
+      'npm',
+      'install',
+      '--prefix',
+      quoteInstallArg(installRoot),
+      quoteInstallArg(pkg),
+      '--no-audit',
+      '--no-fund',
+    ].join(' ');
+  }
+
+  function quoteInstallArg(value) {
+    return quoteShellArg(value);
   }
 
   function buildMcpEntry(cliId = null) {
@@ -315,8 +445,15 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
   }
 
   function buildShellCommandString(binary, args, shell) {
-    const base = shell === 'powershell' ? binary : binary;
+    const base = quoteExecutable(binary, shell);
     return appendShellArgs(base, args, shell);
+  }
+
+  function quoteExecutable(binary, shell) {
+    const value = String(binary || '').trim();
+    if (!value) return '';
+    if (!/[\s"']/.test(value)) return value;
+    return shell === 'powershell' ? `& ${quotePowerShellArg(value)}` : quoteShellArg(value);
   }
 
   function buildClaudeSettingsContent(configFile) {
@@ -363,7 +500,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
       const projectsCwd = cwd || process.cwd();
       return [
         `model_provider = "1shell-proxy"`,
-        `model = "${model}"`,
+        `model = "${escapeTomlBasicString(model)}"`,
         `disable_response_storage = true`,
         ``,
         `[model_providers.1shell-proxy]`,
@@ -372,7 +509,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         `base_url = "${serverOrigin}/api/proxy/codex"`,
         `requires_openai_auth = true`,
         ``,
-        `[projects.'${projectsCwd}']`,
+        `[projects.${tomlSingleQuotedKey(projectsCwd)}]`,
         `trust_level = "trusted"`,
         ``,
         `[windows]`,
@@ -411,7 +548,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         }
       }
 
-      env['1SHELL_MCP_TOKEN'] = bridgeToken;
+      env.ONESHELL_MCP_TOKEN = bridgeToken;
     }
 
     Object.assign(env, manifest.extraEnv);
@@ -433,15 +570,20 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
       const psExports = Object.entries(env)
         .map(([k, v]) => `$env:${k}=${quotePowerShellArg(v)}`)
         .join('; ');
-      const command = buildShellCommandString(manifest.binary, args, 'powershell');
+      const command = buildShellCommandString(getLaunchBinary(manifest), args, 'powershell');
       return psExports ? `${psExports}; ${command}` : command;
     }
 
     const exports = Object.entries(env)
+      .filter(([k]) => isValidShellEnvKey(k))
       .map(([k, v]) => `${k}=${quoteShellArg(v)}`)
       .join(' ');
-    const command = buildShellCommandString(manifest.binary, args, 'bash');
+    const command = buildShellCommandString(getLaunchBinary(manifest), args, 'bash');
     return exports ? `${exports} ${command}` : command;
+  }
+
+  function getLaunchBinary(manifest) {
+    return getBinaryOverride(manifest.id) || getManagedBinaryPath(manifest) || manifest.binary;
   }
 
   function resetSandbox(cliId) {
@@ -457,26 +599,97 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
 
   function getSandboxStatus(cliId) {
     const dir = getSandboxDir(cliId);
-    if (!dir) return { sandboxed: false, sandboxDir: null, meta: null };
+    if (!dir) return { sandboxed: false, sandboxDir: null, meta: null, files: [] };
     const metaPath = path.join(dir, '.1shell-meta.json');
     const exists = fs.existsSync(metaPath);
+    const files = getConfigFilesStatus(cliId);
     return {
       sandboxed: exists && getSandboxReady(cliId),
       sandboxDir: dir,
+      files,
       meta: exists ? safeReadJSON(metaPath) : null,
     };
+  }
+
+  function getConfigFilesStatus(cliId) {
+    const manifest = getManifest(cliId);
+    if (!manifest) return [];
+    const dir = getSandboxDir(cliId);
+    return (manifest.sandbox.configFiles || [])
+      .filter(file => file.scope !== 'workspace')
+      .map((configFile) => {
+        const targetPath = path.join(dir, configFile.name);
+        return { name: configFile.name, path: targetPath, exists: fs.existsSync(targetPath) };
+      });
+  }
+
+  function getProviderSummary(cliId) {
+    let providers = [];
+    let active = getActiveProviderConfig(cliId);
+    try {
+      const result = proxyConfigStore?.listProviders?.(cliId) || {};
+      providers = Array.isArray(result.providers) ? result.providers : [];
+      if (!active && result.activeProviderId) active = providers.find((item) => item.id === result.activeProviderId) || null;
+      if (!active && providers.length === 1) active = providers[0];
+    } catch { /* ignore */ }
+    return {
+      providerCount: providers.length,
+      providerReady: Boolean(active?.apiKey || active?.apiKeySet),
+      activeProvider: active ? {
+        id: active.id,
+        name: active.name,
+        model: active.model,
+        upstreamProtocol: active.upstreamProtocol,
+        apiKeySet: Boolean(active.apiKey || active.apiKeySet),
+      } : null,
+    };
+  }
+
+  function getReadiness(manifest, binary, sandbox, providerSummary) {
+    const bridgeTokenReady = Boolean(bridgeToken);
+    const providerReady = Boolean(providerSummary.providerReady);
+    const sandboxReady = Boolean(sandbox.sandboxed);
+    const installed = Boolean(binary.installed);
+    const mcpReady = sandboxReady && bridgeTokenReady;
+    const launchReady = installed && providerReady && mcpReady;
+    const steps = [
+      { id: 'install', label: '安装 CLI', ok: installed, detail: installed ? (binary.version || binary.path || '已检测') : '未检测到可执行文件' },
+      { id: 'provider', label: '配置 API', ok: providerReady, detail: providerReady ? '已配置活跃 Provider' : '未配置活跃 Provider' },
+      { id: 'sandbox', label: '写入沙箱配置', ok: sandboxReady, detail: sandboxReady ? '配置文件就绪' : '待创建或刷新沙箱' },
+      { id: 'mcp', label: 'MCP Token', ok: bridgeTokenReady, detail: bridgeTokenReady ? 'Bridge Token 可用' : 'BRIDGE_TOKEN 未配置' },
+      { id: 'launch', label: '启动准备', ok: launchReady, detail: launchReady ? '可复制启动命令' : '仍需完成前置步骤' },
+    ];
+    const issues = [];
+    const warnings = [];
+    let nextAction = { id: 'copy_launch', label: '复制启动命令' };
+    if (!installed) {
+      issues.push(`未检测到 ${manifest.name} 可执行文件`);
+      nextAction = { id: 'install', label: '一键安装' };
+    } else if (!providerReady) {
+      issues.push('尚未配置可用 API Provider');
+      nextAction = { id: 'config_provider', label: '配置 API' };
+    } else if (!sandboxReady) {
+      issues.push('沙箱配置尚未就绪');
+      nextAction = { id: 'ensure_sandbox', label: '写入 1Shell MCP 配置' };
+    } else if (!bridgeTokenReady) {
+      issues.push('BRIDGE_TOKEN 未配置，MCP 无法鉴权');
+      nextAction = { id: 'check_token', label: '配置 Bridge Token' };
+    }
+    if (binary.override) warnings.push('正在使用手动指定的 CLI 路径。');
+    if (sandboxReady && !providerReady) warnings.push('沙箱已存在，但缺少 API Provider，启动后仍无法正常调用模型。');
+    return { installed, providerReady, sandboxReady, bridgeTokenReady, mcpReady, launchReady, steps, issues, warnings, nextAction };
   }
 
   function getScanInfo() {
     const isWindows = os.platform() === 'win32';
     return getAllManifests().map(manifest => {
-      const binary = detectBinary(manifest.binary, isWindows);
+      const binary = detectBinary(manifest, isWindows, getBinaryOverride(manifest.id), getManagedBinaryCandidates(manifest));
       const sandbox = getSandboxStatus(manifest.id);
-      const active = getActiveProviderConfig(manifest.id);
-      const isGatewayReady = Boolean(bridgeToken);
+      const providerSummary = getProviderSummary(manifest.id);
+      const readiness = getReadiness(manifest, binary, sandbox, providerSummary);
 
       let status;
-      if (sandbox.sandboxed && isGatewayReady) status = 'sandboxed';
+      if (readiness.launchReady) status = 'sandboxed';
       else if (binary.installed) status = 'detected';
       else status = 'missing';
 
@@ -490,21 +703,32 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         protocol: 'mcp',
         clientProtocol: manifest.clientProtocol,
         supportedUpstream: manifest.supportedUpstream,
+        supportedOS: manifest.supportedOS,
+        install: getInstallInfo(manifest),
         proxyPath: manifest.proxyPath,
         status,
-        binary: { name: manifest.binary, ...binary },
+        binary: { name: manifest.binary, candidates: manifest.binaries || [manifest.binary], ...binary },
         sandbox,
         proxy: {
-          providerCount: active ? 1 : 0,
-          activeProvider: active ? {
-            name: active.name,
-            model: active.model,
-            upstreamProtocol: active.upstreamProtocol,
-            apiKeySet: Boolean(active.apiKey),
-          } : null,
+          providerCount: providerSummary.providerCount,
+          activeProvider: providerSummary.activeProvider,
         },
+        readiness,
       };
     });
+  }
+
+  function getToolDiagnostics(cliId) {
+    const tool = getScanInfo().find((item) => item.id === cliId);
+    if (!tool) throw new Error(`未知 CLI: ${cliId}`);
+    const checks = [
+      { name: 'CLI 可执行文件', ok: Boolean(tool.readiness.installed), detail: tool.binary?.path || tool.binary?.name, error: tool.readiness.installed ? null : tool.binary?.error || '未检测到可执行文件' },
+      { name: 'API Provider', ok: Boolean(tool.readiness.providerReady), detail: tool.proxy?.activeProvider?.name || '', error: tool.readiness.providerReady ? null : '未配置活跃 Provider' },
+      { name: '沙箱配置文件', ok: Boolean(tool.readiness.sandboxReady), detail: tool.sandbox?.sandboxDir || '', error: tool.readiness.sandboxReady ? null : '沙箱配置缺失或不完整' },
+      { name: 'Bridge Token', ok: Boolean(tool.readiness.bridgeTokenReady), detail: tool.readiness.bridgeTokenReady ? '已配置' : '', error: tool.readiness.bridgeTokenReady ? null : 'BRIDGE_TOKEN 未配置' },
+      { name: '启动命令', ok: Boolean(tool.readiness.launchReady), detail: tool.readiness.nextAction?.label || '', error: tool.readiness.launchReady ? null : '仍需完成前置步骤' },
+    ];
+    return { tool, checks };
   }
 
   return {
@@ -515,25 +739,91 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     getSandboxDir,
     getSandboxStatus,
     getScanInfo,
+    getToolDiagnostics,
+    installCli,
     resetSandbox,
+    setBinaryOverride,
+    clearBinaryOverride,
     UPSTREAM_LABELS,
   };
 }
 
-function detectBinary(name, isWindows) {
-  if (!name) return { installed: false };
-  const { execSync } = require('child_process');
-  if (!isWindows && path.isAbsolute(name)) {
-    return fs.existsSync(name)
-      ? { installed: true, path: name }
-      : { installed: false };
+function detectBinary(manifest, isWindows, overridePath = '', extraCandidates = []) {
+  const manifestCandidates = (manifest.binaries || [manifest.binary]).filter(Boolean);
+  const candidates = overridePath
+    ? [overridePath]
+    : [...new Set([...(extraCandidates || []), ...manifestCandidates])].filter(Boolean);
+  const extraCandidateSet = new Set(extraCandidates || []);
+  const attempted = [];
+  for (const candidate of candidates) {
+    const detected = resolveBinaryCandidate(candidate, isWindows);
+    attempted.push(candidate);
+    if (!detected.installed) continue;
+    const version = readBinaryVersion(detected.path || candidate, manifest.versionArgs || ['--version']);
+    return { ...detected, version, override: Boolean(overridePath), managed: !overridePath && extraCandidateSet.has(candidate), attempted };
+  }
+  return { installed: false, attempted, override: Boolean(overridePath), error: overridePath ? '手动路径不可用或不存在' : 'PATH 和 1Shell 托管目录中未找到可执行文件' };
+}
+
+function resolveBinaryCandidate(candidate, isWindows) {
+  if (!candidate) return { installed: false };
+  const clean = normalizeManualBinaryPath(candidate);
+  if (path.isAbsolute(clean) || clean.includes('/') || clean.includes('\\')) {
+    const resolved = resolveExecutablePath(clean, isWindows);
+    return resolved ? { installed: true, path: resolved, source: 'path' } : { installed: false };
   }
   try {
-    const cmd = isWindows ? `where ${name} 2>NUL` : `which ${name} 2>/dev/null`;
-    const result = execSync(cmd, { timeout: 3000, encoding: 'utf8' }).trim();
-    if (result) return { installed: true, path: result.split('\n')[0].trim() };
+    const command = isWindows ? 'where.exe' : 'which';
+    const result = execFileSync(command, [clean], { timeout: 3000, encoding: 'utf8', windowsHide: true }).trim();
+    const first = result.split(/\r?\n/).map(line => line.trim()).filter(Boolean)[0];
+    if (first) return { installed: true, path: first, source: 'path' };
   } catch { /* not found */ }
   return { installed: false };
+}
+
+function resolveExecutablePath(filePath, isWindows) {
+  if (fs.existsSync(filePath)) return filePath;
+  if (!isWindows || path.extname(filePath)) return '';
+  for (const ext of ['.exe', '.cmd', '.bat', '.ps1']) {
+    const withExt = `${filePath}${ext}`;
+    if (fs.existsSync(withExt)) return withExt;
+  }
+  return '';
+}
+
+function readBinaryVersion(binaryPath, args) {
+  if (!binaryPath) return '';
+  try {
+    const output = execFileSync(binaryPath, args, { timeout: 3000, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    return String(output || '').trim().split(/\r?\n/)[0]?.slice(0, 120) || '';
+  } catch {
+    return '';
+  }
+}
+
+function normalizeManualBinaryPath(value) {
+  return String(value || '').trim().replace(/^['"]|['"]$/g, '');
+}
+
+function isValidShellEnvKey(key) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(key || ''));
+}
+
+function escapeTomlBasicString(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function tomlSingleQuotedKey(value) {
+  return `'${String(value || '').replace(/'/g, "''")}'`;
+}
+
+function tailInstallOutput(output) {
+  return String(output || '').trim().split(/\r?\n/).slice(-80).join('\n');
+}
+
+function buildInstallErrorMessage(err, stdout, stderr) {
+  const detail = tailInstallOutput(stderr || stdout);
+  return detail || err.message || '安装失败';
 }
 
 module.exports = { createCliSandbox };

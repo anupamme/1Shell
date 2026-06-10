@@ -51,7 +51,7 @@ function osText(h: MainHost): string {
         type="text"
         placeholder="搜索主机…"
         autocomplete="off"
-        class="flex-1 h-7 px-2.5 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+        class="flex-1 h-7 px-2.5 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
         @input="onSearchInput"
       />
       <button

@@ -119,7 +119,7 @@ onMounted(() => { void load(); });
     <div class="flex items-center gap-2">
       <select
         v-model="newType"
-        class="h-8 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
+        class="h-8 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
       >
         <option value="allow">白名单</option>
         <option value="deny">黑名单</option>
@@ -128,13 +128,13 @@ onMounted(() => { void load(); });
         v-model="newCidr"
         type="text"
         placeholder="IP 或 CIDR，如 192.168.1.0/24"
-        class="flex-1 h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+        class="flex-1 h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
       />
       <input
         v-model="newNote"
         type="text"
         placeholder="备注（可选）"
-        class="w-24 h-8 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
+        class="w-24 h-8 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-xs outline-none focus:border-blue-400"
       />
       <button
         type="button"

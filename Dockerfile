@@ -34,5 +34,7 @@ VOLUME ["/app/data"]
 EXPOSE 3301
 
 ENV NODE_ENV=production
+# 标记容器运行环境：文件写入失败时用于给出"容器视角 / 只读挂载"的明确提示
+ENV ONESHELL_IN_DOCKER=1
 
 CMD ["node", "server.js"]

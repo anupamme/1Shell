@@ -10,6 +10,10 @@ const { getAllManifests, getManifest, UPSTREAM_LABELS } = require('../agents/cli
  * GET  /api/agent/scan                            扫描所有 CLI（含沙箱状态）
  * GET  /api/agent/endpoints                       1Shell 端点信息
  * GET  /api/agent/diagnostics                     连通性诊断
+ * GET  /api/agent/diagnostics/:cliId              单个 CLI 接入诊断
+ * POST /api/agent/install/:cliId                  自动安装 CLI
+ * PUT  /api/agent/binary/:cliId                   手动指定 CLI 可执行文件路径
+ * DELETE /api/agent/binary/:cliId                 清除手动路径覆盖
  * POST /api/agent/sandbox/ensure/:cliId           确保沙箱就绪
  * POST /api/agent/sandbox/reset/:cliId            重置沙箱
  * GET  /api/agent/sandbox/status/:cliId           查询沙箱状态
@@ -139,10 +143,70 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
     return true;
   }
 
+  function validateManifestCli(cliId, res) {
+    if (!getManifest(cliId)) {
+      res.status(400).json({ ok: false, error: `未知 CLI: ${cliId}` });
+      return false;
+    }
+    return true;
+  }
+
+  router.get('/agent/diagnostics/:cliId', (req, res) => {
+    if (!requireSandbox(req, res)) return;
+    const { cliId } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    try {
+      return res.json({ ok: true, cliId, ...cliSandbox.getToolDiagnostics(cliId) });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.post('/agent/install/:cliId', async (req, res) => {
+    if (!requireSandbox(req, res)) return;
+    const { cliId } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    try {
+      const result = await cliSandbox.installCli(cliId);
+      return res.json({ ok: true, cliId, ...result });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        cliId,
+        error: err.message,
+        result: err.result || null,
+      });
+    }
+  });
+
+  router.put('/agent/binary/:cliId', (req, res) => {
+    if (!requireSandbox(req, res)) return;
+    const { cliId } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    try {
+      const tool = cliSandbox.setBinaryOverride(cliId, req.body?.path || req.body?.binaryPath || '');
+      return res.json({ ok: true, cliId, tool });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.delete('/agent/binary/:cliId', (req, res) => {
+    if (!requireSandbox(req, res)) return;
+    const { cliId } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    try {
+      const tool = cliSandbox.clearBinaryOverride(cliId);
+      return res.json({ ok: true, cliId, tool });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
   router.post('/agent/sandbox/ensure/:cliId', (req, res) => {
     if (!requireSandbox(req, res)) return;
     const { cliId } = req.params;
-    if (!validateCli(cliId, res)) return;
+    if (!validateManifestCli(cliId, res)) return;
 
     try {
       const dir = cliSandbox.ensureSandbox(cliId, { cwd: req.body?.cwd || process.cwd() });
@@ -156,7 +220,7 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
   router.post('/agent/sandbox/reset/:cliId', (req, res) => {
     if (!requireSandbox(req, res)) return;
     const { cliId } = req.params;
-    if (!validateCli(cliId, res)) return;
+    if (!validateManifestCli(cliId, res)) return;
 
     const ok = cliSandbox.resetSandbox(cliId);
     return res.json({ ok, cliId });
@@ -165,7 +229,7 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
   router.get('/agent/sandbox/status/:cliId', (req, res) => {
     if (!requireSandbox(req, res)) return;
     const { cliId } = req.params;
-    if (!validateCli(cliId, res)) return;
+    if (!validateManifestCli(cliId, res)) return;
 
     const status = cliSandbox.getSandboxStatus(cliId);
     return res.json({ ok: true, cliId, ...status });
@@ -174,13 +238,12 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
   router.get('/agent/launch-command/:cliId', (req, res) => {
     if (!requireSandbox(req, res)) return;
     const { cliId } = req.params;
-    if (!validateCli(cliId, res)) return;
+    if (!validateManifestCli(cliId, res)) return;
 
     const shell = req.query.shell || (process.platform === 'win32' ? 'powershell' : 'bash');
     try {
       const env = cliSandbox.buildLaunchEnv(cliId);
       const command = redactLaunchCommand(cliSandbox.buildShellCommand(cliId, { shell }), env);
-      const manifest = getManifest(cliId);
       return res.json({
         ok: true,
         cliId,
@@ -188,7 +251,7 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
         command,
         vars: Object.fromEntries(
           Object.entries(env)
-            .filter(([k]) => k !== '1SHELL_MCP_TOKEN')
+            .filter(([k]) => k !== 'ONESHELL_MCP_TOKEN')
         ),
       });
     } catch (err) {

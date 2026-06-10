@@ -4,17 +4,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { TRUSTED_PROXY_IPS } = require('../config/env');
+const { MCP_STANDARD_TOOL_NAMES } = require('../tools/mcp-tool-profiles');
 
-const DEFAULT_ALLOWED_TOOLS = [
-  'list_hosts',
-  'host_exec',
-  'list_remote_dir',
-  'read_remote_file',
-  'write_remote_file',
-  'upload_file',
-  'download_file',
-  'ask_1shell_ai',
-];
+const DEFAULT_ALLOWED_TOOLS = [...MCP_STANDARD_TOOL_NAMES];
 const DEFAULT_ALLOWED_TOOL_SET = new Set(DEFAULT_ALLOWED_TOOLS);
 
 function createRemoteMcpService({ dataDir, auditService, logger } = {}) {

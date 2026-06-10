@@ -16,8 +16,13 @@ const CSRF_HEADER_NAME = 'x-csrf-token';
 function getAuthUsername() { return process.env.APP_LOGIN_USERNAME || ''; }
 function getAuthPassword() { return process.env.APP_LOGIN_PASSWORD || ''; }
 
-function createAuthService() {
+function createAuthService({ twoFactorService = null } = {}) {
   const authSessions = new Map();
+
+  // 2FA 待验证票据：密码校验通过后签发，验证码通过后才发正式会话
+  const pendingTwoFactor = new Map();
+  const PENDING_2FA_TTL_MS = 2 * 60 * 1000;
+  const PENDING_2FA_MAX_ATTEMPTS = 5;
 
   // 暴力破解防护：记录每个 IP 的失败次数与解锁时间
   const loginFailMap = new Map();
@@ -187,11 +192,90 @@ function createAuthService() {
     }
 
     clearLoginFailure(ip);
+
+    // 已开启 2FA：密码通过后签发短时效待验证票据，验证码通过后才发正式会话
+    if (twoFactorService?.isEnabled?.()) {
+      const pendingToken = crypto.randomBytes(24).toString('hex');
+      pendingTwoFactor.set(pendingToken, {
+        expiresAt: Date.now() + PENDING_2FA_TTL_MS,
+        attempts: 0,
+        ip,
+      });
+      return {
+        ok: true,
+        enabled: true,
+        authenticated: false,
+        requiresTwoFactor: true,
+        pendingToken,
+        sessionId: '',
+        csrfToken: '',
+      };
+    }
+
     const { sessionId, csrfToken } = createAuthSession();
     return {
       ok: true,
       enabled: true,
       authenticated: true,
+      sessionId,
+      csrfToken,
+    };
+  }
+
+  function clearExpiredPendingTwoFactor() {
+    const now = Date.now();
+    for (const [token, entry] of pendingTwoFactor.entries()) {
+      if (!entry || entry.expiresAt <= now) pendingTwoFactor.delete(token);
+    }
+  }
+
+  /**
+   * 登录第二步：用待验证票据 + TOTP/恢复码换取正式会话。
+   * 错误信息保持通用，不泄露 2FA 配置细节。
+   */
+  function verifyTwoFactorLogin(pendingToken, code, ip = 'unknown') {
+    clearExpiredPendingTwoFactor();
+
+    if (isIpLockedOut(ip)) {
+      const error = new Error('失败次数过多，请 60 秒后再试');
+      error.status = 429;
+      throw error;
+    }
+
+    const entry = pendingTwoFactor.get(String(pendingToken || ''));
+    if (!entry || entry.expiresAt <= Date.now()) {
+      pendingTwoFactor.delete(String(pendingToken || ''));
+      const error = new Error('验证已过期，请重新登录');
+      error.status = 401;
+      throw error;
+    }
+
+    entry.attempts += 1;
+    if (entry.attempts > PENDING_2FA_MAX_ATTEMPTS) {
+      pendingTwoFactor.delete(String(pendingToken || ''));
+      recordLoginFailure(ip);
+      const error = new Error('验证失败次数过多，请重新登录');
+      error.status = 429;
+      throw error;
+    }
+
+    const verdict = twoFactorService.verify(code);
+    if (!verdict.ok) {
+      recordLoginFailure(ip);
+      const error = new Error('验证码错误');
+      error.status = 401;
+      throw error;
+    }
+
+    pendingTwoFactor.delete(String(pendingToken || ''));
+    clearLoginFailure(ip);
+    const { sessionId, csrfToken } = createAuthSession();
+    return {
+      ok: true,
+      enabled: true,
+      authenticated: true,
+      method: verdict.method || 'totp',
+      remainingRecoveryCodes: verdict.remainingRecoveryCodes,
       sessionId,
       csrfToken,
     };
@@ -234,6 +318,7 @@ function createAuthService() {
     isAuthEnabled,
     isRequestAuthenticated,
     login,
+    verifyTwoFactorLogin,
     logout,
     requireAuth,
     setAuthCookie,

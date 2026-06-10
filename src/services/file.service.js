@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { Readable } = require('stream');
+const { DATA_DIR } = require('../config/env');
 
 /**
  * 文件浏览服务
@@ -709,7 +710,11 @@ function createFileService({ hostService, probeAgentService = null }) {
   async function uploadLocal(dirPath, filename, buffer) {
     const safeName = safeUploadFilename(filename);
     const resolved = path.resolve(dirPath, safeName);
-    await fs.promises.writeFile(resolved, buffer);
+    try {
+      await fs.promises.writeFile(resolved, buffer);
+    } catch (err) {
+      throw await enrichLocalWriteError(err, resolved, '上传');
+    }
     return { path: resolved, size: buffer.length };
   }
 
@@ -765,7 +770,11 @@ function createFileService({ hostService, probeAgentService = null }) {
   async function writeLocal(filePath, content) {
     assertSafeFilePath(filePath, '写入');
     const resolved = path.resolve(filePath);
-    await fs.promises.writeFile(resolved, content, 'utf8');
+    try {
+      await fs.promises.writeFile(resolved, content, 'utf8');
+    } catch (err) {
+      throw await enrichLocalWriteError(err, resolved, '写入');
+    }
     const stat = await fs.promises.stat(resolved);
     return { path: resolved, size: stat.size };
   }
@@ -811,12 +820,305 @@ function createFileService({ hostService, probeAgentService = null }) {
     return writeRemote(hostId, filePath, content);
   }
 
+  // ─── 目录创建 / 删除 / 重命名 ────────────────────────────────────────────
+
+  const IN_DOCKER = process.env.ONESHELL_IN_DOCKER === '1' || fs.existsSync('/.dockerenv');
+
+  function isWriteDeniedError(err) {
+    const code = err?.code || err?.cause?.code;
+    if (['EROFS', 'EACCES', 'EPERM'].includes(code)) return true;
+    return /read-only file system|EROFS|permission denied|EACCES|EPERM|operation not permitted/i.test(String(err?.message || ''));
+  }
+
+  /**
+   * 写入自检：向 data/tmp 写一个测试文件，区分"工具链不可用"和"目标路径不可写"
+   */
+  async function selfCheckLocalWrite() {
+    const checkPath = path.join(DATA_DIR, 'tmp', '1shell-write-test.txt');
+    try {
+      await fs.promises.mkdir(path.dirname(checkPath), { recursive: true });
+      await fs.promises.writeFile(checkPath, `1shell write self-check ${new Date().toISOString()}\n`, 'utf8');
+      await fs.promises.rm(checkPath, { force: true });
+      return { ok: true, path: checkPath };
+    } catch (err) {
+      return { ok: false, path: checkPath, error: err.message };
+    }
+  }
+
+  async function writeSelfCheck() {
+    const result = await selfCheckLocalWrite();
+    return { ...result, inDocker: IN_DOCKER };
+  }
+
+  /**
+   * 本机写操作失败时，把 EROFS / 权限类错误转成可行动的提示，
+   * 避免 Docker 只读挂载导致的失败被泛化成"无法修改文件"。
+   */
+  async function enrichLocalWriteError(err, targetPath, action) {
+    if (!isWriteDeniedError(err)) return err;
+    const check = await selfCheckLocalWrite();
+    const lines = [`${action}失败: ${err.message}`];
+    if (check.ok) {
+      lines.push(`1Shell 写入工具链正常（${check.path} 自检通过），是目标路径本身不可写: ${targetPath}`);
+    } else {
+      lines.push(`1Shell 写入自检同样失败（${check.error}），运行目录可能整体只读，请检查部署配置`);
+    }
+    if (IN_DOCKER) {
+      lines.push('当前 1Shell 运行在 Docker 容器内，操作的是容器视角的文件系统；该路径很可能是 docker-compose 中的 :ro 只读挂载（如 /opt/1panel、/www、/etc/nginx）。');
+      lines.push('可选处理方式：');
+      lines.push('1. 推荐：把这台 VPS 以 SSH 主机方式添加到 1Shell（主机仓库 → 添加主机），通过主机视角读写宿主机文件；');
+      lines.push('2. 把 docker-compose.yml 中对应目录挂载从 :ro 改为 :rw 后重启容器（docker compose up -d）；');
+      lines.push('3. 通过 docker exec 在目标容器或宿主机内执行修改。');
+    } else {
+      lines.push('目标路径不可写：请检查文件系统权限、属主或只读挂载。');
+    }
+    return new Error(lines.join('\n'));
+  }
+
+  function assertSafeMutationTarget(targetPath, action) {
+    assertSafeFilePath(targetPath, action);
+    const trimmed = String(targetPath || '').trim().replace(/[\\/]+$/, '');
+    if (!trimmed || /^[A-Za-z]:$/.test(trimmed)) {
+      throw new Error(`${action}被拒绝：不允许操作根目录`);
+    }
+  }
+
+  function sftpCall(sftp, method, ...args) {
+    return new Promise((resolve, reject) => {
+      sftp[method](...args, (err, result) => {
+        if (err) reject(err); else resolve(result);
+      });
+    });
+  }
+
+  async function mkdirLocal(dirPath) {
+    assertSafeMutationTarget(dirPath, '创建目录');
+    const resolved = path.resolve(dirPath);
+    try {
+      await fs.promises.mkdir(resolved, { recursive: true });
+    } catch (err) {
+      throw await enrichLocalWriteError(err, resolved, '创建目录');
+    }
+    return { path: resolved };
+  }
+
+  async function createFileLocal(filePath) {
+    assertSafeMutationTarget(filePath, '创建文件');
+    const resolved = path.resolve(filePath);
+    let handle;
+    try {
+      // 'wx'：已存在时报错，避免静默清空既有文件
+      handle = await fs.promises.open(resolved, 'wx');
+    } catch (e) {
+      if (e.code === 'EEXIST') throw new Error(`文件已存在: ${resolved}`);
+      throw await enrichLocalWriteError(e, resolved, '创建文件');
+    }
+    await handle.close();
+    return { path: resolved };
+  }
+
+  async function createFileRemote(hostId, filePath) {
+    assertSafeMutationTarget(filePath, '创建文件');
+    const entry = await acquireSftp(hostId);
+    const { sftp } = entry;
+
+    try {
+      await new Promise((resolve, reject) => {
+        sftp.open(filePath, 'wx', (err, handle) => {
+          if (err) {
+            const exists = /exist/i.test(err.message) || err.code === 4 || err.code === 11;
+            return reject(new Error(exists ? `文件已存在或无法创建: ${filePath}` : `创建文件失败: ${err.message}`));
+          }
+          sftp.close(handle, () => resolve());
+        });
+      });
+      return { path: filePath };
+    } catch (err) {
+      releaseSftp(hostId);
+      throw err;
+    } finally {
+      returnSftp(hostId);
+    }
+  }
+
+  async function mkdirRemote(hostId, dirPath) {
+    assertSafeMutationTarget(dirPath, '创建目录');
+    const entry = await acquireSftp(hostId);
+    const { sftp } = entry;
+
+    try {
+      const normalized = String(dirPath).replace(/\/+$/, '');
+      const isAbsolute = normalized.startsWith('/');
+      const segments = normalized.split('/').filter(Boolean);
+      let current = isAbsolute ? '' : '.';
+
+      for (const segment of segments) {
+        current = current === '.' ? segment : `${current}/${segment}`;
+        const target = isAbsolute ? `/${current}` : current;
+        const stats = await sftpCall(sftp, 'stat', target).catch(() => null);
+        if (stats) {
+          if (!stats.isDirectory()) throw new Error(`路径已存在且不是目录: ${target}`);
+          continue;
+        }
+        await sftpCall(sftp, 'mkdir', target).catch((mkErr) => {
+          throw new Error(`创建目录失败: ${mkErr.message}`);
+        });
+      }
+      return { path: isAbsolute ? normalized : current };
+    } catch (err) {
+      releaseSftp(hostId);
+      throw err;
+    } finally {
+      returnSftp(hostId);
+    }
+  }
+
+  async function deleteLocal(targetPath) {
+    assertSafeMutationTarget(targetPath, '删除');
+    const resolved = path.resolve(targetPath);
+    const stat = await fs.promises.lstat(resolved).catch(() => {
+      throw new Error(`路径不存在: ${resolved}`);
+    });
+    try {
+      await fs.promises.rm(resolved, { recursive: true, force: false });
+    } catch (err) {
+      throw await enrichLocalWriteError(err, resolved, '删除');
+    }
+    return { path: resolved, isDir: stat.isDirectory() };
+  }
+
+  async function deleteRemoteEntry(sftp, targetPath) {
+    // lstat 不跟随符号链接：链接本身按文件删除，避免递归进链接目标
+    const stats = await sftpCall(sftp, 'lstat', targetPath);
+    if (stats.isDirectory()) {
+      const list = await sftpCall(sftp, 'readdir', targetPath);
+      const base = targetPath.replace(/\/+$/, '');
+      for (const item of list) {
+        await deleteRemoteEntry(sftp, `${base}/${item.filename}`);
+      }
+      await sftpCall(sftp, 'rmdir', targetPath);
+      return true;
+    }
+    await sftpCall(sftp, 'unlink', targetPath);
+    return false;
+  }
+
+  async function deleteRemote(hostId, targetPath) {
+    assertSafeMutationTarget(targetPath, '删除');
+    const entry = await acquireSftp(hostId);
+    const { sftp } = entry;
+
+    try {
+      await sftpCall(sftp, 'lstat', targetPath).catch(() => {
+        throw new Error(`路径不存在: ${targetPath}`);
+      });
+      const isDir = await deleteRemoteEntry(sftp, targetPath);
+      return { path: targetPath, isDir };
+    } catch (err) {
+      releaseSftp(hostId);
+      throw new Error(`删除失败: ${err.message.replace(/^删除失败: /, '')}`);
+    } finally {
+      returnSftp(hostId);
+    }
+  }
+
+  async function renameLocal(oldPath, newPath) {
+    assertSafeMutationTarget(oldPath, '重命名');
+    assertSafeMutationTarget(newPath, '重命名');
+    const resolvedOld = path.resolve(oldPath);
+    const resolvedNew = path.resolve(newPath);
+    if (resolvedOld === resolvedNew) return { path: resolvedNew, oldPath: resolvedOld };
+    const exists = await fs.promises.lstat(resolvedNew).then(() => true).catch(() => false);
+    if (exists) throw new Error(`目标路径已存在: ${resolvedNew}`);
+    try {
+      await fs.promises.rename(resolvedOld, resolvedNew);
+    } catch (err) {
+      throw await enrichLocalWriteError(err, resolvedOld, '重命名');
+    }
+    return { path: resolvedNew, oldPath: resolvedOld };
+  }
+
+  async function renameRemote(hostId, oldPath, newPath) {
+    assertSafeMutationTarget(oldPath, '重命名');
+    assertSafeMutationTarget(newPath, '重命名');
+    if (oldPath === newPath) return { path: newPath, oldPath };
+    const entry = await acquireSftp(hostId);
+    const { sftp } = entry;
+
+    try {
+      const exists = await sftpCall(sftp, 'lstat', newPath).then(() => true).catch(() => false);
+      if (exists) throw new Error(`目标路径已存在: ${newPath}`);
+      await sftpCall(sftp, 'rename', oldPath, newPath).catch((rnErr) => {
+        throw new Error(`重命名失败: ${rnErr.message}`);
+      });
+      return { path: newPath, oldPath };
+    } catch (err) {
+      releaseSftp(hostId);
+      throw err;
+    } finally {
+      returnSftp(hostId);
+    }
+  }
+
+  /**
+   * 统一入口：创建目录（递归）
+   */
+  async function createDirectory(hostId, dirPath) {
+    const host = hostService.findHost(hostId);
+    if (!host) throw new Error('主机不存在');
+    if (host.type === 'local' || host.id === 'local') {
+      return mkdirLocal(dirPath);
+    }
+    return mkdirRemote(hostId, dirPath);
+  }
+
+  /**
+   * 统一入口：创建空文件（已存在时拒绝）
+   */
+  async function createFile(hostId, filePath) {
+    const host = hostService.findHost(hostId);
+    if (!host) throw new Error('主机不存在');
+    if (host.type === 'local' || host.id === 'local') {
+      return createFileLocal(filePath);
+    }
+    return createFileRemote(hostId, filePath);
+  }
+
+  /**
+   * 统一入口：删除文件或目录（目录递归删除）
+   */
+  async function deletePath(hostId, targetPath) {
+    const host = hostService.findHost(hostId);
+    if (!host) throw new Error('主机不存在');
+    if (host.type === 'local' || host.id === 'local') {
+      return deleteLocal(targetPath);
+    }
+    return deleteRemote(hostId, targetPath);
+  }
+
+  /**
+   * 统一入口：重命名 / 移动文件或目录
+   */
+  async function renamePath(hostId, oldPath, newPath) {
+    const host = hostService.findHost(hostId);
+    if (!host) throw new Error('主机不存在');
+    if (host.type === 'local' || host.id === 'local') {
+      return renameLocal(oldPath, newPath);
+    }
+    return renameRemote(hostId, oldPath, newPath);
+  }
+
   return {
     listDir,
     readFile,
     downloadFile,
     uploadFile,
     writeFile,
+    createDirectory,
+    createFile,
+    deletePath,
+    renamePath,
+    writeSelfCheck,
   };
 }
 

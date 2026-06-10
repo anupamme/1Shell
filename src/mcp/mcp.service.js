@@ -149,6 +149,9 @@ function createMcpService(deps = {}) {
       list_remote_dir: ['path'],
       read_remote_file: ['path'],
       write_remote_file: ['path'],
+      create_directory: ['path'],
+      delete_path: ['path'],
+      rename_path: ['path', 'newPath'],
       upload_file: ['dirPath', 'localPath'],
       download_file: ['path', 'localPath'],
     };

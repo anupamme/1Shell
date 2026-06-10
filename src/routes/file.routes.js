@@ -112,6 +112,87 @@ function createFileRouter({ fileService }) {
     }
   });
 
+  /**
+   * GET /api/files/write-check
+   * 写入自检：验证 1Shell 本机写工具链是否可用，并报告是否运行在 Docker 容器内
+   */
+  router.get('/files/write-check', async (req, res, next) => {
+    try {
+      const result = await fileService.writeSelfCheck();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * POST /api/files/mkdir
+   * Body: { hostId, path }
+   */
+  router.post('/files/mkdir', express.json(), async (req, res, next) => {
+    try {
+      const { hostId = 'local', path: dirPath } = req.body;
+      if (!dirPath) {
+        return res.status(400).json({ error: '缺少 path 参数' });
+      }
+      const result = await fileService.createDirectory(hostId, dirPath);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * POST /api/files/touch
+   * Body: { hostId, path } — 创建空文件，已存在时报错
+   */
+  router.post('/files/touch', express.json(), async (req, res, next) => {
+    try {
+      const { hostId = 'local', path: filePath } = req.body;
+      if (!filePath) {
+        return res.status(400).json({ error: '缺少 path 参数' });
+      }
+      const result = await fileService.createFile(hostId, filePath);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * POST /api/files/delete
+   * Body: { hostId, path }
+   */
+  router.post('/files/delete', express.json(), async (req, res, next) => {
+    try {
+      const { hostId = 'local', path: targetPath } = req.body;
+      if (!targetPath) {
+        return res.status(400).json({ error: '缺少 path 参数' });
+      }
+      const result = await fileService.deletePath(hostId, targetPath);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * POST /api/files/rename
+   * Body: { hostId, path, newPath }
+   */
+  router.post('/files/rename', express.json(), async (req, res, next) => {
+    try {
+      const { hostId = 'local', path: oldPath, newPath } = req.body;
+      if (!oldPath || !newPath) {
+        return res.status(400).json({ error: '缺少 path 或 newPath 参数' });
+      }
+      const result = await fileService.renamePath(hostId, oldPath, newPath);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 

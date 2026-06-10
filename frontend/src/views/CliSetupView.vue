@@ -24,11 +24,17 @@ import {
 
   detectShell,
 
+  type BinaryOverrideResponse,
+
+  type CliDiagnosticsResponse,
+
   type CliStatus,
 
   type DiagnosticsResponse,
 
   type EndpointsResponse,
+
+  type InstallCliResponse,
 
   type LaunchCommandResponse,
 
@@ -107,6 +113,8 @@ const diagnostics = ref<DiagnosticsResponse['checks']>([]);
 const scanError = ref<string | null>(null);
 
 const rescanning = ref(false);
+
+const installingCliIds = ref<Set<string>>(new Set());
 
 
 
@@ -360,11 +368,15 @@ async function loadScan(): Promise<void> {
 
     saveCliCache();
 
-    // 拉取所有可用 CLI 的启动命令
+    // 拉取已具备启动价值的 CLI 命令，避免未安装卡片误显示复制入口。
 
     for (const t of tools.value) {
 
-      if (t.status === 'sandboxed' || t.status === 'detected') loadLaunchCommand(t.id);
+      if (t.readiness?.launchReady || t.status !== 'missing') {
+        void loadLaunchCommand(t.id);
+      } else {
+        delete launchCommands[t.id];
+      }
 
     }
 
@@ -430,7 +442,7 @@ async function rescan(): Promise<void> {
 
   try {
 
-    await Promise.all([loadEndpoints(), loadScan(), loadDiagnostics()]);
+    await Promise.all([loadEndpoints(), loadScan(), loadDiagnostics(), loadSkillApiStatus()]);
 
     notify.success('扫描完成');
 
@@ -465,6 +477,8 @@ async function onEnsureSandbox(cliId: string): Promise<void> {
       await loadScan();
 
       await loadLaunchCommand(cliId);
+
+      void onDiagnoseCli(cliId, true);
 
     } else {
 
@@ -546,6 +560,211 @@ async function onCopyCmd(cliId: string): Promise<void> {
 
 }
 
+function setInstalling(cliId: string, installing: boolean): void {
+
+  const next = new Set(installingCliIds.value);
+
+  if (installing) next.add(cliId);
+  else next.delete(cliId);
+
+  installingCliIds.value = next;
+
+}
+
+async function onInstallCli(cliId: string): Promise<void> {
+
+  const tool = tools.value.find((t) => t.id === cliId);
+
+  if (tool?.binary?.installed) {
+
+    notify.info(`${tool.name || cliId} 已检测到，无需安装`);
+
+    return;
+
+  }
+
+  if (!tool?.install?.command) {
+
+    if (tool?.install?.docsUrl) window.open(tool.install.docsUrl, '_blank', 'noopener,noreferrer');
+
+    notify.error('暂无自动安装命令，请查看官方文档');
+
+    return;
+
+  }
+
+  if (installingCliIds.value.has(cliId)) return;
+
+  if (!window.confirm(`1Shell 将自动执行安装命令：\n\n${tool.install.command}\n\n是否继续？`)) return;
+
+  setInstalling(cliId, true);
+
+  notify.info(`正在安装 ${tool.name || cliId}，这可能需要几分钟...`, 0);
+
+  try {
+
+    const resp = await requestJson<InstallCliResponse>(
+
+      `/api/agent/install/${encodeURIComponent(cliId)}`,
+
+      { method: 'POST', body: JSON.stringify({}) },
+
+    );
+
+    await loadScan();
+
+    if (resp.ok && resp.installed) {
+
+      notify.success(`${tool.name || cliId} 安装完成，已重新扫描`);
+
+      await loadLaunchCommand(cliId);
+
+    } else if (resp.ok) {
+
+      notify.warn(`${tool.name || cliId} 安装命令已执行，但仍未在 PATH 中检测到，请尝试重新扫描或手动指定路径`, 8000);
+
+    } else {
+
+      notify.error(resp.error || '安装失败', 8000);
+
+    }
+
+  } catch (err) {
+
+    notify.error(err instanceof Error ? err.message : String(err), 8000);
+
+    await loadScan();
+
+  } finally {
+
+    setInstalling(cliId, false);
+
+  }
+
+}
+
+async function onSetBinary(cliId: string): Promise<void> {
+
+  const tool = tools.value.find((t) => t.id === cliId);
+
+  const current = tool?.binary?.override ? tool.binary.path || '' : '';
+
+  const input = window.prompt(`请输入 ${tool?.name || cliId} 可执行文件完整路径`, current);
+
+  if (input === null) return;
+
+  const binaryPath = input.trim();
+
+  if (!binaryPath) {
+
+    notify.error('可执行文件路径不能为空');
+
+    return;
+
+  }
+
+  try {
+
+    const resp = await requestJson<BinaryOverrideResponse>(
+
+      `/api/agent/binary/${encodeURIComponent(cliId)}`,
+
+      { method: 'PUT', body: JSON.stringify({ path: binaryPath }) },
+
+    );
+
+    if (resp.ok) {
+
+      notify.success(`${tool?.name || cliId} 路径已保存`);
+
+      await loadScan();
+
+      await loadLaunchCommand(cliId);
+
+    } else {
+
+      notify.error(resp.error || '保存路径失败', 5000);
+
+    }
+
+  } catch (err) {
+
+    notify.error(err instanceof Error ? err.message : String(err), 5000);
+
+  }
+
+}
+
+async function onClearBinary(cliId: string): Promise<void> {
+
+  const tool = tools.value.find((t) => t.id === cliId);
+
+  if (!window.confirm(`确定要清除 ${tool?.name || cliId} 的手动路径吗？`)) return;
+
+  try {
+
+    const resp = await requestJson<BinaryOverrideResponse>(
+
+      `/api/agent/binary/${encodeURIComponent(cliId)}`,
+
+      { method: 'DELETE' },
+
+    );
+
+    if (resp.ok) {
+
+      notify.success(`${tool?.name || cliId} 已恢复 PATH 自动扫描`);
+
+      delete launchCommands[cliId];
+
+      await loadScan();
+
+    } else {
+
+      notify.error(resp.error || '清除路径失败', 5000);
+
+    }
+
+  } catch (err) {
+
+    notify.error(err instanceof Error ? err.message : String(err), 5000);
+
+  }
+
+}
+
+async function onDiagnoseCli(cliId: string, silent = false): Promise<void> {
+
+  try {
+
+    const resp = await requestJson<CliDiagnosticsResponse>(`/api/agent/diagnostics/${encodeURIComponent(cliId)}`);
+
+    const failed = (resp.checks || []).filter((check) => !check.ok);
+
+    if (!silent) {
+
+      if (failed.length === 0) {
+
+        notify.success(`${resp.tool?.name || cliId} 接入诊断通过`);
+
+      } else {
+
+        const first = failed[0];
+
+        notify.error(`${resp.tool?.name || cliId} 仍有 ${failed.length} 项待处理：${first.error || first.name}`, 7000);
+
+      }
+
+    }
+
+  } catch (err) {
+
+    if (!silent) notify.error(err instanceof Error ? err.message : String(err), 5000);
+
+  }
+
+}
+
 
 
 function openCliModal(cliId: string): void {
@@ -588,9 +807,7 @@ onMounted(async () => {
 
   if (!restored || !isPageStateFresh(CLI_CACHE_KEY, CLI_CACHE_TTL_MS)) {
 
-    await Promise.all([loadEndpoints(), loadScan(), loadDiagnostics()]);
-
-    loadSkillApiStatus();
+    await Promise.all([loadEndpoints(), loadScan(), loadDiagnostics(), loadSkillApiStatus()]);
 
   }
 
@@ -622,7 +839,7 @@ onMounted(async () => {
 
             AI 配置
 
-            <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300 font-semibold">3.0</span>
+            <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300 font-semibold">4.2</span>
 
           </div>
 
@@ -756,6 +973,8 @@ onMounted(async () => {
 
                 :launch-command="launchCommands[t.id]"
 
+                :installing="installingCliIds.has(t.id)"
+
                 @ensure-sandbox="onEnsureSandbox"
 
                 @reset-sandbox="onResetSandbox"
@@ -763,6 +982,14 @@ onMounted(async () => {
                 @config="openCliModal"
 
                 @copy-cmd="onCopyCmd"
+
+                @install-cli="onInstallCli"
+
+                @set-binary="onSetBinary"
+
+                @clear-binary="onClearBinary"
+
+                @diagnose="onDiagnoseCli"
 
               />
 

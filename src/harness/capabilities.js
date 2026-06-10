@@ -109,7 +109,8 @@ const CAPABILITY_RULES = {
     // 执行能力：放行命令执行与读类工具（写文件需额外 write_file 能力，词表后续扩）
     allowedTools: new Set([
       'execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'list_hosts',
-      'write_remote_file', 'upload_file', 'download_file', 'run_script',
+      'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
+      'upload_file', 'download_file', 'run_script',
       'query_probe', 'list_probes', 'query_audit',
     ]),
     commandCheck: null, // 不做命令级限制（灾难拦截由 guard 兜底）

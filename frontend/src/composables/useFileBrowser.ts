@@ -5,6 +5,7 @@
 import { reactive, ref, watch, type Ref } from 'vue';
 
 import { useApiClient } from '@/composables/useApiClient';
+import { useConfirm } from '@/composables/useConfirm';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useNotifyStore } from '@/stores/notify';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
@@ -15,7 +16,11 @@ export interface DirItem {
   isDir: boolean;
   isDrive?: boolean;
   size?: number;
+  mtime?: number;
 }
+
+export type FileSortBy = 'name' | 'mtime' | 'size';
+export type FileSortOrder = 'asc' | 'desc';
 
 export interface DirListResponse {
   items: DirItem[];
@@ -66,6 +71,8 @@ export interface FileBrowserApi {
   readonly error: Ref<string>;
   readonly showHidden: Ref<boolean>;
   readonly hiddenCount: Ref<number>;
+  readonly sortBy: Ref<FileSortBy>;
+  readonly sortOrder: Ref<FileSortOrder>;
   readonly preview: PreviewState;
 
   initialize(): void;
@@ -74,7 +81,14 @@ export interface FileBrowserApi {
   goBack(): void;
   refreshCurrent(): void;
   toggleHidden(): void;
+  setSortBy(by: FileSortBy): void;
+  toggleSortOrder(): void;
+  sortItems(items: DirItem[]): DirItem[];
   showUploadDialog(): void;
+  createDirectory(): Promise<void>;
+  createFile(): Promise<void>;
+  renameItem(item: DirItem): Promise<void>;
+  deleteItem(item: DirItem): Promise<void>;
   downloadFile(filePath: string): void;
   openPreview(filePath: string): Promise<void>;
   closePreview(): void;
@@ -115,6 +129,7 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
   const { requestJson } = useApiClient();
   const sessionTerminal = useSessionTerminal();
   const notify = useNotifyStore();
+  const { confirm } = useConfirm();
 
   const currentPath = ref('');
   const items = ref<DirItem[]>([]);
@@ -125,6 +140,8 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
   const error = ref('');
   const showHidden = ref(true);
   const hiddenCount = ref(0);
+  const sortBy = ref<FileSortBy>('name');
+  const sortOrder = ref<FileSortOrder>('asc');
 
   const preview = reactive<PreviewState>({
     open: false,
@@ -345,6 +362,140 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     input.click();
   }
 
+  function setSortBy(by: FileSortBy): void {
+    if (sortBy.value === by) return;
+    sortBy.value = by;
+    // 修改时间默认新的在前，名称/大小默认升序
+    sortOrder.value = by === 'mtime' ? 'desc' : 'asc';
+  }
+
+  function toggleSortOrder(): void {
+    sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc';
+  }
+
+  function sortItems(list: DirItem[]): DirItem[] {
+    const dir = sortOrder.value === 'asc' ? 1 : -1;
+    const by = sortBy.value;
+    return [...list].sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      let cmp = 0;
+      if (by === 'mtime') cmp = (a.mtime || 0) - (b.mtime || 0);
+      else if (by === 'size') cmp = (a.size || 0) - (b.size || 0);
+      if (cmp === 0) cmp = a.name.localeCompare(b.name);
+      return cmp * dir;
+    });
+  }
+
+  function joinPath(dir: string, name: string): string {
+    const sep = dir.includes('\\') || /^[A-Za-z]:/.test(dir) ? '\\' : '/';
+    return dir.endsWith('/') || dir.endsWith('\\') ? dir + name : dir + sep + name;
+  }
+
+  function isValidEntryName(name: string): boolean {
+    return Boolean(name) && name !== '.' && name !== '..' && !/[\\/]/.test(name);
+  }
+
+  function reloadCurrentDir(hostId: string): void {
+    dirCache.delete(cacheKey(hostId, currentPath.value));
+    void loadDir(currentPath.value, { skipCache: true });
+  }
+
+  async function createDirectory(): Promise<void> {
+    if (!currentPath.value || currentPath.value === '此电脑') {
+      notify.warn('请先进入一个目录');
+      return;
+    }
+    const name = window.prompt('新建文件夹名称', '');
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!isValidEntryName(trimmed)) {
+      notify.error('文件夹名称无效');
+      return;
+    }
+    const hostId = getHostId();
+    try {
+      await requestJson('/api/files/mkdir', {
+        method: 'POST',
+        body: JSON.stringify({ hostId, path: joinPath(currentPath.value, trimmed) }),
+      });
+      notify.success(`已创建文件夹 ${trimmed}`);
+      reloadCurrentDir(hostId);
+    } catch (err) {
+      notify.error(`创建失败: ${(err as Error).message}`);
+    }
+  }
+
+  async function createFile(): Promise<void> {
+    if (!currentPath.value || currentPath.value === '此电脑') {
+      notify.warn('请先进入一个目录');
+      return;
+    }
+    const name = window.prompt('新建文件名称（含后缀，如 app.conf）', '');
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!isValidEntryName(trimmed)) {
+      notify.error('文件名称无效');
+      return;
+    }
+    const hostId = getHostId();
+    try {
+      await requestJson('/api/files/touch', {
+        method: 'POST',
+        body: JSON.stringify({ hostId, path: joinPath(currentPath.value, trimmed) }),
+      });
+      notify.success(`已创建文件 ${trimmed}`);
+      reloadCurrentDir(hostId);
+    } catch (err) {
+      notify.error(`创建失败: ${(err as Error).message}`);
+    }
+  }
+
+  async function renameItem(item: DirItem): Promise<void> {
+    if (item.isDrive) return;
+    const newName = window.prompt('重命名为', item.name);
+    if (newName === null) return;
+    const trimmed = newName.trim();
+    if (trimmed === item.name) return;
+    if (!isValidEntryName(trimmed)) {
+      notify.error('名称无效');
+      return;
+    }
+    const hostId = getHostId();
+    try {
+      await requestJson('/api/files/rename', {
+        method: 'POST',
+        body: JSON.stringify({ hostId, path: item.path, newPath: joinPath(currentPath.value, trimmed) }),
+      });
+      notify.success(`已重命名为 ${trimmed}`);
+      reloadCurrentDir(hostId);
+    } catch (err) {
+      notify.error(`重命名失败: ${(err as Error).message}`);
+    }
+  }
+
+  async function deleteItem(item: DirItem): Promise<void> {
+    if (item.isDrive) return;
+    const ok = await confirm({
+      title: '删除确认',
+      message: item.isDir
+        ? `确定删除目录 "${item.name}" 吗？目录内的全部内容将被递归删除，此操作不可恢复。`
+        : `确定删除文件 "${item.name}" 吗？此操作不可恢复。`,
+      okText: '删除',
+    });
+    if (!ok) return;
+    const hostId = getHostId();
+    try {
+      await requestJson('/api/files/delete', {
+        method: 'POST',
+        body: JSON.stringify({ hostId, path: item.path }),
+      });
+      notify.success(`已删除 ${item.name}`);
+      reloadCurrentDir(hostId);
+    } catch (err) {
+      notify.error(`删除失败: ${(err as Error).message}`);
+    }
+  }
+
   function clearBlobUrl(): void {
     if (lastBlobUrl) {
       URL.revokeObjectURL(lastBlobUrl);
@@ -476,6 +627,8 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     error,
     showHidden,
     hiddenCount,
+    sortBy,
+    sortOrder,
     preview,
     initialize,
     loadDir,
@@ -483,7 +636,14 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     goBack,
     refreshCurrent,
     toggleHidden,
+    setSortBy,
+    toggleSortOrder,
+    sortItems,
     showUploadDialog,
+    createDirectory,
+    createFile,
+    renameItem,
+    deleteItem,
     downloadFile,
     openPreview,
     closePreview,

@@ -6,6 +6,7 @@ interface Props {
   variant: 'tool' | 'engine';
   tool?: ToolInfo;
   launchCommand?: string;
+  installing?: boolean;
   engineReady?: boolean;
   engineInfo?: string;
 }
@@ -17,6 +18,10 @@ const emit = defineEmits<{
   'reset-sandbox': [id: string];
   'config': [id: string];
   'copy-cmd': [id: string];
+  'install-cli': [id: string];
+  'set-binary': [id: string];
+  'clear-binary': [id: string];
+  'diagnose': [id: string];
   'config-engine': [];
 }>();
 
@@ -36,8 +41,8 @@ const opacityCls = computed(() => {
 
 const binaryInfo = computed(() => {
   const b = props.tool?.binary;
-  if (b?.installed) return { ok: true, text: `✓ ${b.path || b.name || ''}` };
-  if (b?.name) return { ok: false, text: `未检测到 ${b.name}` };
+  if (b?.installed) return { ok: true, text: `${b.override ? '手动路径' : '已检测'} · ${b.version || b.path || b.name || ''}` };
+  if (b?.name) return { ok: false, text: b.error || `未检测到 ${b.name}` };
   return { ok: false, text: '插件形式' };
 });
 
@@ -58,6 +63,40 @@ const proxyInfo = computed(() => {
   }
   return { ready: false, text: '🔌 代理未配置', extra: '' };
 });
+
+const readinessSteps = computed(() => props.tool?.readiness?.steps || []);
+
+const issueText = computed(() => props.tool?.readiness?.issues?.[0] || '');
+
+const warningText = computed(() => props.tool?.readiness?.warnings?.[0] || '');
+
+const primaryAction = computed(() => props.tool?.readiness?.nextAction?.id || 'copy_launch');
+
+const primaryActionLabel = computed(() => props.tool?.readiness?.nextAction?.label || '复制启动命令');
+
+const primaryButtonLabel = computed(() => props.installing ? '安装中...' : primaryActionLabel.value);
+
+const primaryDisabled = computed(() => {
+  if (props.installing) return true;
+  return primaryAction.value === 'copy_launch' && !props.launchCommand;
+});
+
+function runPrimaryAction(): void {
+  if (props.installing) return;
+  const tool = props.tool;
+  if (!tool) return;
+  if (primaryAction.value === 'install') {
+    emit('install-cli', tool.id);
+  } else if (primaryAction.value === 'config_provider') {
+    emit('config', tool.id);
+  } else if (primaryAction.value === 'ensure_sandbox') {
+    emit('ensure-sandbox', tool.id);
+  } else if (primaryAction.value === 'copy_launch') {
+    emit('copy-cmd', tool.id);
+  } else {
+    emit('diagnose', tool.id);
+  }
+}
 </script>
 
 <template>
@@ -130,25 +169,38 @@ const proxyInfo = computed(() => {
       <span v-if="proxyInfo.extra" class="text-slate-400 ml-1">{{ proxyInfo.extra }}</span>
     </div>
 
-    <div class="mt-3 flex items-center gap-1.5">
-      <!-- sandboxed: 配置 / 复制 / 重置 -->
-      <template v-if="tool.status === 'sandboxed'">
-        <button type="button" class="flex-1 h-7 rounded-lg border border-cyan-200 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" @click="emit('config', tool.id)">⚙ 配置 API</button>
-        <button type="button" class="h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-300 text-[11px] hover:border-cyan-300 disabled:opacity-50" :disabled="!launchCommand" :title="launchCommand ? '复制启动命令' : '启动命令加载中'" @click="emit('copy-cmd', tool.id)">📋</button>
-        <button type="button" class="h-7 px-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-600 text-[11px] font-semibold hover:bg-amber-100 dark:bg-amber-500/10 dark:border-amber-500/30 dark:text-amber-400" title="重置沙箱" @click="emit('reset-sandbox', tool.id)">🔄</button>
-      </template>
-
-      <!-- detected: 创建沙箱 / 配置 -->
-      <template v-else-if="tool.status === 'detected'">
-        <button type="button" class="flex-1 h-7 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white text-[11px] font-semibold shadow-md hover:shadow-lg" @click="emit('ensure-sandbox', tool.id)">⚡ 创建沙箱</button>
-        <button type="button" class="h-7 px-2 rounded-lg border border-cyan-200 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" title="配置 API 代理" @click="emit('config', tool.id)">⚙</button>
-      </template>
-
-      <!-- missing: 先安装后创建 / 配置 -->
-      <template v-else>
-        <button type="button" class="flex-1 h-7 rounded-lg border border-cyan-300 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" @click="emit('ensure-sandbox', tool.id)">⚡ 先安装后创建</button>
-        <button type="button" class="h-7 px-2 rounded-lg border border-cyan-200 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" title="配置 API 代理" @click="emit('config', tool.id)">⚙</button>
-      </template>
+    <div v-if="readinessSteps.length" class="mt-3 grid grid-cols-5 gap-1.5">
+      <div
+        v-for="step in readinessSteps"
+        :key="step.id"
+        class="rounded-lg border px-1.5 py-1 text-center"
+        :class="step.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300' : 'border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-700 dark:bg-slate-800/60'"
+        :title="step.detail"
+      >
+        <div class="text-[9px] font-semibold truncate">{{ step.label }}</div>
+        <div class="mt-0.5 text-[10px]">{{ step.ok ? 'OK' : '待办' }}</div>
+      </div>
     </div>
+
+    <div v-if="issueText || warningText" class="mt-2 space-y-1 text-[10px]">
+      <div v-if="issueText" class="rounded-lg bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">{{ issueText }}</div>
+      <div v-if="warningText" class="rounded-lg bg-blue-50 px-2 py-1 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">{{ warningText }}</div>
+    </div>
+
+    <div class="mt-3 flex items-center gap-1.5 flex-wrap">
+      <button
+        type="button"
+        class="flex-1 min-w-[120px] h-7 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white text-[11px] font-semibold shadow-md hover:shadow-lg disabled:opacity-50"
+        :disabled="primaryDisabled"
+        @click="runPrimaryAction"
+      >{{ primaryButtonLabel }}</button>
+      <button type="button" class="h-7 px-2 rounded-lg border border-cyan-200 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" title="配置 API 代理" @click="emit('config', tool.id)">API</button>
+      <button type="button" class="h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-300 text-[11px] hover:border-cyan-300" title="手动指定可执行文件路径" @click="emit('set-binary', tool.id)">路径</button>
+      <button v-if="tool.binary?.override" type="button" class="h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-300 text-[11px] hover:border-cyan-300" title="清除手动路径" @click="emit('clear-binary', tool.id)">清除</button>
+      <button type="button" class="h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-300 text-[11px] hover:border-cyan-300" title="运行接入诊断" @click="emit('diagnose', tool.id)">诊断</button>
+      <button type="button" class="h-7 px-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-600 text-[11px] font-semibold hover:bg-amber-100 dark:bg-amber-500/10 dark:border-amber-500/30 dark:text-amber-400" title="重置沙箱" @click="emit('reset-sandbox', tool.id)">重置</button>
+    </div>
+
+    <div v-if="tool.install?.hint" class="mt-2 text-[10px] text-slate-400 leading-relaxed">{{ tool.install.hint }}</div>
   </div>
 </template>

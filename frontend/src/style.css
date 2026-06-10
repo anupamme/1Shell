@@ -1706,15 +1706,34 @@
   color: #94a3b8;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.fb-toolbar-actions { display: flex; align-items: center; gap: 4px; }
+.fb-toolbar-actions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.fb-sort-select {
+  height: 22px;
+  padding: 0 2px;
+  max-width: 58px;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  background: transparent;
+  color: #64748b;
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+}
+.fb-sort-select:hover { border-color: #93c5fd; color: #2563eb; }
+.dark .fb-sort-select { border-color: #1e293b; color: #cbd5e1; background: #0f172a; }
 .fb-mini-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   height: 22px;
   min-width: 22px;
-  padding: 0 6px;
+  padding: 0 4px;
   border-radius: 6px;
   border: 1px solid #e2e8f0;
   background: transparent;
@@ -1722,6 +1741,8 @@
   font-size: 11px;
   cursor: pointer;
   transition: all .15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .fb-mini-btn:hover { border-color: #93c5fd; color: #2563eb; }
 .fb-mini-btn.active { border-color: #93c5fd; color: #2563eb; background: #eff6ff; }
@@ -1856,6 +1877,8 @@
 .fb-download-btn:hover { color: #2563eb; border-color: #93c5fd; }
 .dark .fb-download-btn { border-color: #1e293b; color: #94a3b8; }
 .dark .fb-download-btn:hover { color: #93c5fd; border-color: rgba(59,130,246,0.5); }
+.fb-delete-btn:hover { color: #dc2626; border-color: #fca5a5; }
+.dark .fb-delete-btn:hover { color: #f87171; border-color: rgba(239,68,68,0.5); }
 
 .fb-footer {
   flex-shrink: 0;

@@ -20,10 +20,12 @@ const fb = props.hostId === undefined
 onMounted(() => { fb.initialize(); });
 onBeforeUnmount(() => { fb.closePreview(); });
 
-// 显示项：showHidden 决定是否过滤 .开头
+// 显示项：showHidden 决定是否过滤 .开头，再按 sortBy/sortOrder 排序
 const visibleItems = computed<DirItem[]>(() => {
-  if (fb.showHidden.value) return fb.items.value;
-  return fb.items.value.filter((i) => !i.name.startsWith('.'));
+  const list = fb.showHidden.value
+    ? fb.items.value
+    : fb.items.value.filter((i) => !i.name.startsWith('.'));
+  return fb.sortItems(list);
 });
 const dirCount = computed(() => visibleItems.value.filter((i) => i.isDir).length);
 const fileCount = computed(() => visibleItems.value.length - dirCount.value);
@@ -110,8 +112,22 @@ function onDownloadClick(event: MouseEvent, item: DirItem): void {
   fb.downloadFile(item.path);
 }
 
+function onRenameClick(event: MouseEvent, item: DirItem): void {
+  event.stopPropagation();
+  void fb.renameItem(item);
+}
+
+function onDeleteClick(event: MouseEvent, item: DirItem): void {
+  event.stopPropagation();
+  void fb.deleteItem(item);
+}
+
 function onMaskClick(event: MouseEvent): void {
   if (event.target === event.currentTarget) fb.closePreview();
+}
+
+function onSortChange(event: Event): void {
+  fb.setSortBy((event.target as HTMLSelectElement).value as 'name' | 'mtime' | 'size');
 }
 </script>
 
@@ -121,6 +137,22 @@ function onMaskClick(event: MouseEvent): void {
     <div class="fb-toolbar">
       <span class="fb-toolbar-title">{{ props.title }}</span>
       <div class="fb-toolbar-actions">
+        <select
+          class="fb-sort-select"
+          title="排序方式"
+          :value="fb.sortBy.value"
+          @change="onSortChange"
+        >
+          <option value="name">名称</option>
+          <option value="mtime">时间</option>
+          <option value="size">大小</option>
+        </select>
+        <button
+          type="button"
+          class="fb-mini-btn"
+          :title="fb.sortOrder.value === 'asc' ? '当前升序，点击切换降序' : '当前降序，点击切换升序'"
+          @click="fb.toggleSortOrder"
+        >{{ fb.sortOrder.value === 'asc' ? '↑' : '↓' }}</button>
         <button
           type="button"
           class="fb-mini-btn"
@@ -134,6 +166,18 @@ function onMaskClick(event: MouseEvent): void {
           title="刷新当前目录"
           @click="fb.refreshCurrent"
         >⟳</button>
+        <button
+          type="button"
+          class="fb-mini-btn"
+          title="新建文件夹"
+          @click="fb.createDirectory"
+        >＋📁</button>
+        <button
+          type="button"
+          class="fb-mini-btn"
+          title="新建文件"
+          @click="fb.createFile"
+        >＋📄</button>
         <button
           type="button"
           class="fb-mini-btn"
@@ -221,6 +265,20 @@ function onMaskClick(event: MouseEvent): void {
                 title="下载"
                 @click="onDownloadClick($event, item)"
               >⬇</button>
+              <button
+                v-if="!item.isDrive"
+                type="button"
+                class="fb-download-btn"
+                title="重命名"
+                @click="onRenameClick($event, item)"
+              >✎</button>
+              <button
+                v-if="!item.isDrive"
+                type="button"
+                class="fb-download-btn fb-delete-btn"
+                title="删除"
+                @click="onDeleteClick($event, item)"
+              >✕</button>
             </div>
           </li>
         </ul>

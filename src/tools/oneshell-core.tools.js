@@ -5,6 +5,7 @@ const path = require('path');
 const { ROOT_DIR } = require('../config/env');
 const { execLocalCommand } = require('../../lib/exec-local');
 const { emitIdeEvent } = require('../ide/ide.events');
+const { MCP_STANDARD_TOOL_SET } = require('./mcp-tool-profiles');
 
 const EXEC_SCHEMA = {
   type: 'object',
@@ -15,17 +16,6 @@ const EXEC_SCHEMA = {
   },
   required: ['hostId', 'command'],
 };
-
-const MCP_STANDARD_TOOL_NAMES = new Set([
-  'list_hosts',
-  'host_exec',
-  'list_remote_dir',
-  'read_remote_file',
-  'write_remote_file',
-  'upload_file',
-  'download_file',
-  'ask_1shell_ai',
-]);
 
 const TOOL_DEFS = [
   {
@@ -163,6 +153,46 @@ const TOOL_DEFS = [
         maxBytes: { type: 'number', description: '不传 localPath 时允许返回的最大字节数，默认 1048576' },
       },
       required: ['hostId', 'path'],
+    },
+  },
+  {
+    name: 'create_directory',
+    targets: ['mcp', 'ide'],
+    description: '在指定主机上创建目录（递归创建缺失的父目录）。',
+    schema: {
+      type: 'object',
+      properties: {
+        hostId: { type: 'string', description: '目标主机 ID，local 表示本机' },
+        path: { type: 'string', description: '要创建的目录路径' },
+      },
+      required: ['hostId', 'path'],
+    },
+  },
+  {
+    name: 'delete_path',
+    targets: ['mcp', 'ide'],
+    description: '删除指定主机上的文件或目录（目录递归删除）。操作不可恢复，禁止用于根目录。',
+    schema: {
+      type: 'object',
+      properties: {
+        hostId: { type: 'string', description: '目标主机 ID，local 表示本机' },
+        path: { type: 'string', description: '要删除的文件或目录路径' },
+      },
+      required: ['hostId', 'path'],
+    },
+  },
+  {
+    name: 'rename_path',
+    targets: ['mcp', 'ide'],
+    description: '重命名（或移动）指定主机上的文件或目录。目标路径已存在时拒绝执行。',
+    schema: {
+      type: 'object',
+      properties: {
+        hostId: { type: 'string', description: '目标主机 ID，local 表示本机' },
+        path: { type: 'string', description: '原路径' },
+        newPath: { type: 'string', description: '新路径' },
+      },
+      required: ['hostId', 'path', 'newPath'],
     },
   },
   {
@@ -440,10 +470,27 @@ const TOOL_DEFS = [
 function createOneShellCoreTools(deps = {}) {
   const toolMap = new Map(TOOL_DEFS.map((tool) => [tool.name, tool]));
 
+  const IN_DOCKER = process.env.ONESHELL_IN_DOCKER === '1' || fs.existsSync('/.dockerenv');
+  const READONLY_MOUNT_HINT = [
+    '',
+    '[1Shell 提示] 1Shell 当前运行在 Docker 容器内，本次 local 命令操作的是容器视角的文件系统，目标路径可能是 :ro 只读挂载（如 /opt/1panel、/www、/etc/nginx）。可选处理：',
+    '1. 推荐：把这台 VPS 以 SSH 主机方式添加到 1Shell（主机仓库 → 添加主机），通过主机视角操作宿主机文件；',
+    '2. 把 docker-compose.yml 中对应目录挂载从 :ro 改为 :rw 后重启容器；',
+    '3. 通过 docker exec 在目标容器或宿主机内执行修改。',
+  ].join('\n');
+
+  // 容器内 local 命令因只读挂载/权限失败时，附加可行动提示（确定性，执行层）
+  function withReadonlyMountHint(hostId, result) {
+    if (hostId !== 'local' || !IN_DOCKER || !result || result.exitCode === 0) return result;
+    const text = `${result.stderr || ''}\n${result.stdout || ''}`;
+    if (!/read-only file system|permission denied|operation not permitted|EROFS|EACCES|EPERM/i.test(text)) return result;
+    return { ...result, stderr: `${result.stderr || ''}${READONLY_MOUNT_HINT}` };
+  }
+
   function isToolExposed(name, target) {
     const tool = toolMap.get(name);
     if (!tool || !tool.targets.includes(target)) return false;
-    if (target === 'mcp') return MCP_STANDARD_TOOL_NAMES.has(name);
+  if (target === 'mcp') return MCP_STANDARD_TOOL_SET.has(name);
     return true;
   }
 
@@ -480,6 +527,12 @@ function createOneShellCoreTools(deps = {}) {
         return handleUploadFile(input, context);
       case 'download_file':
         return handleDownloadFile(input, context);
+      case 'create_directory':
+        return handleCreateDirectory(input, context);
+      case 'delete_path':
+        return handleDeletePath(input, context);
+      case 'rename_path':
+        return handleRenamePath(input, context);
       case 'list_mcp_servers':
         return handleListMcpServers();
       case 'add_mcp_server':
@@ -553,7 +606,7 @@ function createOneShellCoreTools(deps = {}) {
           emitTool(context, 'execute_command', { hostId, command }, { stdout: '', stderr: dispatched.content, exitCode: 126, durationMs: 0 });
           return err(dispatched.content);
         }
-        const r = dispatched.raw;
+        const r = withReadonlyMountHint(hostId, dispatched.raw);
         emitTool(context, 'execute_command', { hostId, command }, r);
         const okRun = r.exitCode === 0;
         return structured(okRun, okRun ? '命令执行成功' : `命令执行失败，exitCode=${r.exitCode}`, {
@@ -569,9 +622,10 @@ function createOneShellCoreTools(deps = {}) {
     // fallback：harness 未注入时保持旧路径
     try {
       if (hostId !== 'local' && !deps.bridgeService) return err('bridgeService 未初始化');
-      const result = hostId === 'local'
+      const rawResult = hostId === 'local'
         ? await execLocal(command, timeout, { signal: context.signal, onOutput })
         : await deps.bridgeService.execOnHost(hostId, command, timeout, { source: context.source || 'core_tools', signal: context.signal, onOutput });
+      const result = withReadonlyMountHint(hostId, rawResult);
       emitTool(context, 'execute_command', { hostId, command }, result);
       const okRun = result.exitCode === 0;
       return structured(okRun, okRun ? '命令执行成功' : `命令执行失败，exitCode=${result.exitCode}`, {
@@ -621,7 +675,7 @@ function createOneShellCoreTools(deps = {}) {
       '[MCP_GATEWAY_REQUEST]',
       `mode=${mode}`,
       hostId ? `hostId=${hostId}` : '',
-      'External MCP clients directly see only these tools: list_hosts, host_exec, list_remote_dir, read_remote_file, write_remote_file, upload_file, download_file, ask_1shell_ai.',
+      'External MCP clients directly see only these tools: list_hosts, host_exec, list_remote_dir, read_remote_file, write_remote_file, create_directory, delete_path, rename_path, upload_file, download_file, ask_1shell_ai.',
       'Scripts, Programs, probes, audit, diagnostics, and MCP registry operations are delegated capabilities behind ask_1shell_ai; do not describe them as directly visible external MCP tools.',
       requireConfirmation ? 'mutating actions require confirmation; if confirmation is unavailable, explain what would be done instead of forcing the action.' : 'the caller explicitly allowed execution without interactive confirmation.',
       mode === 'answer' ? 'Answer the request. Prefer read-only inspection and do not make changes.' : '',
@@ -804,6 +858,49 @@ function createOneShellCoreTools(deps = {}) {
         return structured(true, '文件下载成功', { hostId, path: filePath, localPath, filename: result.filename, size: buffer.length });
       }
       return structured(true, '文件下载成功', { hostId, path: filePath, filename: result.filename, size: buffer.length, base64Content: buffer.toString('base64') });
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  async function handleCreateDirectory(input, context) {
+    if (!deps.fileService) return err('fileService 未初始化');
+    const hostId = String(input.hostId || '').trim();
+    const dirPath = String(input.path || '').trim();
+    if (!hostId || !dirPath) return err('hostId 和 path 为必填');
+    try {
+      const result = await deps.fileService.createDirectory(hostId, dirPath);
+      deps.auditService?.log?.({ action: 'mcp_file_mkdir', source: context.source || 'core_tools', hostId, command: dirPath });
+      return structured(true, '目录创建成功', { hostId, ...result });
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  async function handleDeletePath(input, context) {
+    if (!deps.fileService) return err('fileService 未初始化');
+    const hostId = String(input.hostId || '').trim();
+    const targetPath = String(input.path || '').trim();
+    if (!hostId || !targetPath) return err('hostId 和 path 为必填');
+    try {
+      const result = await deps.fileService.deletePath(hostId, targetPath);
+      deps.auditService?.log?.({ action: 'mcp_file_delete', source: context.source || 'core_tools', hostId, command: targetPath, details: JSON.stringify({ isDir: result.isDir }) });
+      return structured(true, '删除成功', { hostId, ...result });
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  async function handleRenamePath(input, context) {
+    if (!deps.fileService) return err('fileService 未初始化');
+    const hostId = String(input.hostId || '').trim();
+    const oldPath = String(input.path || '').trim();
+    const newPath = String(input.newPath || '').trim();
+    if (!hostId || !oldPath || !newPath) return err('hostId、path 和 newPath 为必填');
+    try {
+      const result = await deps.fileService.renamePath(hostId, oldPath, newPath);
+      deps.auditService?.log?.({ action: 'mcp_file_rename', source: context.source || 'core_tools', hostId, command: `${oldPath} -> ${newPath}` });
+      return structured(true, '重命名成功', { hostId, ...result });
     } catch (e) {
       return err(e.message);
     }

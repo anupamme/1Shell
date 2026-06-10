@@ -2,7 +2,6 @@
 import { ref, onMounted } from 'vue';
 import { RouterLink } from 'vue-router';
 import AppIcon from './AppIcon.vue';
-import { useSettingsModal } from '@/composables/useSettingsModal';
 
 interface NavItem {
   to: string;
@@ -27,7 +26,6 @@ const navItems: NavItem[] = [
 
 const isDark = ref(true);
 const themeIcon = ref<'sun' | 'moon'>('sun');
-const { openSettings } = useSettingsModal();
 
 function syncFromDom(): void {
   isDark.value = document.documentElement.classList.contains('dark');
@@ -74,15 +72,14 @@ onMounted(syncFromDom);
 
     <div class="shrink-0 flex flex-col gap-1 px-1">
       <div class="sidebar-divider mx-3 h-px mb-1"></div>
-      <button
-        type="button"
+      <RouterLink
+        to="/settings"
         class="side-nav-item"
         title="系统设置"
-        @click="openSettings"
       >
         <AppIcon name="cog" :size="20" />
         <span>设置</span>
-      </button>
+      </RouterLink>
       <button
         type="button"
         class="side-nav-item"
