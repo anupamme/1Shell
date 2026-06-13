@@ -11,7 +11,8 @@ const { ROOT_DIR } = require('../config/env');
 const { createOneShellCoreTools } = require('../tools/oneshell-core.tools');
 const { emitIdeEvent } = require('./ide.events');
 const { parseFrontmatter } = require('../skills/registry');
-const { normalizeProgram } = require('../programs/program-schema');
+// Program/Task system removed; program-schema no longer imported. normalizeProgram kept as a no-op for dead draft helpers pending cleanup.
+const normalizeProgram = () => {};
 
 const ALLOWED_DIRS = ['data/skills', 'data/programs'];
 
@@ -292,30 +293,6 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
       input_schema: { type: 'object', properties: {}, required: [] },
     },
     {
-      name: 'list_tasks',
-      description: 'List registered 1Shell automation tasks. This is the task-named replacement for legacy list_programs.',
-      input_schema: { type: 'object', properties: {}, required: [] },
-    },
-    {
-      name: 'package_agent_run',
-      description:
-        '从已验证的 AgentRun 生成自动化任务草稿。' +
-        '\n默认只返回 draft_from_trace 预览，不会标记 proven；只有 write=true 才写入 data/programs。' +
-        '\n如果用户说“把刚才的操作打包成任务”，优先使用本工具，而不是根据聊天摘要重新猜流程。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          runId: { type: 'string', description: '源 AgentRun ID；不填默认当前会话 AgentRun' },
-          taskId: { type: 'string', description: 'Optional task ID (kebab-case). Internally stored under data/programs.' },
-          programId: { type: 'string', description: '可选任务 ID（kebab-case，内部仍写入 data/programs）' },
-          write: { type: 'boolean', description: '是否写入 data/programs；默认 false，仅返回草稿预览' },
-          overwrite: { type: 'boolean', description: 'write=true 时是否覆盖已有任务；默认 false' },
-          allowUnverifiedDraft: { type: 'boolean', description: '是否允许未 verified 的低可信草稿；默认 false' },
-        },
-        required: [],
-      },
-    },
-    {
       name: 'ask_user',
       description:
         '当缺少关键输入、验收标准或方案选择时，暂停当前 AgentRun 并向用户提问。' +
@@ -401,20 +378,6 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
       },
     },
     {
-      name: 'list_artifacts',
-      description:
-        '列出已有的 Skill / 自动化任务产物。' +
-        '\n返回每个产物的 id / name / kind / description。' +
-        '\n不要把它当成创作台第一步；只有需要查找或修改已有产物时才调用。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          type: { type: 'string', enum: ['skill', 'program', 'all'], description: '筛选类型，默认 all' },
-        },
-        required: [],
-      },
-    },
-    {
       name: 'list_skills',
       description:
         '列出当前 1Shell 装载的所有 Skill 的 id 与 description。' +
@@ -435,143 +398,6 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
         },
         required: ['skillId'],
       },
-    },
-    {
-      name: 'write_program',
-      description:
-        '原子写入或更新一个 1Shell 自动化任务的所有文件到 data/programs/<programId>/，写完自动 reload registry。' +
-        '\n用于完成创作意图后一次性落盘——避免逐个 write_file 反复弹审批。' +
-        '\nfiles 里 path 可写完整 data/programs/<id>/...，也可写 program.yaml / ui/App.jsx 这种相对路径，工具按 programId 自动归一化。' +
-        '\nAgent 审批时只弹一次确认，列出所有要写的文件路径。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          programId: { type: 'string', description: '任务 ID（kebab-case）' },
-          files: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                path: { type: 'string', description: '相对 data/programs/<programId>/ 或完整路径' },
-                content: { type: 'string' },
-              },
-              required: ['path', 'content'],
-            },
-          },
-        },
-        required: ['programId', 'files'],
-      },
-    },
-    {
-      name: 'create_task',
-      description:
-        'Create a 1Shell automation task from structured fields. Prefer this over hand-writing program.yaml when the user asks to create a new task. ' +
-        'Use template=deploy_github_project for a task that selects VPS, port, Docker mode, GitHub URL, then lets AI deploy and verify the project.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          taskId: { type: 'string', description: 'Task ID in kebab-case.' },
-          name: { type: 'string', description: 'Human-readable task name.' },
-          description: { type: 'string', description: 'Short task description.' },
-          template: { type: 'string', enum: ['deploy_github_project', 'custom'], description: 'Task template. Use deploy_github_project for GitHub deployment tasks.' },
-          enabled: { type: 'boolean', description: 'Whether task scheduling is enabled. Defaults to false for drafts.' },
-          inputs: { type: 'array', description: 'Custom task inputs. Omit for deploy_github_project.', items: { type: 'object' } },
-          phases: { type: 'array', description: 'Runtime phases. Omit for deploy_github_project.', items: { type: 'object' } },
-          goal: { type: 'string', description: 'Runtime AI goal/contract for the task.' },
-          overwrite: { type: 'boolean', description: 'Whether to overwrite existing task files. Default false.' },
-        },
-        required: ['taskId', 'name', 'template'],
-      },
-    },
-    {
-      name: 'write_task',
-      description:
-        'Atomically create or update a 1Shell automation task under data/programs/<taskId>/ and reload the task registry. ' +
-        'Use this task-named tool instead of legacy write_program. ' +
-        'For deployment tasks include inputs hostId, port, dockerDeploy, githubUrl and phases env_check, repo_fetch, project_analysis, dependency_install, deploy, verify, result.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          taskId: { type: 'string', description: 'Task ID in kebab-case. Internally stored under data/programs/<taskId>.' },
-          files: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                path: { type: 'string', description: 'Path relative to data/programs/<taskId>/, or a full data/programs/<taskId>/... path.' },
-                content: { type: 'string' },
-              },
-              required: ['path', 'content'],
-            },
-          },
-        },
-        required: ['taskId', 'files'],
-      },
-    },
-    {
-      name: 'run_skill',
-      description:
-        '触发运行一个已有的 Skill（走完整 Skill Runner AI-Loop）。' +
-        '\n同步等待执行完成，返回所有执行输出（命令结果、AI 思考、渲染结果等）。' +
-        '\n适合"写完 → 跑 → 看结果 → 改"的闭环。注意：AI-Loop 型 Skill 可能需要较长时间。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          skillId: { type: 'string', description: 'Skill ID' },
-          hostId:  { type: 'string', description: '目标主机 ID' },
-          inputs:  { type: 'object', description: 'Skill inputs 键值对' },
-        },
-        required: ['skillId', 'hostId'],
-      },
-    },
-    {
-      name: 'trigger_program',
-      description:
-        '手动触发一个自动化任务的一次执行。' +
-        '\n返回 runId 列表。用于测试刚创建的任务。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          programId:  { type: 'string', description: '任务 ID' },
-          hostId:     { type: 'string', description: '目标主机 ID（或 "all"）' },
-          actionName: { type: 'string', description: '要触发的 action 名（可选，默认取第一个）' },
-          inputs: { type: 'object', description: '任务输入参数键值对（可选）' },
-        },
-        required: ['programId'],
-      },
-    },
-    {
-      name: 'trigger_task',
-      description: 'Trigger one execution of a registered 1Shell automation task. This is the task-named replacement for legacy trigger_program.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          taskId: { type: 'string', description: 'Task ID.' },
-          hostId: { type: 'string', description: 'Target host ID, or "all".' },
-          actionName: { type: 'string', description: 'Optional action name; default is the first/manual action.' },
-          inputs: { type: 'object', description: 'Task input values.' },
-        },
-        required: ['taskId'],
-      },
-    },
-    {
-      name: 'query_format',
-      description:
-        '查询 1Shell 产物的文件格式规范。按需调用——只在你不确定格式时才查。' +
-        '\n返回对应类型的完整 schema 文档。' +
-        '\n不要在创作台开局调用；只有已经决定要落盘低可信草稿或精准修改具体产物，且无法确定 schema 时才查。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          type: { type: 'string', enum: ['skill', 'program', 'tool-api'], description: '要查询的产物类型' },
-        },
-        required: ['type'],
-      },
-    },
-    {
-      name: 'reload_registry',
-      description: '重新加载 Skill / 任务注册表，使刚写入的产物立即可被系统识别。写完产物文件后应调用。',
-      input_schema: { type: 'object', properties: {}, required: [] },
     },
     {
       name: 'list_mcp_servers',
@@ -1662,37 +1488,6 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
         return ok(hosts.length > 0 ? hosts.join('\n') : '（无已托管主机）');
       }
 
-      case 'list_tasks': {
-        return handle('list_programs', input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
-      }
-
-      case 'package_agent_run': {
-        if (!taskPackagerService?.createDraftFromAgentRun) return err('Task Packager 未初始化');
-        const effectiveRunId = String(input.runId || runId || session?.agentRunId || '').trim();
-        if (!effectiveRunId) return err('runId 为空：无法定位要打包的 AgentRun');
-        try {
-          const result = taskPackagerService.createDraftFromAgentRun({
-            runId: effectiveRunId,
-            programId: input.taskId || input.programId,
-            write: input.write === true,
-            overwrite: input.overwrite === true,
-            allowUnverifiedDraft: input.allowUnverifiedDraft === true,
-          });
-          emitTool(socket, sessionId, name, { ...input, runId: effectiveRunId }, {
-            programId: result.programId,
-            trustLevel: result.trustLevel,
-            sourceTrustLevel: result.sourceTrustLevel,
-            written: result.written,
-            path: result.path,
-            warnings: result.warnings,
-          });
-          auditService?.log?.({ action: 'ide_package_agent_run', runId: effectiveRunId, programId: result.programId, written: result.written });
-          return ok(formatPackageAgentRunResultClean(result));
-        } catch (e) {
-          return err(`打包失败: ${e.message}`);
-        }
-      }
-
       case 'verify_outcome': {
         try {
           const result = await handleVerifyOutcome(input || {}, { signal });
@@ -1749,35 +1544,6 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
         }
       }
 
-      case 'list_artifacts': {
-        const filter = input.type || 'all';
-        if (!['skill', 'program', 'all'].includes(filter)) return err(`未知产物类型: ${filter}。可选: skill, program, all`);
-        const items = [];
-        if (filter === 'all' || filter === 'skill') {
-          for (const s of (skillRegistry.listSkills?.() || [])) {
-            items.push(`[skill] ${s.id}  name="${s.name || s.id}"  ${s.description ? '— ' + s.description.slice(0, 100) : ''}`);
-          }
-        }
-        if (filter === 'all' || filter === 'program') {
-          const progDir = path.join(ROOT_DIR, 'data', 'programs');
-          if (fs.existsSync(progDir)) {
-            for (const d of fs.readdirSync(progDir, { withFileTypes: true })) {
-              if (!d.isDirectory()) continue;
-              const yamlPath = path.join(progDir, d.name, 'program.yaml');
-              if (!fs.existsSync(yamlPath)) continue;
-              let pName = d.name;
-              try {
-                const raw = fs.readFileSync(yamlPath, 'utf8');
-                const m = raw.match(/^name:\s*(.+)$/m);
-                if (m) pName = m[1].trim();
-              } catch { /* ignore */ }
-              items.push(`[task] ${d.name}  name="${pName}"`);
-            }
-          }
-        }
-        return ok(items.length > 0 ? items.join('\n') : '（暂无产物）');
-      }
-
       case 'list_skills': {
         const skills = (skillRegistry.listSkills?.() || [])
           .filter((s) => !s.hidden)
@@ -1804,174 +1570,6 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
           '',
           body,
         ].join('\n'));
-      }
-
-      case 'ask_authoring_question':
-      case 'propose_options':
-      case 'create_program_spec':
-      case 'create_skill_spec':
-      case 'create_authoring_plan':
-      case 'start_program_draft':
-      case 'create_program_draft':
-      case 'create_skill_draft':
-      case 'validate_program_draft':
-      case 'update_authoring_draft':
-      case 'validate_skill_draft':
-      case 'request_commit_approval':
-      case 'commit_authoring_artifact':
-      case 'verify_authoring_artifact':
-        return err(`工具 "${name}" 已废弃。请改用 list_skills + load_skill 加载相关 skill，再用 write_task / write_file 写入文件。`);
-
-      case 'create_task': {
-        try {
-          const generated = createTaskYamlFromStructuredInput(input || {}, { agentRunId: runId });
-          const programPath = path.join(ROOT_DIR, 'data', 'programs', generated.taskId, 'program.yaml');
-          if (fs.existsSync(programPath) && input.overwrite !== true) {
-            return err(`任务已存在: ${generated.taskId}`);
-          }
-          return handle('write_program', {
-            programId: generated.taskId,
-            files: [{ path: 'program.yaml', content: generated.yaml }],
-          }, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
-        } catch (e) {
-          return err(`创建任务失败: ${e.message}`);
-        }
-      }
-
-      case 'write_task': {
-        return handle('write_program', {
-          programId: input.taskId || input.programId,
-          files: input.files,
-        }, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
-      }
-
-      case 'write_program': {
-        const programId = String(input.programId || '').trim();
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(programId)) return err('programId 不合法（必须 kebab-case）');
-        const rawFiles = Array.isArray(input.files) ? input.files : [];
-        if (rawFiles.length === 0) return err('files 不能为空');
-        const programDir = `data/programs/${programId}`;
-        const normalized = [];
-        for (const file of rawFiles) {
-          const rawPath = String(file?.path || '').trim().replace(/\\/g, '/');
-          if (!rawPath) return err('file.path 不能为空');
-          let relPath = rawPath;
-          if (!relPath.startsWith('data/programs/')) {
-            relPath = `${programDir}/${relPath.replace(/^\//, '')}`;
-          }
-          if (!relPath.startsWith(`${programDir}/`)) {
-            return err(`路径不在 ${programDir}/ 范围内: ${rawPath}`);
-          }
-          if (!isPathAllowed(relPath)) return err(`路径越界: ${relPath}`);
-          normalized.push({ path: relPath, content: String(file?.content || '') });
-        }
-        const written = [];
-        for (const file of normalized) {
-          const abs = path.resolve(ROOT_DIR, file.path);
-          fs.mkdirSync(path.dirname(abs), { recursive: true });
-          fs.writeFileSync(abs, file.content, 'utf8');
-          if (typeof onFileWritten === 'function') {
-            try { onFileWritten(file.path); } catch { /* ignore */ }
-          }
-          written.push(`${file.path} (${Buffer.byteLength(file.content, 'utf8')} bytes)`);
-        }
-        let reloadInfo = '';
-        try {
-          if (typeof programEngine?.reload === 'function') {
-            const result = programEngine.reload();
-            const errors = Array.isArray(result?.errors) ? result.errors : [];
-            const ownErrors = errors
-              .filter((item) => String(item?.id || item?.programId || '').trim() === programId)
-              .map((item) => item.message || item.error || JSON.stringify(item));
-            if (ownErrors.length) {
-              reloadInfo = `\n[reload errors for ${programId}]\n${ownErrors.join('\n')}`;
-            } else {
-              reloadInfo = '\nreload registry: ok';
-            }
-          }
-        } catch (e) {
-          reloadInfo = `\n[reload threw] ${e.message}`;
-        }
-        auditService?.log?.({ action: 'ide_write_program', programId, files: normalized.map((file) => file.path) });
-        return ok(`已写入 ${normalized.length} 个文件到 ${programDir}/：\n${written.map((item) => `- ${item}`).join('\n')}${reloadInfo}`);
-      }
-
-      case 'run_skill': {
-        const skillId = String(input.skillId || '').trim();
-        const hostId = String(input.hostId || '').trim();
-        if (!skillId) return err('skillId 为空');
-        if (!hostId) return err('hostId 为空');
-        const skill = skillRegistry.getSkill?.(skillId);
-        if (!skill) return err(`Skill 不存在: ${skillId}。请先 reload_registry。`);
-        if (!skillRunner) return err('Skill Runner 未初始化');
-
-        const runId = 'ide-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-        const unregister = registerNestedRun(session, skillRunner, runId);
-        try {
-          const result = await runViaCollector(runId, (collector) =>
-            skillRunner.run({ socket: collector, runId, skillId, hostId, inputs: input.inputs || {} })
-          );
-          auditService?.log?.({ action: 'ide_run_skill', skillId, hostId, runId });
-          return ok(result);
-        } finally {
-          unregister();
-        }
-      }
-
-      case 'trigger_task': {
-        return handle('trigger_program', {
-          programId: input.taskId || input.programId,
-          hostId: input.hostId,
-          actionName: input.actionName,
-          inputs: input.inputs,
-        }, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
-      }
-
-      case 'trigger_program': {
-        const programId = String(input.programId || '').trim();
-        const hostId = input.hostId ? String(input.hostId).trim() : undefined;
-        const actionName = input.actionName ? String(input.actionName).trim() : undefined;
-        const inputs = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? input.inputs : undefined;
-        if (!programId) return err('programId 为空');
-        try {
-          const runIds = await programEngine.triggerManual({ programId, hostId, actionName, inputs });
-          return ok(`任务 "${programId}" 已触发。runId: ${runIds.join(', ')}\n结果将在前端"任务"页面展示。`);
-        } catch (e) {
-          return err(`触发失败: ${e.message}`);
-        }
-      }
-
-      case 'query_format': {
-        const type = String(input.type || '').trim();
-        const docMap = {
-          'skill':       'skill-format.md',
-          'program':     'program-schema.md',
-          'tool-api':    'tool-api.md',
-        };
-        const fileName = docMap[type];
-        if (!fileName) return err(`未知类型: ${type}。可选: ${Object.keys(docMap).join(', ')}`);
-        const docPath = path.join(ROOT_DIR, 'data', 'skills', 'skill-authoring', 'references', fileName);
-        try {
-          return ok(fs.readFileSync(docPath, 'utf8'));
-        } catch {
-          return err(`格式文档不存在: ${docPath}`);
-        }
-      }
-
-      case 'reload_registry': {
-        try {
-          if (typeof skillRegistry.reload === 'function') skillRegistry.reload();
-          let programMsg = '';
-          if (typeof programEngine.reload === 'function') {
-            const result = programEngine.reload();
-            if (result?.errors?.length) {
-              programMsg = `\n⚠ 任务加载失败（${result.errors.length} 个）：\n` + result.errors.map(e => `  - ${e}`).join('\n');
-            }
-          }
-          return ok('Skill / 任务注册表已重新加载。' + programMsg);
-        } catch (e) {
-          return err(`重载失败: ${e.message}`);
-        }
       }
 
       case 'list_mcp_servers': {

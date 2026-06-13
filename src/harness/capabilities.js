@@ -215,14 +215,6 @@ const CAPABILITY_RULES = {
     ]),
     commandCheck: null,
   },
-  task_artifact: {
-    label: '任务产物',
-    allowedTools: new Set([
-      'create_task', 'write_task', 'package_agent_run', 'trigger_task',
-      'list_tasks', 'list_programs',
-    ]),
-    commandCheck: null,
-  },
 };
 
 const DEFAULT_CAPABILITIES = ['exec_command'];

@@ -269,48 +269,6 @@ const TOOL_DEFS = [
     },
   },
   {
-    name: 'list_programs',
-    targets: ['mcp', 'ide'],
-    description: '列出 1Shell 中所有已登记的自动化任务。返回 id / name / description / 可用 action 列表 / 触发器。任务是把运维流程（脚本步骤或 AI 工作流步骤）打包成的可复用执行单元。',
-    schema: { type: 'object', properties: {}, required: [] },
-  },
-  {
-    name: 'list_tasks',
-    targets: ['mcp', 'ide'],
-    description: '列出 1Shell 中所有已登记的自动化任务。task 命名版本，替代兼容用的 list_programs。',
-    schema: { type: 'object', properties: {}, required: [] },
-  },
-  {
-    name: 'trigger_program',
-    targets: ['mcp', 'ide'],
-    description: '触发执行一个 1Shell 自动化任务。任务内部可包含确定性脚本步骤（exec）与 AI 工作流步骤（ai）。不指定 hostId 时用任务默认主机；hostId=all 在全部目标主机上执行。返回 runId，执行进度与结果可通过前端"任务"页或审计/轨迹查询。',
-    schema: {
-      type: 'object',
-      properties: {
-        programId: { type: 'string', description: '任务 ID（用 list_programs 获取）' },
-        hostId: { type: 'string', description: '目标主机 ID；all 表示全部目标主机；省略则用默认主机' },
-        actionName: { type: 'string', description: '要触发的 action 名（可选，省略则用默认 manual 触发器）' },
-        inputs: { type: 'object', description: '任务输入参数键值对（可选）' },
-      },
-      required: ['programId'],
-    },
-  },
-  {
-    name: 'trigger_task',
-    targets: ['mcp', 'ide'],
-    description: '触发执行一个 1Shell 自动化任务。task 命名版本，替代兼容用的 trigger_program。',
-    schema: {
-      type: 'object',
-      properties: {
-        taskId: { type: 'string', description: '任务 ID（用 list_tasks 获取）' },
-        hostId: { type: 'string', description: '目标主机 ID；all 表示全部目标主机；省略则用默认主机' },
-        actionName: { type: 'string', description: '要触发的 action 名（可选，省略则用默认 manual 触发器）' },
-        inputs: { type: 'object', description: '任务输入参数键值对（可选）' },
-      },
-      required: ['taskId'],
-    },
-  },
-  {
     name: 'query_probe',
     targets: ['ide'],
     description: '获取所有主机的探针监控数据快照。兼容旧 IDE 工具；新调用建议使用 list_probes。',
@@ -564,12 +522,6 @@ function createOneShellCoreTools(deps = {}) {
         return handleDeployLocalMcp(input);
       case 'query_audit':
         return handleQueryAudit(input);
-      case 'list_programs':
-      case 'list_tasks':
-        return handleListPrograms();
-      case 'trigger_program':
-      case 'trigger_task':
-        return handleTriggerProgram(input, context);
       case 'query_probe':
       case 'list_probes':
         return handleListProbes(input);
