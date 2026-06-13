@@ -13,16 +13,16 @@
  *   - ask_user:        向前端发出交互请求（select / confirm / input），等待用户回复
  *
  * 事件（通过 socket 发出，前端订阅）：
- *   skill:run-started  — 任务开始
+ *   skill:run-started  — 运行开始
  *   skill:thinking     — 开始本轮模型调用
  *   skill:thought      — 模型返回了 assistant 文本（可选展示）
  *   skill:exec         — 调用 execute_command，参数
  *   skill:exec-result  — execute_command 执行完成
  *   skill:render       — render_result 触发，携带结构化渲染数据
  *   skill:ask          — ask_user 触发，等待前端通过 skill:continue 回复
- *   skill:done         — 任务结束（end_turn）
- *   skill:error        — 任务异常
- *   skill:cancelled    — 任务被用户取消
+ *   skill:done         — 运行结束（end_turn）
+ *   skill:error        — 运行异常
+ *   skill:cancelled    — 运行被用户取消
  */
 
 const fs = require('fs');
@@ -62,7 +62,7 @@ const TOOLS = [
   {
     name: 'read_skill_file',
     description:
-      '按需读取当前 Skill 或 referencedSkills 中的单个文件。SKILL.md 已在任务上下文中提供；workflows/references/examples/scripts 需要时再读，不要无目的全量读取。',
+      '按需读取当前 Skill 或 referencedSkills 中的单个文件。SKILL.md 已在运行上下文中提供；workflows/references/examples/scripts 需要时再读，不要无目的全量读取。',
     input_schema: {
       type: 'object',
       properties: {
@@ -162,7 +162,7 @@ const TOOLS = [
   {
     name: 'ask_user',
     description:
-      '向用户提问以继续任务。使用场景：' +
+      '向用户提问以继续当前目标。使用场景：' +
       '\n- 需要用户从多个候选中挑一个（如"要查看哪个容器的日志？"）' +
       '\n- 危险操作前的二次确认（如"确认删除容器？"）' +
       '\n- 需要用户补充输入（如"输入新的端口号"）' +
@@ -206,15 +206,15 @@ const TOOLS = [
     name: 'write_local_file',
     description:
       '将文本内容写入 1Shell 宿主机（本机）的文件系统。' +
-      '路径白名单：data/skills/ (Skill)、data/programs/ (Task 内部兼容存储)。' +
-      '用于创建或更新产物文件（SKILL.md、workflow/*.md、rules/*.md、program.yaml 等）。' +
-      '自动创建父目录。**创建或修改这两类产物时必须用此工具，不要用 execute_command + node 写文件。**',
+      '路径白名单：data/skills/ (Skill)。' +
+      '用于创建或更新 Skill 产物文件（SKILL.md、workflow/*.md、rules/*.md 等）。' +
+      '自动创建父目录。**创建或修改 Skill 产物时必须用此工具，不要用 execute_command + node 写文件。**',
     input_schema: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: '相对于 1Shell 根目录的路径，如 data/skills/my-skill/SKILL.md、data/programs/my-prog/program.yaml',
+          description: '相对于 1Shell 根目录的路径，如 data/skills/my-skill/SKILL.md',
         },
         content: {
           type: 'string',
@@ -251,7 +251,7 @@ function buildSystemPrompt(skill, host, remoteHosts = [], rules = '') {
     : null;
 
   const lines = [
-    `你是 1Shell 的运维 AI Agent。你正在通过工具调用完成一个结构化的 Skill 任务。`,
+    `你是 1Shell 的运维 AI Agent。你正在通过工具调用完成一个结构化的 Skill 目标。`,
     ``,
     `## 目标主机`,
     `- 名称: ${hostDesc}`,
@@ -275,7 +275,7 @@ function buildSystemPrompt(skill, host, remoteHosts = [], rules = '') {
         `探测或调试时用 \`echo test\` 而非 \`echo 中文\`。` +
         `没有 ls/grep/cat/find；目录检查请直接用 write_local_file（自动创建父目录）。`
       : null,
-    `- **write_local_file**: 将内容写入 1Shell 本机（宿主机）的文件系统，路径限定在 data/skills/ 或 data/programs/ 目录内。创建或修改 Skill / Task 文件时必须用此工具，不要用 execute_command + node/echo 写文件。自动创建父目录，无需提前 mkdir。`,
+    `- **write_local_file**: 将内容写入 1Shell 本机（宿主机）的文件系统，路径限定在 data/skills/ 目录内。创建或修改 Skill 文件时必须用此工具，不要用 execute_command + node/echo 写文件。自动创建父目录，无需提前 mkdir。`,
     `- **read_skill_file**: 只在需要具体流程、参考资料、示例或脚本时读取单个文件；不要把 workflows/references/examples 全量读取一遍当提示词。`,
     `- **render_result**: 每完成一个阶段性成果就调用本工具推给前端。用户看不到 assistant 文本——只有 render_result 的内容才会显示。` +
       `\n  table 格式支持行操作按钮：rowActions（按钮定义）+ rowActionSkill（点击后运行哪个 Skill）+ rowInputKey（第一列值的参数名，如 "domain"/"container"）。`,
@@ -284,7 +284,7 @@ function buildSystemPrompt(skill, host, remoteHosts = [], rules = '') {
     `## 响应风格`,
     `- 极简，不要啰嗦解释过程。`,
     `- 一次响应中可以并行调用多个工具。`,
-    `- 任务完成后用一句话简短收尾即可。`,
+    `- 目标完成后用一句话简短收尾即可。`,
     ``,
     `## 通用红线（绝对禁止）`,
     `- 不得操作名称包含 "1shell" 的容器/服务/文件`,
@@ -388,7 +388,7 @@ function buildUserMessage(skill, inputs, skillRegistry) {
   }
 
   const parts = [
-    `请执行以下 Skill 任务。`,
+    `请执行以下 Skill 目标。`,
     ``,
     inputsSummary,
     ``,
@@ -788,7 +788,7 @@ function createSkillRunner({
         socket.emit('skill:cancelled', { runId });
         auditService?.log?.({ action: 'skill_run_cancel', source: 'skill', skillId, hostId });
       } else if (turn >= MAX_TURNS) {
-        socket.emit('skill:error', { runId, error: `任务超出最大轮次 (${MAX_TURNS})，已终止` });
+        socket.emit('skill:error', { runId, error: `运行超出最大轮次 (${MAX_TURNS})，已终止` });
         auditService?.log?.({ action: 'skill_run_truncated', source: 'skill', skillId, hostId });
       } else {
         socket.emit('skill:done', { runId, reason: finalReason, turns: turn });
@@ -960,7 +960,7 @@ function createSkillRunner({
 
   /**
    * write_local_file — 始终写入本机（1Shell 宿主）的文件系统。
-   * 路径限制在 data/skills/ / data/programs/ 内，防止越权写入系统文件。
+   * 路径限制在 data/skills/ 内，防止越权写入系统文件。
    */
   async function handleWriteLocalFile(runId, toolUseId, input, runState) {
     const rawPath = String(input.path || '').trim();
@@ -976,17 +976,15 @@ function createSkillRunner({
       };
     }
 
-    // 安全：允许写入 data/skills/、data/programs/ 下的文件
+    // 安全：只允许写入 data/skills/ 下的文件
     const skillsDir = path.join(ROOT_DIR, 'data', 'skills');
-    const programsDir = path.join(ROOT_DIR, 'data', 'programs');
     const resolved = path.resolve(ROOT_DIR, rawPath);
     const underSkills = resolved.startsWith(skillsDir + path.sep) || resolved === skillsDir;
-    const underPrograms = resolved.startsWith(programsDir + path.sep) || resolved === programsDir;
-    if (!underSkills && !underPrograms) {
+    if (!underSkills) {
       return {
         type: 'tool_result',
         tool_use_id: toolUseId,
-        content: `[ERROR] 路径越界：write_local_file 只能写入 data/skills/ 或 data/programs/ 目录内（收到: ${rawPath}）`,
+        content: `[ERROR] 路径越界：write_local_file 只能写入 data/skills/ 目录内（收到: ${rawPath}）`,
         is_error: true,
       };
     }

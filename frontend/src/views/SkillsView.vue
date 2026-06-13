@@ -350,13 +350,6 @@ onMounted(() => {
         </div>
       </div>
       <div class="flex-1"></div>
-      <router-link
-        to="/skill-studio"
-        class="text-[11px] px-3 py-1.5 rounded-lg bg-gradient-to-r from-blue-500 to-purple-500 text-white font-semibold hover:opacity-90 inline-flex items-center gap-1.5"
-      >
-        <AppIcon name="pen" :size="12" />
-        <span>去创作台 →</span>
-      </router-link>
     </header>
 
     <!-- Tab 切换 -->
@@ -410,7 +403,7 @@ onMounted(() => {
         <div v-if="skillLoadError" class="col-span-full text-red-500 text-center py-10 text-xs">加载失败: {{ skillLoadError }}</div>
         <div v-else-if="skills.length === 0" class="col-span-full text-[12px] text-slate-400 text-center py-10">
           暂无 1Shell 扩展。<br/>
-          这类 Skill 由创作台生成，并由 1Shell runner 在目标主机上执行。
+          可导入或维护 Skill，并由 1Shell runner 在目标主机上执行。
         </div>
         <SkillCard
           v-for="s in skills"
@@ -483,7 +476,7 @@ onMounted(() => {
         <div v-if="mcpLoadError" class="col-span-full text-red-500 text-center py-10 text-xs">加载失败: {{ mcpLoadError }}</div>
         <div v-else-if="remoteMcps.length === 0" class="col-span-full text-[12px] text-slate-400 text-center py-10">
           尚未登记 MCP Server。<br/>
-          点右上角 "+ 添加 MCP" 登记一个远程 URL 类 MCP，创作台就能在"工具"里选到它。
+          点右上角 "+ 添加 MCP" 登记一个远程 URL 类 MCP。
         </div>
         <McpCard
           v-for="m in remoteMcps"

@@ -5,8 +5,8 @@ function buildAgentDecisionContext(state = {}, options = {}) {
   const snapshot = buildAgentDecisionSnapshot(state, options);
   return [
     '',
-    '## AgentRun Decision Context',
-    'The following JSON is runtime state for the next agent decision. Treat it as observed state, not user prose.',
+    '## AgentRun Runtime State',
+    'Observed runtime state for this run.',
     '```json',
     JSON.stringify(snapshot, null, 2),
     '```',
@@ -38,11 +38,6 @@ function buildAgentDecisionSnapshot(state = {}, options = {}) {
       transitionCount: Number(runtimeState.transitionCount || 0),
       lastCommand: summarizeCommand(runtimeState.lastCommand),
     },
-    cognition: summarizeCognition(runtimeState.cognition),
-    decisionReview: summarizeDecisionReview(runtimeState.decisionReview),
-    replay: summarizeReplay(runtimeState.replay),
-    trajectory: summarizeTrajectory(runtimeState.trajectory),
-    plan: summarizePlan(runtimeState.plan),
     recovery: summarizeRecovery(runtimeState.recovery),
     budget: summarizeBudget(state.budget),
     pendingInterrupts: summarizeInterrupts(state.interrupts),
@@ -58,119 +53,9 @@ function buildAgentDecisionSnapshot(state = {}, options = {}) {
   };
 }
 
-function summarizeDecisionReview(review = null) {
-  if (!review || typeof review !== 'object' || Array.isArray(review)) {
-    return { status: 'not_reviewed', kind: '', reasons: [], originalCommand: null, effectiveCommand: null };
-  }
-  return {
-    status: review.status || '',
-    kind: review.kind || '',
-    turn: review.turn ?? null,
-    reasons: normalizeStringArray(review.reasons).slice(0, 10),
-    originalCommand: summarizeCommand(review.originalCommand || review.original_command),
-    effectiveCommand: summarizeCommand(review.effectiveCommand || review.effective_command),
-    message: compactText(review.message || '', 500),
-  };
-}
-
-function summarizeCognition(cognition = null) {
-  if (!cognition || typeof cognition !== 'object' || Array.isArray(cognition)) {
-    return {
-      status: 'empty',
-      objective: '',
-      successCriteria: [],
-      knownFacts: [],
-      unknowns: [],
-      assumptions: [],
-      constraints: [],
-      risks: [],
-      candidateActions: [],
-      selectedAction: null,
-      evidenceNeeded: [],
-      blockers: [],
-      decisionBasis: '',
-    };
-  }
-  return {
-    status: cognition.status || '',
-    objective: compactText(cognition.objective || '', 500),
-    successCriteria: summarizeCognitionItems(cognition.successCriteria, 8),
-    knownFacts: summarizeCognitionItems(cognition.knownFacts, 12),
-    unknowns: summarizeCognitionItems(cognition.unknowns, 8),
-    assumptions: summarizeCognitionItems(cognition.assumptions, 8),
-    constraints: summarizeCognitionItems(cognition.constraints, 8),
-    risks: summarizeCognitionItems(cognition.risks, 8),
-    candidateActions: summarizeCognitionItems(cognition.candidateActions, 8),
-    selectedAction: cognition.selectedAction ? {
-      type: cognition.selectedAction.type || '',
-      toolNames: Array.isArray(cognition.selectedAction.toolNames) ? cognition.selectedAction.toolNames.slice(0, 8) : [],
-      summary: compactText(cognition.selectedAction.summary || '', 500),
-      reviewStatus: cognition.selectedAction.reviewStatus || '',
-      reviewKind: cognition.selectedAction.reviewKind || '',
-    } : null,
-    evidenceNeeded: summarizeCognitionItems(cognition.evidenceNeeded, 8),
-    blockers: summarizeCognitionItems(cognition.blockers, 8),
-    decisionBasis: compactText(cognition.decisionBasis || '', 500),
-    updatedBy: cognition.updatedBy || '',
-    updatedAt: cognition.updatedAt || '',
-  };
-}
-
-function summarizeReplay(replay = null) {
-  if (!replay || typeof replay !== 'object' || Array.isArray(replay)) {
-    return { status: 'not_evaluated', ok: true, reasons: [], recommendedTaskStatus: '' };
-  }
-  return {
-    status: replay.status || '',
-    ok: replay.ok !== false,
-    reasons: normalizeStringArray(replay.reasons).slice(0, 10),
-    recommendedTaskStatus: replay.recommendedTaskStatus || replay.recommended_task_status || '',
-  };
-}
-
-function summarizeTrajectory(trajectory = null) {
-  if (!trajectory || typeof trajectory !== 'object' || Array.isArray(trajectory)) {
-    return { status: 'not_evaluated', ok: true, reasons: [], counts: {} };
-  }
-  return {
-    status: trajectory.status || '',
-    ok: trajectory.ok !== false,
-    reasons: normalizeStringArray(trajectory.reasons).slice(0, 10),
-    counts: trajectory.counts && typeof trajectory.counts === 'object' ? { ...trajectory.counts } : {},
-    failedChecks: (Array.isArray(trajectory.checks) ? trajectory.checks : [])
-      .filter((item) => item?.ok !== true)
-      .slice(0, 10)
-      .map((item) => ({
-        id: item.id || '',
-        reasons: normalizeStringArray(item.reasons).slice(0, 5),
-      })),
-  };
-}
-
-function summarizePlan(plan = null) {
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
-    return { status: 'empty', intent: '', steps: [], blockers: [], evidenceNeeded: [] };
-  }
-  return {
-    status: plan.status || '',
-    intent: plan.intent || '',
-    objective: compactText(plan.objective || '', 500),
-    turn: plan.turn ?? null,
-    blockers: normalizeStringArray(plan.blockers).slice(0, 10),
-    evidenceNeeded: normalizeStringArray(plan.evidenceNeeded || plan.evidence_needed).slice(0, 10),
-    steps: (Array.isArray(plan.steps) ? plan.steps : []).slice(0, 10).map((item) => ({
-      id: item?.id || '',
-      status: item?.status || '',
-      kind: item?.kind || item?.type || '',
-      toolName: item?.toolName || item?.tool_name || '',
-      summary: compactText(item?.summary || item?.text || '', 500),
-    })),
-  };
-}
-
 function summarizeRecovery(recovery = null) {
   if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) {
-    return { status: 'idle', attemptCount: 0, recoveryType: '', failedToolNames: [], nextSteps: [] };
+    return { status: 'idle', attemptCount: 0, recoveryType: '', failedToolNames: [] };
   }
   return {
     status: recovery.status || '',
@@ -184,8 +69,6 @@ function summarizeRecovery(recovery = null) {
     lastFailureSignature: compactText(recovery.lastFailureSignature || recovery.last_failure_signature || '', 300),
     failedToolNames: normalizeStringArray(recovery.failedToolNames || recovery.failed_tool_names).slice(0, 10),
     failedObservationIds: normalizeStringArray(recovery.failedObservationIds || recovery.failed_observation_ids).slice(0, 10),
-    strategy: compactText(recovery.strategy || '', 500),
-    nextSteps: normalizeStringArray(recovery.nextSteps || recovery.next_steps).slice(0, 10),
     verifierRequired: recovery.verifierRequired === true || recovery.verifier_required === true,
   };
 }
@@ -296,19 +179,6 @@ function summarizeObservations(observations = [], limit = 6) {
     isError: item.isError === true,
     content: compactText(item.content || item.stdoutExcerpt || item.stderrExcerpt || item.error || '', 700),
   }));
-}
-
-function summarizeCognitionItems(items = [], limit = 8) {
-  return (Array.isArray(items) ? items : []).slice(-limit).map((item) => {
-    if (typeof item === 'string') return compactText(item, 300);
-    return {
-      id: item?.id || '',
-      type: item?.type || item?.kind || '',
-      text: compactText(item?.text || item?.summary || item?.content || '', 300),
-      source: item?.source || '',
-      confidence: item?.confidence || '',
-    };
-  }).filter((item) => typeof item === 'string' ? Boolean(item) : Boolean(item.text || item.id));
 }
 
 function summarizeCommand(command = null) {

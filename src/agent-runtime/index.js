@@ -19,7 +19,6 @@ const planning = require('./planning');
 const replay = require('./replay');
 const runtime = require('./runtime');
 const runner = require('./runner');
-const skills = require('./skills');
 const state = require('./state');
 const store = require('./store');
 const tools = require('./tools');
@@ -48,7 +47,6 @@ module.exports = {
   ...replay,
   ...runtime,
   ...runner,
-  ...skills,
   ...state,
   ...store,
   ...tools,

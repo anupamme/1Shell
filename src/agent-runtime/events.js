@@ -7,7 +7,7 @@ function createAgentEvent(state, type, payload = {}, now = new Date()) {
   return {
     type: eventType,
     runId: state?.runId || payload.runId || '',
-    source: state?.source || payload.source || 'program',
+    source: state?.source || payload.source || 'console',
     at: toIso(now),
     payload: normalizeObject(payload),
   };

@@ -352,7 +352,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     if (!hasEnabledClaudeCodeSkill('using-superpowers')) return '';
     return [
       'This 1Shell internal Claude Code session has the Superpowers skills installed.',
-      'Before starting any non-trivial task, use the using-superpowers skill and follow its guidance for choosing relevant skills.',
+      'Before starting any non-trivial goal, use the using-superpowers skill and follow its guidance for choosing relevant skills.',
       'Do not execute repository hook scripts unless the user explicitly asks for that specific action.',
     ].join('\n');
   }

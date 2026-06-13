@@ -115,7 +115,7 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
       });
       return { content: `[harness] 需要人工审批，已拒绝自动执行：${reason}`, is_error: true };
     }
-    // Program AI step：allowApproval=false → 需审批风险会在这里拒绝，避免默认放行。
+    // Unattended agent paths use allowApproval=false, so approval-required risks are denied here.
 
     if (verdict.risk?.risky) {
       recordSecurityEvent(trace, toolName, input, context, verdict, verdict.risk.action || 'checked');

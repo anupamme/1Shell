@@ -25,8 +25,6 @@ async function runAgentControllerLoop({
   runId,
   initial,
   modelAdapter,
-  skills,
-  skillPrompt,
   maxTurns = null,
   checkpointTurns = false,
   interruptOn = null,
@@ -46,7 +44,6 @@ async function runAgentControllerLoop({
   let interrupt = null;
   let runnerStatus = '';
   let finalGate = null;
-  let finalGateRepairCount = 0;
 
   recordTransition(runtime, runId, {
     from: runtime.getState?.(runId)?.runtimeState?.currentNode || 'queued',
@@ -169,8 +166,6 @@ async function runAgentControllerLoop({
       goal: decisionState.goal,
       context: decisionState.spec?.context || {},
       policy: decisionState.spec?.policy || {},
-      skills,
-      skillPrompt,
       turn: turnNumber,
       turnIndex: index,
       maxTurns: turnLimit,
@@ -193,9 +188,6 @@ async function runAgentControllerLoop({
       turn: turnNumber,
     });
     recordDecisionReview(runtime, runId, decisionReview);
-    if (decisionReview?.command && decisionReview.status !== 'accepted') {
-      command = decisionReview.command;
-    }
     recordRuntimePlan(runtime, runId, buildDecisionPlanUpdate(command, result, {
       turn: turnNumber,
       state: runtime.getState?.(runId) || decisionState,
@@ -373,7 +365,7 @@ async function runAgentControllerLoop({
         'verify',
         verifierResult?.attempted
           ? formatVerifierExecutorMessage(verifierResult)
-          : 'Verification requested by model; controller found no executable verifier and will require concrete verifier/tool evidence before success.',
+          : 'Model requested verification, but no executable verifier was available.',
         {
           verifierPlan,
           verifierResult: verifierResult || null,
@@ -396,15 +388,7 @@ async function runAgentControllerLoop({
       }));
       recordTransition(runtime, runId, { from: 'verify', to: 'observe', turn: turnNumber, status: 'running', reason: 'verification_command_recorded' });
       if (!hasControllerTurnCapacityAfter(offset, turnLimit)) {
-        finalGate = evaluateFinalGate(runtime, runId, result, finalGateRepairCount);
-        if (finalGate.shouldContinue) {
-          finalGate = {
-            ...finalGate,
-            shouldContinue: false,
-            forcedStatus: 'blocked',
-            reasons: uniqueStrings([...(finalGate.reasons || []), 'turn_budget_exhausted']),
-          };
-        }
+        finalGate = settleFinalGate(evaluateFinalGate(runtime, runId, result));
         recordTransition(runtime, runId, {
           from: 'observe',
           to: finalGate?.forcedStatus === 'blocked' ? 'blocked' : 'finalize',
@@ -445,15 +429,15 @@ async function runAgentControllerLoop({
     }
 
     if (command.type === 'recover') {
-      const recoverObservation = createRuntimeObservation(turnNumber, 'recover', command.text || 'Recovery requested; continue with concrete repair or block with evidence.');
+      const recoverObservation = createRuntimeObservation(turnNumber, 'recover', command.text || 'Model requested recovery.');
       observations = [recoverObservation];
       runtime.recordObservation?.(runId, recoverObservation);
       recordRecoveryPolicy(runtime, runId, {
         status: 'in_progress',
         recoveryType: command.data?.recoveryType || command.data?.recovery_type || 'model_requested',
         reason: command.reason || command.text || 'model_recovery_command',
-        strategy: command.text || 'continue recovery with concrete action or block with evidence',
-        nextSteps: ['choose_repair_action', 'observe_repair_result', 'verify_if_needed'],
+        strategy: command.text || '',
+        nextSteps: [],
       });
       recordTransition(runtime, runId, { from: 'recover', to: 'decide', turn: turnNumber, status: 'running', reason: 'recovery_command_recorded' });
       if (!hasControllerTurnCapacityAfter(offset, turnLimit)) {
@@ -501,18 +485,7 @@ async function runAgentControllerLoop({
       continue;
     }
 
-    finalGate = evaluateFinalGate(runtime, runId, result, finalGateRepairCount);
-    finalGate = await runFinalGateVerifierIfNeeded({
-      runtime,
-      runId,
-      finalGate,
-      result,
-      repairCount: finalGateRepairCount,
-      dispatchOptionsForAction,
-      turn: turnNumber,
-      turnIndex: index,
-      state,
-    });
+    finalGate = settleFinalGate(evaluateFinalGate(runtime, runId, result));
     if (!finalGate.shouldContinue && !finalGate.forcedStatus) {
       finalGate = evaluateAdditionalFinalGates(additionalFinalGates, {
         runtime,
@@ -521,9 +494,9 @@ async function runAgentControllerLoop({
         result,
         command,
         finalText: result.text || result.report || result.content || '',
-        repairCount: finalGateRepairCount,
         metadata: { controllerLoop: true, turn: turnNumber },
       }, finalGate);
+      finalGate = settleFinalGate(finalGate);
     }
     if (command.type === 'block') {
       finalGate = {
@@ -531,57 +504,6 @@ async function runAgentControllerLoop({
         shouldContinue: false,
         forcedStatus: 'blocked',
         reasons: [...new Set([...(finalGate?.reasons || []), command.reason || 'model_blocked'])],
-      };
-    }
-    if (finalGate.shouldContinue && hasControllerTurnCapacityAfter(offset, turnLimit)) {
-      finalGateRepairCount += 1;
-      const gateObservation = createRuntimeObservation(turnNumber, 'runtime_gate', finalGate.message, {
-        reasons: finalGate.reasons,
-        verifierPlan: finalGate.verifierPlan || null,
-      });
-      observations = [gateObservation];
-      turn.observations = observations;
-      runtime.recordObservation?.(runId, { ...gateObservation, stage: 'verify' });
-      recordRuntimePlan(runtime, runId, {
-        status: 'needs_more_work',
-        intent: 'satisfy_final_gate',
-        objective: (runtime.getState?.(runId) || decisionState)?.goal || '',
-        turn: turnNumber,
-        steps: [{
-          id: `turn-${turnNumber}-final-gate`,
-          status: 'failed',
-          kind: 'runtime_gate',
-          summary: finalGate.message || '',
-        }],
-        blockers: finalGate.reasons || [],
-        evidenceNeeded: finalGate.verifierPlan?.required === true ? ['runtime_verification'] : [],
-      });
-      recordTransition(runtime, runId, {
-        from: runtimeNodeForDecisionCommand(command),
-        to: 'observe',
-        turn: turnNumber,
-        status: 'running',
-        reason: 'final_gate_requires_more_work',
-        data: { reasons: finalGate.reasons },
-      });
-      runtime.recordTurn(runId, {
-        index,
-        turn: turnNumber,
-        status: 'completed',
-        stage: 'verify',
-        observations,
-        metadata: { finalGateReasons: finalGate.reasons },
-      });
-      createTurnCheckpointIfNeeded(runtime, runId, checkpointTurns, turn, { finalGate });
-      continue;
-    }
-
-    if (finalGate.shouldContinue) {
-      finalGate = {
-        ...finalGate,
-        shouldContinue: false,
-        forcedStatus: 'blocked',
-        reasons: [...(finalGate.reasons || []), 'turn_budget_exhausted'],
       };
     }
     recordTransition(runtime, runId, {
@@ -603,7 +525,7 @@ async function runAgentControllerLoop({
     });
     recordRuntimePlan(runtime, runId, {
       status: finalGate?.forcedStatus === 'blocked' ? 'blocked' : 'finalized',
-      intent: finalGate?.forcedStatus === 'blocked' ? 'stop_with_evidence' : 'finish_after_runtime_gates',
+      intent: finalGate?.forcedStatus === 'blocked' ? 'stop_with_evidence' : 'finish_after_state_checks',
       objective: (runtime.getState?.(runId) || decisionState)?.goal || '',
       turn: turnNumber,
       steps: [{
@@ -623,7 +545,7 @@ async function runAgentControllerLoop({
 
 function formatVerifierExecutorMessage(result = {}) {
   const lines = [
-    '[AGENT_VERIFIER_EXECUTED]',
+    'Verifier execution result',
     `status=${result.status || 'unknown'}`,
     `ok=${result.ok === true}`,
   ];
@@ -678,9 +600,6 @@ function recordAgentControllerDecision({
     turn: turnNumber,
   });
   recordDecisionReview(runtime, runId, decisionReview);
-  if (decisionReview?.command && decisionReview.status !== 'accepted') {
-    command = decisionReview.command;
-  }
   recordCognitionState(runtime, runId, buildDecisionCognitionUpdate(command, result, {
     turn: turnNumber,
     state: runtime.getState?.(runId),
@@ -816,12 +735,6 @@ function recordAgentControllerObservationStep({
     recordRecoveryPolicy(runtime, runId, buildRecoveryPolicyUpdate(recovery, {
       state: runtime.getState?.(runId),
     }));
-    const recoveryObservation = {
-      ...recovery.observation,
-      turn: turnNumber,
-      stage: 'recover',
-    };
-    runtime.recordObservation?.(runId, recoveryObservation);
     if (recovery.recoveryExhausted) {
       const reasons = uniqueStrings([
         recovery.reason || 'recovery_attempt_budget_exhausted',
@@ -837,7 +750,7 @@ function recordAgentControllerObservationStep({
           id: `turn-${turnNumber}-recovery-budget`,
           status: 'blocked',
           kind: 'recover',
-          summary: recoveryObservation.content || '',
+          summary: reasons.join(','),
         }],
         blockers: reasons,
       });
@@ -857,8 +770,7 @@ function recordAgentControllerObservationStep({
       return {
         action: 'blocked',
         shouldContinue: false,
-        message: recoveryObservation.content || '',
-        observation: recoveryObservation,
+        message: '',
         observations: normalizedObservations,
         recovery,
         finalGate: {
@@ -870,10 +782,10 @@ function recordAgentControllerObservationStep({
     }
     recordTransition(runtime, runId, {
       from: 'observe',
-      to: 'recover',
+      to: 'observe',
       turn: turnNumber,
       status: 'running',
-      reason: recovery.reason || 'failed_observation_requires_recovery',
+      reason: recovery.reason || 'failed_observation_recorded',
       data: {
         ...normalizeObject(metadata),
         failedToolNames: recovery.failedToolNames || [],
@@ -881,10 +793,9 @@ function recordAgentControllerObservationStep({
       },
     });
     return {
-      action: 'recover',
+      action: 'observe',
       shouldContinue: true,
-      message: recoveryObservation.content || '',
-      observation: recoveryObservation,
+      message: '',
       observations: normalizedObservations,
       recovery,
     };
@@ -906,7 +817,6 @@ function evaluateAgentControllerFinalization({
   result = {},
   command = null,
   finalText = '',
-  repairCount = 0,
   additionalGates = [],
   metadata = {},
 } = {}) {
@@ -916,7 +826,7 @@ function evaluateAgentControllerFinalization({
   const normalizedResult = normalizeModelResult(result);
   const effectiveCommand = command || normalizeAgentCommand(normalizedResult);
   const text = String(finalText || normalizedResult.text || normalizedResult.report || normalizedResult.content || '').trim();
-  let finalGate = evaluateFinalGate(runtime, runId, { ...normalizedResult, text }, repairCount);
+  let finalGate = settleFinalGate(evaluateFinalGate(runtime, runId, { ...normalizedResult, text }));
   if (effectiveCommand.type === 'block') {
     finalGate = {
       ...(finalGate || {}),
@@ -933,58 +843,9 @@ function evaluateAgentControllerFinalization({
       result: normalizedResult,
       command: effectiveCommand,
       finalText: text,
-      repairCount,
       metadata,
     }, finalGate);
-  }
-
-  if (finalGate.shouldContinue) {
-    const observation = createRuntimeObservation(turnNumber, 'runtime_gate', finalGate.message, {
-      reasons: finalGate.reasons || [],
-      verifierPlan: finalGate.verifierPlan || null,
-    });
-    runtime.recordObservation?.(runId, { ...observation, stage: 'verify' });
-    recordRuntimePlan(runtime, runId, {
-      status: 'needs_more_work',
-      intent: 'satisfy_final_gate',
-      objective: (runtime.getState?.(runId) || {})?.goal || '',
-      turn: turnNumber,
-      steps: [{
-        id: `turn-${turnNumber}-final-gate`,
-        status: 'failed',
-        kind: 'runtime_gate',
-        summary: finalGate.message || '',
-      }],
-      blockers: finalGate.reasons || [],
-      evidenceNeeded: finalGate.verifierPlan?.required === true ? ['runtime_verification'] : [],
-    });
-    recordTransition(runtime, runId, {
-      from: runtimeNodeForDecisionCommand(effectiveCommand),
-      to: 'observe',
-      turn: turnNumber,
-      status: 'running',
-      reason: 'final_gate_requires_more_work',
-      data: { reasons: finalGate.reasons || [], bridge: metadata.bridge || '' },
-    });
-    runtime.recordTurn(runId, {
-      index,
-      turn: turnNumber,
-      status: 'completed',
-      stage: 'verify',
-      observations: [observation],
-      metadata: {
-        ...normalizeObject(metadata),
-        finalGateReasons: finalGate.reasons || [],
-        controller: 'AgentRunController',
-      },
-    });
-    return {
-      action: 'continue',
-      shouldContinue: true,
-      message: finalGate.message || '',
-      finalGate,
-      forcedStatus: '',
-    };
+    finalGate = settleFinalGate(finalGate);
   }
 
   const forcedStatus = finalGate.forcedStatus || '';
@@ -1010,7 +871,7 @@ function evaluateAgentControllerFinalization({
   });
   recordRuntimePlan(runtime, runId, {
     status: forcedStatus === 'blocked' ? 'blocked' : 'finalized',
-    intent: forcedStatus === 'blocked' ? 'stop_with_evidence' : 'finish_after_runtime_gates',
+    intent: forcedStatus === 'blocked' ? 'stop_with_evidence' : 'finish_after_state_checks',
     objective: (runtime.getState?.(runId) || {})?.goal || '',
     turn: turnNumber,
     steps: [{
@@ -1030,59 +891,13 @@ function evaluateAgentControllerFinalization({
   };
 }
 
-function evaluateFinalGate(runtime, runId, result, repairCount) {
+function evaluateFinalGate(runtime, runId, result) {
   const gate = evaluateAgentFinalGate(runtime.getState?.(runId) || {}, {
     result,
     finalText: result.text || result.report || result.content || '',
-    repairCount,
   });
   if (gate?.trajectoryEvaluation) recordTrajectoryEvaluation(runtime, runId, gate.trajectoryEvaluation);
   return gate;
-}
-
-async function runFinalGateVerifierIfNeeded({
-  runtime,
-  runId,
-  finalGate = null,
-  result = {},
-  repairCount = 0,
-  dispatchOptionsForAction = null,
-  turn = null,
-  turnIndex = null,
-  state = null,
-} = {}) {
-  if (!finalGate?.shouldContinue || finalGate?.verifierPlan?.required !== true || finalGate?.verifierPlan?.ok === true) return finalGate;
-  const verifierStatus = String(finalGate.verifierPlan.status || '');
-  if (verifierStatus !== 'missing') return finalGate;
-
-  const syntheticAction = {
-    id: `runtime-final-gate-verifier-${turn || Date.now()}`,
-    toolName: 'verify_outcome',
-    args: {},
-    options: {},
-  };
-  const extraOptions = typeof dispatchOptionsForAction === 'function'
-    ? await dispatchOptionsForAction({ action: syntheticAction, runId, runtime, turn, turnIndex, verifier: true })
-    : normalizeObject(dispatchOptionsForAction);
-  const verifierResult = await runVerifierPlan({
-    runtime,
-    runId,
-    hostId: state?.spec?.context?.hostId || '',
-    inputs: state?.spec?.context?.inputs || {},
-    executeTool: extraOptions.executeTool,
-    requestApproval: extraOptions.requestApproval,
-    signal: extraOptions.signal,
-    reason: 'final_gate_requires_verification',
-  });
-  if (!verifierResult?.attempted) return finalGate;
-
-  const updatedGate = evaluateFinalGate(runtime, runId, result, repairCount);
-  return {
-    ...updatedGate,
-    verifierResult,
-    verifierAttemptedByRuntime: true,
-    reasons: updatedGate.reasons || [],
-  };
 }
 
 function evaluateAdditionalFinalGates(gates = [], payload = {}, fallback = { shouldContinue: false, reasons: [] }) {
@@ -1094,6 +909,18 @@ function evaluateAdditionalFinalGates(gates = [], payload = {}, fallback = { sho
     if (result.shouldContinue || result.forcedStatus || (Array.isArray(result.reasons) && result.reasons.length > 0)) return result;
   }
   return fallback;
+}
+
+function settleFinalGate(gate = {}) {
+  if (!gate || typeof gate !== 'object') return { shouldContinue: false, reasons: [] };
+  if (!gate.shouldContinue) return gate;
+  const reasons = uniqueStrings(gate.reasons || []);
+  return {
+    ...gate,
+    shouldContinue: false,
+    forcedStatus: gate.forcedStatus || (reasons.some((reason) => String(reason).includes('failed')) ? 'failed' : 'unverified'),
+    reasons,
+  };
 }
 
 function evaluateRecoveryDirective(observations = [], options = {}) {
@@ -1133,24 +960,7 @@ function evaluateRecoveryDirective(observations = [], options = {}) {
       reason: recoveryExhausted ? exhaustedReason : 'verification_failed_requires_recovery',
       failedToolNames,
       observations: failed,
-      observation: {
-        id: `runtime-recovery-${Date.now()}`,
-        kind: 'runtime_recovery',
-        toolName: 'agent_recovery_planner',
-        ok: false,
-        isError: true,
-        content: [
-          '[AGENT_VERIFY_RECOVERY_REQUIRED]',
-          attemptBudgetExhausted ? `recovery_attempts_exhausted=${currentAttempts}/${maxAttempts}` : '',
-          repeatFailureCount > 1 ? `repeated_failure_count=${repeatFailureCount}/${maxRepeatedFailures ?? 'unbounded'}` : '',
-          `reasons=${reasons.join(',')}`,
-          verifierPlan.required ? `verifier_status=${verifierPlan.status}` : '',
-          verifierPlan.requirements.length ? `verifier_requirements=${verifierPlan.requirements.map((item) => item.id || item.source || item.type).filter(Boolean).join(',')}` : '',
-          'The verifier did not accept the outcome. Continue by repairing the failed condition, collecting missing input/secret/approval, running verification again, or ending as failed/blocked/unverified with evidence.',
-          evidence ? `Verification evidence:\n${evidence}` : '',
-        ].filter(Boolean).join('\n'),
-        data: { failedToolNames, outcome, verifierPlan, recoveryType: 'verification_repair', recoveryExhausted, maxAttempts, maxRepeatedFailures, repeatedFailureExhausted, repeatFailureCount, failureSignature },
-      },
+      data: { failedToolNames, outcome, verifierPlan, recoveryType: 'verification_repair', recoveryExhausted, maxAttempts, maxRepeatedFailures, repeatedFailureExhausted, repeatFailureCount, failureSignature, evidence },
     };
   }
   return {
@@ -1165,21 +975,7 @@ function evaluateRecoveryDirective(observations = [], options = {}) {
     reason: recoveryExhausted ? exhaustedReason : 'failed_observation_requires_recovery',
     failedToolNames,
     observations: failed,
-    observation: {
-      id: `runtime-recovery-${Date.now()}`,
-      kind: 'runtime_recovery',
-      toolName: 'agent_recovery_planner',
-      ok: false,
-      isError: true,
-      content: [
-        '[AGENT_RECOVERY_REQUIRED]',
-        attemptBudgetExhausted ? `recovery_attempts_exhausted=${currentAttempts}/${maxAttempts}` : '',
-        repeatFailureCount > 1 ? `repeated_failure_count=${repeatFailureCount}/${maxRepeatedFailures ?? 'unbounded'}` : '',
-        `failed_tools=${failedToolNames.join(',') || 'unknown'}`,
-        'A tool observation failed. Continue by diagnosing the failure, repairing it, asking for missing input/approval, or ending as failed/blocked/unverified with evidence.',
-      ].filter(Boolean).join('\n'),
-      data: { failedToolNames, recoveryExhausted, maxAttempts, maxRepeatedFailures, repeatedFailureExhausted, repeatFailureCount, failureSignature },
-    },
+    data: { failedToolNames, recoveryExhausted, maxAttempts, maxRepeatedFailures, repeatedFailureExhausted, repeatFailureCount, failureSignature },
   };
 }
 
@@ -1254,7 +1050,7 @@ function createRuntimeObservation(turn, kind, content, data = {}, options = {}) 
   return {
     id: `${kind}-${turn}-${Date.now()}`,
     kind,
-    toolName: kind === 'runtime_gate' ? 'agent_final_gate' : 'agent_controller',
+    toolName: 'agent_controller',
     ok,
     isError,
     turn,

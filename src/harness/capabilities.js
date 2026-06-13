@@ -3,7 +3,7 @@
 /**
  * Harness Capabilities — 能力词表 + 准入规则。
  *
- * capability 回答的是"这次任务被授权能做什么"（最小授权），
+ * capability 回答的是"这次运行被授权能做什么"（最小授权），
  * 与 command-safety 的灾难拦截（"什么绝对不能做"）正交。
  *
  * 设计原则（见 HARNESS_DESIGN.md §6）：

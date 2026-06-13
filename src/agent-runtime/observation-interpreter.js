@@ -3,18 +3,10 @@
 const SIDE_EFFECT_TOOL_NAMES = new Set([
   'execute_command',
   'host_exec',
-  'write_file',
-  'write_program',
-  'write_task',
-  'create_task',
-  'trigger_program',
-  'trigger_task',
-  'run_skill',
   'reload_registry',
   'add_mcp_server',
   'remove_mcp_server',
   'deploy_local_mcp',
-  'package_agent_run',
 ]);
 
 function applyObservationToRuntimeState(state, observation = {}) {
@@ -108,13 +100,12 @@ function interpretObservation(observation = {}) {
 
 function toolRequiresVerification(toolName, observation = {}) {
   if (toolName === 'verify_outcome') return false;
-  if (toolName === 'package_agent_run') return observation?.data?.write === true;
   return SIDE_EFFECT_TOOL_NAMES.has(toolName);
 }
 
 function isRuntimeDirectiveObservation(base = {}) {
-  return ['runtime_recovery', 'runtime_gate', 'recover', 'verify'].includes(base.kind)
-    || ['agent_controller', 'agent_final_gate', 'agent_recovery_planner'].includes(base.toolName);
+  return ['runtime_recovery', 'recover', 'verify'].includes(base.kind)
+    || ['agent_controller'].includes(base.toolName);
 }
 
 function ensureWorldState(state) {

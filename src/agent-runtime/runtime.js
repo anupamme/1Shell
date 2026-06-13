@@ -6,7 +6,6 @@ const { validateAgentTransition } = require('./graph');
 const { applyAgentCognitionToState, createAgentCognitionState } = require('./cognition');
 const { applyRuntimeDecisionReviewToState, createRuntimeDecisionReviewState } = require('./decision-policy');
 const { applyObservationToRuntimeState } = require('./observation-interpreter');
-const { buildPublicNarration } = require('./narration');
 const { applyRuntimePlanToState, applyRuntimeRecoveryToState, createRuntimePlanState, createRuntimeRecoveryState } = require('./planning');
 const { applyReplayEvaluationToState, createReplayEvaluationState, evaluateAgentRunReplay } = require('./replay');
 const { describeCommandSideEffects, evaluateAgentToolPolicy } = require('./tool-policy');
@@ -30,44 +29,11 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
 
   function emit(state, type, payload = {}) {
     const event = pushAgentEvent(state, type, payload);
-    const narrationEvent = maybeAppendPublicNarration(state, type, payload, event);
     saveState(state);
     emitter.emit(type, event);
     emitter.emit('*', event);
     io?.emit?.(type, event);
-    if (narrationEvent) {
-      emitter.emit('agent:narration', narrationEvent);
-      emitter.emit('*', narrationEvent);
-      io?.emit?.('agent:narration', narrationEvent);
-    }
     return event;
-  }
-
-  function maybeAppendPublicNarration(state, type, payload, event) {
-    if (!state || type === 'agent:narration') return null;
-    const narration = buildPublicNarration({ type, payload, state, event });
-    if (!narration?.message) return null;
-    const runtimeState = ensureRuntimeStateShallow(state);
-    if (!Array.isArray(runtimeState.publicNarrationHistory)) runtimeState.publicNarrationHistory = [];
-    const fingerprint = [
-      narration.kind || '',
-      narration.stage || '',
-      narration.turn ?? '',
-      narration.toolName || '',
-      narration.message || '',
-    ].join('|');
-    if (runtimeState.publicNarrationLastFingerprint === fingerprint) return null;
-    const recentlyRepeated = runtimeState.publicNarrationHistory
-      .slice(-8)
-      .some((item) => item?.fingerprint === fingerprint);
-    if (recentlyRepeated) return null;
-    runtimeState.publicNarrationLastFingerprint = fingerprint;
-    runtimeState.publicNarrationHistory.push({
-      ...narration,
-      fingerprint,
-    });
-    runtimeState.publicNarrationHistory = runtimeState.publicNarrationHistory.slice(-120);
-    return pushAgentEvent(state, 'agent:narration', narration);
   }
 
   function recordTraceEvent(runId, event = {}) {
@@ -175,7 +141,7 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
   function updateTaskStatus(runId, taskStatus, options = {}) {
     const state = requireState(runId);
     const normalized = normalizeTaskStatus(taskStatus);
-    if (!normalized) throw new Error(`Unsupported agent task status: ${taskStatus}`);
+    if (!normalized) throw new Error(`Unsupported agent outcome status: ${taskStatus}`);
     const previousTaskStatus = state.taskStatus || 'unknown';
     const runtimeState = ensureRuntimeState(state);
     const item = {
@@ -940,58 +906,6 @@ function inferVerifierHintForToolCall(toolCall = {}, result = {}, data = {}) {
   const toolName = String(toolCall.toolName || '').trim();
   const args = toolCall.args && typeof toolCall.args === 'object' && !Array.isArray(toolCall.args) ? toolCall.args : {};
   const hostId = String(toolCall.scope?.hostId || data.scope?.hostId || args.hostId || args.host_id || 'local').trim() || 'local';
-  if (toolName === 'write_file') {
-    const filePath = stringOr(args.path || args.file || args.filePath || args.file_path, '');
-    if (!filePath) return null;
-    return {
-      type: 'file_exists',
-      hostId: 'local',
-      path: filePath,
-      reason: `Verify ${toolName} wrote the expected artifact file.`,
-      source: 'tool_input',
-      scope: 'artifact',
-    };
-  }
-  if (toolName === 'write_program' || toolName === 'write_task') {
-    const programId = stringOr(args.programId || args.program_id || args.taskId || args.task_id, '');
-    const filePath = firstWritableFilePath(args.files) || (programId ? `data/programs/${programId}/program.yaml` : '');
-    if (!filePath) return null;
-    return {
-      type: 'file_exists',
-      hostId: 'local',
-      path: filePath,
-      reason: `Verify ${toolName} wrote the expected task artifact.`,
-      source: 'tool_input',
-      scope: 'artifact',
-    };
-  }
-  if (toolName === 'create_task') {
-    const taskId = stringOr(args.taskId || args.task_id || args.programId || args.program_id || args.id, '');
-    if (!taskId) return null;
-    return {
-      type: 'file_exists',
-      hostId: 'local',
-      path: `data/programs/${taskId}/program.yaml`,
-      reason: 'Verify create_task produced the expected task artifact.',
-      source: 'tool_input',
-      scope: 'artifact',
-    };
-  }
-  if (toolName === 'package_agent_run') {
-    const filePath = stringOr(data.path || data.outputPath || data.output_path, '');
-    if (!filePath && args.write !== true) return null;
-    const taskId = stringOr(args.taskId || args.task_id || args.programId || args.program_id, '');
-    const path = filePath || (taskId ? `data/programs/${taskId}/program.yaml` : '');
-    if (!path) return null;
-    return {
-      type: 'file_exists',
-      hostId: 'local',
-      path,
-      reason: 'Verify packaged AgentRun task artifact exists.',
-      source: 'tool_result',
-      scope: 'artifact',
-    };
-  }
   return null;
 }
 
@@ -1006,7 +920,7 @@ function firstWritableFilePath(files) {
   if (!Array.isArray(files)) return '';
   for (const file of files) {
     const pathValue = stringOr(file?.path || file?.file || file?.targetPath || file?.target_path, '');
-    if (pathValue) return pathValue.startsWith('data/programs/') ? pathValue : pathValue.replace(/^\/+/, '');
+    if (pathValue) return pathValue.replace(/^\/+/, '');
   }
   return '';
 }
@@ -1215,7 +1129,7 @@ function appendInterruptResolutionObservation(state, interrupt = {}, resolution 
 
 function formatInterruptResolutionContent(interrupt = {}, resolution = {}, ok = true) {
   const lines = [
-    '[AGENT_INTERRUPT_RESOLVED]',
+    'Interrupt resolution',
     `type=${String(interrupt.type || 'manual')}`,
     `status=${String(resolution.status || interrupt.status || 'resolved')}`,
     `ok=${ok === true}`,
@@ -1574,8 +1488,6 @@ function ensureRuntimeState(state) {
     runtimeState.cognition = createAgentCognitionState();
   }
   if (!Array.isArray(runtimeState.cognitionHistory)) runtimeState.cognitionHistory = [];
-  if (!Array.isArray(runtimeState.publicNarrationHistory)) runtimeState.publicNarrationHistory = [];
-  runtimeState.publicNarrationLastFingerprint = String(runtimeState.publicNarrationLastFingerprint || '');
   if (!runtimeState.verifier || typeof runtimeState.verifier !== 'object' || Array.isArray(runtimeState.verifier)) {
     runtimeState.verifier = {
       schemaVersion: 1,

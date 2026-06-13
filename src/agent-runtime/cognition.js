@@ -11,8 +11,6 @@ function createAgentCognitionState() {
     assumptions: [],
     constraints: [],
     risks: [],
-    candidateActions: [],
-    selectedAction: null,
     decisionBasis: '',
     evidenceNeeded: [],
     blockers: [],
@@ -31,9 +29,6 @@ function applyAgentCognitionToState(state = {}, update = {}, options = {}) {
   const turn = update.turn === undefined ? current.turn : nullableNumber(update.turn);
   const status = String(update.status || current.status || 'empty');
   const objective = compactText(update.objective !== undefined ? update.objective : current.objective, 1000);
-  const selectedAction = update.selectedAction !== undefined || update.selected_action !== undefined
-    ? normalizeSelectedAction(update.selectedAction || update.selected_action, { turn, updatedAt: now })
-    : current.selectedAction;
 
   const next = {
     ...current,
@@ -46,10 +41,6 @@ function applyAgentCognitionToState(state = {}, update = {}, options = {}) {
     assumptions: mergeCognitionItems(current.assumptions, update.assumptions, 'assumption', { turn, updatedAt: now }, 80),
     constraints: mergeCognitionItems(current.constraints, update.constraints, 'constraint', { turn, updatedAt: now }, 80),
     risks: mergeCognitionItems(current.risks, update.risks, 'risk', { turn, updatedAt: now }, 80),
-    candidateActions: Array.isArray(update.candidateActions || update.candidate_actions)
-      ? normalizeCognitionItems(update.candidateActions || update.candidate_actions, 'candidate_action', { turn, updatedAt: now }).slice(0, 20)
-      : normalizeCognitionItems(current.candidateActions, 'candidate_action', { turn: current.turn, updatedAt: current.updatedAt }).slice(0, 20),
-    selectedAction,
     decisionBasis: compactText(update.decisionBasis !== undefined ? update.decisionBasis : update.decision_basis !== undefined ? update.decision_basis : current.decisionBasis, 1000),
     evidenceNeeded: mergeCognitionItems(current.evidenceNeeded, update.evidenceNeeded || update.evidence_needed, 'evidence_needed', { turn, updatedAt: now }, 80),
     blockers: mergeCognitionItems(current.blockers, update.blockers, 'blocker', { turn, updatedAt: now }, 80),
@@ -116,28 +107,12 @@ function buildPreDecisionCognitionUpdate(state = {}, { turn = null, observations
 
 function buildDecisionCognitionUpdate(command = {}, result = {}, { turn = null, state = {}, decisionReview = null } = {}) {
   const type = String(command?.type || '').trim() || 'continue';
-  const actions = Array.isArray(command.actions) ? command.actions : [];
   const stateDelta = normalizeAgentStateDelta(command.stateDelta || command.state_delta || result.stateDelta || result.state_delta || result.agentStateDelta || result.agent_state_delta);
-  const selectedAction = selectedActionFromCommand(command, result, { turn, decisionReview });
   return {
     ...stateDelta,
     status: statusForCommand(type),
     objective: state.goal || state.spec?.goal || '',
     turn,
-    candidateActions: actions.length > 0
-      ? actions.map((action) => ({
-        id: action.id || '',
-        text: summarizeAction(action),
-        toolName: action.toolName || '',
-        source: 'model_command',
-      }))
-      : [{
-        id: `turn-${turn || 'current'}-${type}`,
-        text: compactText(command.text || result.text || result.report || result.content || type, 700),
-        type,
-        source: 'model_command',
-      }],
-    selectedAction,
     decisionBasis: compactText(
       stateDelta.decisionBasis
       || command.reason
@@ -148,7 +123,7 @@ function buildDecisionCognitionUpdate(command = {}, result = {}, { turn = null, 
       || '',
       1000,
     ),
-    updatedBy: decisionReview?.status && decisionReview.status !== 'accepted' ? 'runtime_decision_policy' : 'model_decision',
+    updatedBy: 'model_decision',
   };
 }
 
@@ -205,28 +180,9 @@ function summarizeCognition(cognition = {}) {
     riskCount: Array.isArray(cognition.risks) ? cognition.risks.length : 0,
     evidenceNeededCount: Array.isArray(cognition.evidenceNeeded) ? cognition.evidenceNeeded.length : 0,
     blockerCount: Array.isArray(cognition.blockers) ? cognition.blockers.length : 0,
-    selectedAction: cognition.selectedAction ? {
-      type: cognition.selectedAction.type || '',
-      toolNames: Array.isArray(cognition.selectedAction.toolNames) ? cognition.selectedAction.toolNames.slice(0, 10) : [],
-      summary: compactText(cognition.selectedAction.summary || '', 500),
-    } : null,
     updatedBy: cognition.updatedBy || '',
     updatedAt: cognition.updatedAt || '',
   };
-}
-
-function selectedActionFromCommand(command = {}, result = {}, { turn = null, decisionReview = null } = {}) {
-  const type = String(command?.type || '').trim() || 'continue';
-  const actions = Array.isArray(command.actions) ? command.actions : [];
-  return normalizeSelectedAction({
-    type,
-    toolNames: actions.map((action) => action.toolName).filter(Boolean),
-    summary: actions.length > 0
-      ? actions.map(summarizeAction).join('\n')
-      : compactText(command.text || result.text || result.report || result.content || type, 700),
-    reviewStatus: decisionReview?.status || '',
-    reviewKind: decisionReview?.kind || '',
-  }, { turn });
 }
 
 function inferSuccessCriteria(state = {}, current = {}) {
@@ -333,19 +289,6 @@ function normalizeCognitionItem(value, defaultType, context = {}, index = 0) {
   };
 }
 
-function normalizeSelectedAction(value, context = {}) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  return {
-    type: String(value.type || value.command || '').trim(),
-    toolNames: normalizeStringArray(value.toolNames || value.tool_names),
-    summary: compactText(value.summary || value.text || value.reason || '', 1000),
-    reviewStatus: String(value.reviewStatus || value.review_status || '').trim(),
-    reviewKind: String(value.reviewKind || value.review_kind || '').trim(),
-    turn: value.turn === undefined ? nullableNumber(context.turn) : nullableNumber(value.turn),
-    updatedAt: value.updatedAt || value.updated_at || context.updatedAt || new Date().toISOString(),
-  };
-}
-
 function statusForCommand(type) {
   if (type === 'act') return 'acting';
   if (type === 'verify') return 'verifying';
@@ -354,12 +297,6 @@ function statusForCommand(type) {
   if (type === 'block') return 'blocked';
   if (['ask_user', 'request_secret', 'request_approval'].includes(type)) return 'waiting_for_input';
   return 'deciding';
-}
-
-function summarizeAction(action = {}) {
-  const args = action.args && typeof action.args === 'object' ? action.args : {};
-  if (args.command) return `${action.toolName || 'tool'}: ${String(args.command).slice(0, 300)}`;
-  return action.toolName || 'tool action';
 }
 
 function ensureRuntimeState(state) {

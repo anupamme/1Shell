@@ -10,9 +10,9 @@ const {
  * Skill Runner Socket Handlers
  *
  * 事件订阅：
- *   skill:run      — 启动一个 Skill 任务
+ *   skill:run      — 启动一次 Skill 运行
  *   skill:continue — 对 ask_user 回复
- *   skill:stop     — 取消当前任务
+ *   skill:stop     — 取消当前运行
  *
  * 事件下发（由 runner 内部发出）：
  *   skill:run-started, skill:thinking, skill:thought,

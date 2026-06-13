@@ -13,12 +13,11 @@ interface NavItem {
 const navItems: NavItem[] = [
   { to: '/',             label: '主页', icon: 'globe',      title: '世界地图主页' },
   { to: '/console',      label: '主控', icon: 'console',    title: '主控台' },
+  { to: '/ide',          label: 'IDE',  icon: 'robot',      title: '1Shell AI IDE' },
   { to: '/hosts',        label: '主机', icon: 'server',     title: 'VPS 仓库' },
-  { to: '/tasks',        label: '任务', icon: 'play-square', title: '任务' },
   { to: '/scripts',      label: '脚本', icon: 'terminal',   title: '脚本库' },
   { to: '/skills',       label: '仓库', icon: 'package',    title: '技能仓库' },
   { to: '/mcp-hub',      label: 'MCP',  icon: 'plug',       title: 'MCP Hub' },
-  { to: '/skill-studio', label: '创作', icon: 'brush',      title: '创作台' },
   { to: '/cli-setup',    label: 'AI',   icon: 'spark',      title: 'AI 配置' },
   { to: '/probe',        label: '探针', icon: 'radio',      title: '探针' },
   { to: '/audit',        label: '审计', icon: 'clipboard',  title: '审计日志' },

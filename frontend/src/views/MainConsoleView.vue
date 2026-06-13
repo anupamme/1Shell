@@ -22,7 +22,6 @@ import AnalyzeContextMenu from '@/components/main/AnalyzeContextMenu.vue';
 import FileBrowserPanel from '@/components/main/FileBrowserPanel.vue';
 import AiChatPanel from '@/components/main/AiChatPanel.vue';
 import IdePanel from '@/components/main/IdePanel.vue';
-import ApproveBar from '@/components/main/ApproveBar.vue';
 import AgentPanel from '@/components/main/AgentPanel.vue';
 
 const { requestJson } = useApiClient();
@@ -415,9 +414,6 @@ function onSplitDoubleClick(): void {
 
     <!-- 选区分析右键菜单（position:fixed 全局,挂在 terminal-area 外；分析面板已 dock 到 TerminalArea 内底部） -->
     <AnalyzeContextMenu />
-
-    <!-- 1Shell AI Agent 审批条（fixed bottom 全局浮层） -->
-    <ApproveBar />
 
     <!-- 左侧栏退出按钮（占位：AppSidebar 已有，这里仅作 listener — 刀 1 后期由 AppSidebar 触发 onLogout） -->
     <!-- TODO 刀 1 完工后：AppSidebar 内"退出"按钮 emit 触发本组件 onLogout -->

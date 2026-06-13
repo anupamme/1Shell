@@ -226,7 +226,7 @@ function createSkillRegistry(skillsDir, _options = {}) {
    * 生成参数摘要文本（给 CLAUDE.md 薄壳用）。
    */
   function renderInputsSummary(skill, userInputs) {
-    const lines = ['## 任务参数'];
+    const lines = ['## 输入参数'];
     for (const inp of skill.inputs || []) {
       const val = userInputs[inp.name] ?? inp.default ?? '';
       if (!val && !inp.required) continue;

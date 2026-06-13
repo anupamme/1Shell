@@ -64,140 +64,49 @@ function evaluateAgentDecisionPolicy(state = {}, command = {}, options = {}) {
   const verifierPlan = evaluateVerifierPlan(state);
   const recovery = state?.runtimeState?.recovery || {};
   const protocol = original.data?.protocol && typeof original.data.protocol === 'object' ? original.data.protocol : {};
+  const reasons = [];
+  let kind = 'accepted';
 
   if (pendingInterrupt && !['ask_user', 'request_secret', 'request_approval', 'block'].includes(original.type)) {
-    const interruptType = ['ask_user', 'request_secret', 'request_approval'].includes(pendingInterrupt.type)
-      ? pendingInterrupt.type
-      : 'ask_user';
-    return buildReview({
-      status: 'rewritten',
-      kind: 'pending_interrupt',
-      turn,
-      reasons: ['pending_interrupt'],
-      originalCommand: original,
-      effectiveCommand: {
-        type: interruptType,
-        actions: [],
-        text: pendingInterrupt.message || pendingInterrupt.reason || 'Pending interrupt must be resolved before continuing.',
-        reason: pendingInterrupt.reason || 'pending_interrupt',
-        data: { interruptId: pendingInterrupt.id || '' },
-      },
-      message: 'Runtime paused the model decision because an AgentRun interrupt is pending.',
-    });
+    kind = 'pending_interrupt';
+    reasons.push('pending_interrupt');
   }
 
   if (recovery.exhausted === true && !['block', 'finalize'].includes(original.type)) {
-    return buildReview({
-      status: 'rewritten',
-      kind: 'recovery_exhausted',
-      turn,
-      reasons: [recovery.reason || 'recovery_exhausted'],
-      originalCommand: original,
-      effectiveCommand: {
-        type: 'block',
-        actions: [],
-        status: 'blocked',
-        text: recovery.reason || 'Recovery policy is exhausted.',
-        reason: recovery.reason || 'recovery_exhausted',
-        data: { recovery },
-      },
-      message: 'Runtime stopped further action because recovery policy is exhausted.',
-    });
+    kind = kind === 'accepted' ? 'recovery_exhausted' : kind;
+    reasons.push(recovery.reason || 'recovery_exhausted');
   }
 
   if (original.type === 'finalize' && (protocol.inferredFinalization === true || protocol.protocolFallback === true)) {
-    return buildReview({
-      status: 'rewritten',
-      kind: protocol.protocolFallback === true ? 'model_protocol_fallback' : 'implicit_finalization',
-      turn,
-      reasons: [protocol.protocolFallback === true ? 'model_protocol_fallback' : 'implicit_finalization'],
-      originalCommand: original,
-      effectiveCommand: {
-        type: 'recover',
-        actions: [],
-        text: 'The model response did not provide an explicit AgentRun command. Continue with a structured act, verify, ask_user, request_secret, request_approval, finalize, or block command.',
-        reason: protocol.protocolFallback === true ? 'model_protocol_fallback' : 'implicit_finalization',
-        data: { protocol },
-      },
-      message: 'Runtime rejected implicit finalization because AgentRun requires explicit command ownership.',
-    });
+    kind = kind === 'accepted' ? (protocol.protocolFallback === true ? 'model_protocol_fallback' : 'implicit_finalization') : kind;
+    reasons.push(protocol.protocolFallback === true ? 'model_protocol_fallback' : 'implicit_finalization');
   }
 
   if (original.type === 'act' && original.actions.length === 0) {
-    return buildReview({
-      status: 'rewritten',
-      kind: 'empty_action',
-      turn,
-      reasons: ['empty_action_command'],
-      originalCommand: original,
-      effectiveCommand: {
-        type: 'recover',
-        actions: [],
-        text: 'The model selected act without any tool actions. Re-plan and choose a concrete action, request input, verify, or block with evidence.',
-        reason: 'empty_action_command',
-      },
-      message: 'Runtime rejected an empty act command.',
-    });
+    kind = kind === 'accepted' ? 'empty_action' : kind;
+    reasons.push('empty_action_command');
   }
 
   if (original.type === 'continue') {
-    return buildReview({
-      status: 'rewritten',
-      kind: 'empty_decision',
-      turn,
-      reasons: ['empty_or_unknown_agent_command'],
-      originalCommand: original,
-      effectiveCommand: {
-        type: 'recover',
-        actions: [],
-        text: 'The model did not choose a concrete AgentRun command. Re-orient from runtime cognition and return act, verify, ask_user, request_secret, request_approval, finalize, or block.',
-        reason: 'empty_or_unknown_agent_command',
-      },
-      message: 'Runtime rejected a continue/unknown command because AgentRun requires a concrete decision.',
-    });
+    kind = kind === 'accepted' ? 'empty_decision' : kind;
+    reasons.push('empty_or_unknown_agent_command');
   }
 
   if (original.type === 'finalize' && failures.length > 0 && !explicitNonSuccess) {
-    return buildReview({
-      status: 'rewritten',
-      kind: 'unrecovered_failure',
-      turn,
-      reasons: failures.map((item) => `unrecovered_failure:${item.toolName || item.id || 'unknown'}`),
-      originalCommand: original,
-      effectiveCommand: {
-        type: 'recover',
-        actions: [],
-        text: 'Unrecovered runtime failures exist. Recover, verify, request missing input/approval, or finish as failed/blocked/unverified with evidence.',
-        reason: 'unrecovered_failure_requires_recovery',
-        data: { failureIds: failures.map((item) => item.id).filter(Boolean) },
-      },
-      message: 'Runtime rejected success finalization while failures are unrecovered.',
-    });
+    kind = kind === 'accepted' ? 'unrecovered_failure' : kind;
+    reasons.push(...failures.map((item) => `unrecovered_failure:${item.toolName || item.id || 'unknown'}`));
   }
 
   if (original.type === 'finalize' && verifierPlan.required === true && verifierPlan.ok !== true && !explicitNonSuccess) {
-    return buildReview({
-      status: 'rewritten',
-      kind: 'verification_required',
-      turn,
-      reasons: verifierPlan.reasons.length > 0 ? verifierPlan.reasons : ['runtime_verification_required'],
-      originalCommand: original,
-      effectiveCommand: {
-        type: 'verify',
-        actions: [],
-        text: 'Runtime verification is required before successful finalization.',
-        reason: 'runtime_verification_required',
-        data: { verifierPlan },
-      },
-      message: 'Runtime routed finalization through verifier because required evidence is missing.',
-    });
+    kind = kind === 'accepted' ? 'verification_required' : kind;
+    reasons.push(...(verifierPlan.reasons.length > 0 ? verifierPlan.reasons : ['runtime_verification_required']));
   }
 
   return buildReview({
     status: 'accepted',
-    kind: 'accepted',
+    kind,
     turn,
-    reasons: [],
+    reasons,
     originalCommand: original,
     effectiveCommand: original,
     message: '',

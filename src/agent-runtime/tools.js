@@ -8,7 +8,7 @@ function createToolCallEnvelope({ state, toolName, args = {}, riskLevel = '', ca
   return {
     id: createToolCallId(),
     runId: state?.runId || '',
-    source: state?.source || 'program',
+    source: state?.source || 'console',
     toolName: String(toolName || '').trim(),
     args: normalizeObject(args),
     riskLevel: String(riskLevel || ''),
@@ -26,7 +26,7 @@ function createToolCallEnvelope({ state, toolName, args = {}, riskLevel = '', ca
 function buildHarnessContext({ harness, state, toolCall, overrides = {} } = {}) {
   const spec = state?.spec || {};
   const policy = spec.policy || {};
-  const source = SOURCE_TO_HARNESS_SOURCE[state?.source] || state?.source || 'program-ai';
+  const source = SOURCE_TO_HARNESS_SOURCE[state?.source] || state?.source || 'console-ai';
   const scope = toolCall?.scope || {};
   const context = spec.context || {};
   const capabilities = policy.capabilities === undefined
@@ -55,11 +55,14 @@ function buildHarnessContext({ harness, state, toolCall, overrides = {} } = {}) 
 
 function normalizeToolResult(result = {}) {
   const raw = result?.raw && typeof result.raw === 'object' ? result.raw : null;
-  const exitCode = typeof raw?.exitCode === 'number'
-    ? raw.exitCode
-    : (typeof result.exitCode === 'number' ? result.exitCode : undefined);
-  const isError = result.is_error === true || (typeof exitCode === 'number' && exitCode !== 0);
   const content = String(result.content || '');
+  const facts = extractStructuredResultFacts(result, content);
+  const exitCode = firstFiniteNumber(raw?.exitCode, result.exitCode, facts.exitCode);
+  const isError = result.is_error === true
+    || result.isError === true
+    || facts.ok === false
+    || facts.isError === true
+    || (typeof exitCode === 'number' && exitCode !== 0);
   const stdoutExcerpt = excerpt(raw?.stdout || result.stdout || '');
   const stderrExcerpt = excerpt(raw?.stderr || result.stderr || '');
   const auditId = result.auditId || raw?.auditId || '';
@@ -91,6 +94,55 @@ function normalizeToolResult(result = {}) {
     error: isError ? String(result.error || content || '').slice(0, 1000) : '',
     auditId,
   };
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return undefined;
+}
+
+function extractStructuredResultFacts(result = {}, content = '') {
+  const facts = {};
+  mergeStructuredResultFacts(facts, result);
+  const parsed = parseStructuredResultJson(content);
+  if (parsed) {
+    mergeStructuredResultFacts(facts, parsed);
+    if (parsed.data && typeof parsed.data === 'object' && !Array.isArray(parsed.data)) {
+      mergeStructuredResultFacts(facts, parsed.data);
+    }
+  }
+  if (facts.exitCode === undefined) {
+    const match = String(content || '').match(/(?:\[exitCode\]|exitCode|exit_code)\s*[:=\]]?\s*(-?\d+)/i);
+    if (match) facts.exitCode = Number(match[1]);
+  }
+  if (facts.ok === undefined && /"ok"\s*:\s*false/i.test(String(content || ''))) facts.ok = false;
+  if (facts.ok === undefined && /"ok"\s*:\s*true/i.test(String(content || ''))) facts.ok = true;
+  if (facts.isError === undefined && /^\s*\[ERROR\]/i.test(String(content || ''))) facts.isError = true;
+  return facts;
+}
+
+function mergeStructuredResultFacts(target, source = {}) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return;
+  if (typeof source.ok === 'boolean') target.ok = source.ok;
+  if (typeof source.isError === 'boolean') target.isError = source.isError;
+  if (typeof source.is_error === 'boolean') target.isError = source.is_error;
+  const exitCode = firstFiniteNumber(source.exitCode, source.exit_code);
+  if (exitCode !== undefined) target.exitCode = exitCode;
+}
+
+function parseStructuredResultJson(content = '') {
+  const text = String(content || '').trim();
+  if (!text.startsWith('{') || !text.endsWith('}')) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeEvidenceRecords({ evidence, data = {}, content = '', stdoutExcerpt = '', stderrExcerpt = '', exitCode, auditId = '', durationMs, isError = false } = {}) {

@@ -25,6 +25,10 @@ function evaluateAgentRunOutcome(state, { fallbackTaskStatus = 'unverified' } = 
   if (failedOptionalPhases.length > 0) {
     reasons.push(...failedOptionalPhases.map((phase) => `optional_phase_failed:${phase.id}`));
   }
+  const unresolvedToolFailure = getUnresolvedFailedToolObservation(state);
+  if (unresolvedToolFailure) {
+    reasons.push(formatToolFailureReason(unresolvedToolFailure));
+  }
 
   const incompleteRequiredPhases = requiredPhases.filter((phase) => !['done'].includes(phase.status));
   if (incompleteRequiredPhases.length > 0) {
@@ -83,6 +87,10 @@ function evaluateAgentRunOutcome(state, { fallbackTaskStatus = 'unverified' } = 
   }
 
   if (reasons.some((reason) => reason.startsWith('optional_phase_failed:'))) {
+    return { taskStatus: 'partial', reasons };
+  }
+
+  if (unresolvedToolFailure) {
     return { taskStatus: 'partial', reasons };
   }
 
@@ -148,7 +156,6 @@ function getVerificationResult(state) {
   const artifacts = Array.isArray(state?.artifacts) ? state.artifacts : [];
   const artifact = [...artifacts].reverse().find((item) => (
     item?.type === 'verification_result'
-    || item?.id === 'program-verify-result'
     || item?.id === 'agent-verify-result'
     || item?.id === 'ide-verification-result'
   ));
@@ -206,6 +213,32 @@ function normalizeObject(value) {
 
 function normalizeStringArray(value) {
   return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
+}
+
+function getUnresolvedFailedToolObservation(state) {
+  const observations = Array.isArray(state?.observations) ? state.observations : [];
+  const indexedFailures = observations
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => isFailedToolObservation(item));
+  if (indexedFailures.length === 0) return null;
+  const lastFailure = indexedFailures[indexedFailures.length - 1];
+  const laterSuccess = observations
+    .slice(lastFailure.index + 1)
+    .some((item) => item?.ok === true && item?.isError !== true && item?.is_error !== true);
+  return laterSuccess ? null : lastFailure.item;
+}
+
+function isFailedToolObservation(item) {
+  if (!item || typeof item !== 'object') return false;
+  const kind = String(item.kind || item.type || '').trim();
+  if (kind && kind !== 'tool_result') return false;
+  return item.isError === true || item.is_error === true || item.ok === false;
+}
+
+function formatToolFailureReason(observation = {}) {
+  const toolName = String(observation.toolName || observation.tool_name || 'unknown').trim() || 'unknown';
+  const exitCode = Number.isFinite(Number(observation.exitCode)) ? `:exit_${Number(observation.exitCode)}` : '';
+  return `tool_result_failed:${toolName}${exitCode}`;
 }
 
 module.exports = {

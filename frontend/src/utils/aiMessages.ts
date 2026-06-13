@@ -8,6 +8,10 @@ export interface AiTextLine {
   text: string;
 }
 
+export type AiAssistantEvent =
+  | { type: 'line'; line: AiTextLine }
+  | { type: 'tool'; toolUseId: string };
+
 export interface AiToolLogEntry {
   stream: AiToolLogStream;
   text: string;
@@ -41,6 +45,7 @@ export interface AiAssistantTurn {
   status: AiMessageStatus;
   lines: AiTextLine[];
   toolCalls: AiToolCallState[];
+  events: AiAssistantEvent[];
 }
 
 export type AiAgentTurn = AiUserTurn | AiAssistantTurn;
@@ -50,11 +55,13 @@ export function createAiUserTurn(text: string): AiUserTurn {
 }
 
 export function createAiAssistantTurn(status: AiMessageStatus = 'thinking'): AiAssistantTurn {
-  return { role: 'assistant', status, lines: [], toolCalls: [] };
+  return { role: 'assistant', status, lines: [], toolCalls: [], events: [] };
 }
 
 export function appendAiLine(turn: AiAssistantTurn, kind: AiLineKind, text: string): void {
-  turn.lines.push({ kind, text });
+  const line = { kind, text };
+  turn.lines.push(line);
+  ensureAiAssistantEvents(turn).push({ type: 'line', line });
   if (kind === 'error') turn.status = 'error';
   else if (kind === 'stream') turn.status = 'streaming';
 }
@@ -64,7 +71,9 @@ export function appendAiStreamDelta(turn: AiAssistantTurn, delta: string): void 
   if (last && last.kind === 'stream') {
     last.text += delta;
   } else {
-    turn.lines.push({ kind: 'stream', text: delta });
+    const line = { kind: 'stream' as const, text: delta };
+    turn.lines.push(line);
+    ensureAiAssistantEvents(turn).push({ type: 'line', line });
   }
   turn.status = 'streaming';
 }
@@ -86,6 +95,7 @@ export function startAiToolCall(turn: AiAssistantTurn, toolUseId: string, name: 
     input,
   };
   turn.toolCalls = [...turn.toolCalls, call];
+  ensureAiAssistantEvents(turn).push({ type: 'tool', toolUseId });
   turn.status = 'tool_running';
   return call;
 }
@@ -193,17 +203,9 @@ export function toolDisplayName(name: string): string {
     remove_mcp_server: '删除 MCP',
     deploy_local_mcp: '部署 MCP',
     query_audit: '查询审计',
-    list_tasks: '列出任务',
-    create_task: '创建任务',
-    write_task: '写入任务',
-    trigger_task: '触发任务',
-    package_agent_run: '打包 AgentRun',
     ask_user: '询问信息',
     request_secret: '请求凭据引用',
     verify_outcome: '验证结果',
-    list_programs: '列出任务',
-    write_program: '写入任务',
-    trigger_program: '触发任务',
     query_probe: '查询探针',
     list_probes: '列出探针',
     get_probe: '读取探针',
@@ -253,12 +255,6 @@ export function summarizeToolInput(call: AiToolCallState): string {
       return textField(input, 'id') || genericInputSummary(call.input);
     case 'deploy_local_mcp':
       return [textField(input, 'name'), textField(input, 'repoUrl')].filter(Boolean).join(' · ');
-    case 'create_task':
-      return [textField(input, 'taskId'), textField(input, 'name'), textField(input, 'template')].filter(Boolean).join(' · ') || genericInputSummary(call.input);
-    case 'write_task':
-      return [textField(input, 'taskId'), countLabel(input.files)].filter(Boolean).join(' · ') || genericInputSummary(call.input);
-    case 'package_agent_run':
-      return [textField(input, 'runId') || '当前 AgentRun', textField(input, 'taskId') || textField(input, 'programId'), input.write ? '写入' : '预览'].filter(Boolean).join(' · ');
     case 'ask_user':
       return shortText(textField(input, 'question') || textField(input, 'reason'), 120) || genericInputSummary(call.input);
     case 'request_secret':
@@ -267,10 +263,6 @@ export function summarizeToolInput(call: AiToolCallState): string {
       return [textField(input, 'type'), textField(input, 'hostId'), textField(input, 'url') || textField(input, 'path') || textField(input, 'port')].filter(Boolean).join(' · ') || genericInputSummary(call.input);
     case 'query_audit':
       return [textField(input, 'action'), textField(input, 'source'), textField(input, 'hostId'), textField(input, 'keyword')].filter(Boolean).join(' · ') || '最近审计';
-    case 'trigger_task':
-      return [textField(input, 'taskId'), textField(input, 'hostId'), textField(input, 'actionName')].filter(Boolean).join(' · ');
-    case 'trigger_program':
-      return [textField(input, 'programId'), textField(input, 'hostId'), textField(input, 'actionName')].filter(Boolean).join(' · ');
     case 'get_probe':
     case 'get_probe_samples':
     case 'get_probe_timeseries':
@@ -287,8 +279,6 @@ export function summarizeToolInput(call: AiToolCallState): string {
       return [hostId, textField(input, 'name')].filter(Boolean).join(' · ');
     case 'list_hosts':
     case 'list_mcp_servers':
-    case 'list_tasks':
-    case 'list_programs':
     case 'list_probes':
       return '无参数';
     case 'list_probe_alerts':
@@ -320,4 +310,22 @@ export function summarizeToolResult(call: AiToolCallState): string {
 
 export function markAiAssistantStatus(turn: AiAssistantTurn | null, status: AiMessageStatus): void {
   if (turn) turn.status = status;
+}
+
+export function orderedAiAssistantEvents(turn: AiAssistantTurn): AiAssistantEvent[] {
+  const events = ensureAiAssistantEvents(turn);
+  if (events.length > 0) return events;
+  return [
+    ...(turn.lines || []).map((line) => ({ type: 'line' as const, line })),
+    ...(turn.toolCalls || []).map((call) => ({ type: 'tool' as const, toolUseId: call.toolUseId })),
+  ];
+}
+
+export function aiToolCallById(turn: AiAssistantTurn, toolUseId: string): AiToolCallState | null {
+  return (turn.toolCalls || []).find((call) => call.toolUseId === toolUseId) || null;
+}
+
+function ensureAiAssistantEvents(turn: AiAssistantTurn): AiAssistantEvent[] {
+  if (!Array.isArray(turn.events)) turn.events = [];
+  return turn.events;
 }

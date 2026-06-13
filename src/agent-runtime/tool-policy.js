@@ -5,15 +5,10 @@ const { SIDE_EFFECT_TOOL_NAMES } = require('./observation-interpreter');
 
 const READONLY_TOOL_NAMES = new Set([
   'list_hosts',
-  'read_file',
   'read_remote_file',
   'list_remote_dir',
   'list_artifacts',
   'query_format',
-  'list_skills',
-  'load_skill',
-  'list_tasks',
-  'list_programs',
   'list_scripts',
   'query_audit',
   'query_probe',
@@ -135,7 +130,7 @@ function evaluateRuntimeCapabilities(policy = {}, toolName = '', args = {}, opti
 function requiresHostScope(toolName = '', args = {}) {
   const name = String(toolName || '').trim();
   if (args?.hostId || args?.host_id) return true;
-  return ['execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'write_remote_file', 'upload_file', 'download_file', 'run_skill'].includes(name);
+  return ['execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'write_remote_file', 'upload_file', 'download_file'].includes(name);
 }
 
 function evaluateApprovalRequirement(policy = {}, toolName = '', args = {}, options = {}) {

@@ -5,25 +5,16 @@ const fetch = require('node-fetch');
 const { emitIdeEvent } = require('./ide.events');
 const {
   ONESHELL_CORE_SYSTEM_PROMPT,
-  ONESHELL_AUTHORING_SYSTEM_PROMPT,
 } = require('../ai/oneshell-ai-prompt');
 const {
-  evaluateAgentControllerFinalization,
-  recordAgentControllerDecision,
-  recordAgentControllerObservationStep,
-  runAgentControllerLoop,
-} = require('../agent-runtime/controller');
-const { runVerifierPlan } = require('../agent-runtime/verifiers');
-const { buildAgentDecisionContext } = require('../agent-runtime/decision-context');
-const { evaluateAgentRunOutcome } = require('../agent-runtime/outcome');
+  evaluateAgentRunOutcome,
+} = require('../agent-runtime/outcome');
 const { canUseTool, createBudgetExceededResult } = require('../agent-runtime/budget');
 const {
   DEFAULT_IDE_AGENT_LIMITS,
   IDE_AGENT_PHASE_DEFINITIONS,
-  buildIdeAgentSystemDirective,
   createIdeAgentPolicy,
-  createIdeAgentTaskProfile,
-  evaluateIdeAgentFinalTurn,
+  createIdeAgentGoalProfile,
   evaluateIdeAgentProfileToolUse,
   filterToolsForAgent,
   normalizeIdeAgentToolInput,
@@ -256,7 +247,6 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
 const KEEP_RECENT = 40;
 const TRUNCATE_TO = 6000;
 const MAX_PROVIDER_TRANSIENT_RETRIES = 2;
-const MAX_AUTHORING_DRAFT_REPAIR_ROUNDS = 4;
 
 function toolContentPreview(content) {
   if (typeof content === 'string') return content;
@@ -266,32 +256,6 @@ function toolContentPreview(content) {
     if (block?.type === 'image') return '[image]';
     return JSON.stringify(block);
   }).join('\n');
-}
-
-function formatIdeVerifierExecutorFeedback(result = {}) {
-  const lines = [
-    '[AGENT_VERIFIER_EXECUTED]',
-    `status=${result.status || 'unknown'}`,
-    `ok=${result.ok === true}`,
-  ];
-  if (Array.isArray(result.reasons) && result.reasons.length > 0) lines.push(`reasons=${result.reasons.join(',')}`);
-  if (Array.isArray(result.actions) && result.actions.length > 0) {
-    lines.push(`actions=${result.actions.map((item) => `${item.toolName || 'tool'}:${item.type || 'unknown'}`).join(',')}`);
-  }
-  if (Array.isArray(result.checks) && result.checks.length > 0) {
-    lines.push('checks:');
-    for (const check of result.checks.slice(0, 8)) {
-      lines.push([
-        `- ${check.requirementId || `check-${check.index ?? ''}`}: ${check.status || 'unknown'}`,
-        check.target ? `target=${String(check.target).slice(0, 300)}` : '',
-        check.reason ? `reason=${String(check.reason).slice(0, 300)}` : '',
-      ].filter(Boolean).join(' | '));
-    }
-  }
-  lines.push(
-    'Continue the AgentRun from this observed verifier result: repair failed conditions, collect missing input/approval/secret if needed, run a concrete verifier again, or finish as failed/blocked/unverified with evidence.',
-  );
-  return lines.join('\n');
 }
 
 function isTransientProviderError(err) {
@@ -308,37 +272,7 @@ function isProviderProtocolError(err) {
 function compactToolResultForModel(toolName, content) {
   const text = toolContentPreview(content);
   if (!text) return content;
-  if (!['start_program_draft', 'create_program_draft', 'update_authoring_draft', 'validate_program_draft', 'request_commit_approval'].includes(toolName)) {
-    return text.length > 5000 ? `${text.slice(0, 5000)}\n...(tool_result 已裁剪，原 ${text.length} 字符)` : content;
-  }
-  if (text.length <= 1800) return content;
-  const important = text
-    .split('\n')
-    .filter((line) => /artifact|validation|ERROR:|WARN:|失败|通过|update_authoring_draft|下一步|缺少|未知|必须|ui_artifact|sandbox/i.test(line))
-    .join('\n')
-    .trim();
-  const compacted = important || text.slice(0, 1800);
-  return `${compacted}\n...(authoring tool_result 已裁剪，保留 artifact id 与 validation 关键错误，原 ${text.length} 字符)`;
-}
-
-function needsDraftRepairDirective(toolCalls, toolResults, authoringSession) {
-  if (!authoringSession || authoringSession.stage !== 'draft') return false;
-  const calledDraftTool = toolCalls.some((tc) => ['start_program_draft', 'create_program_draft', 'update_authoring_draft', 'validate_program_draft', 'request_commit_approval'].includes(tc.name));
-  if (!calledDraftTool) return false;
-  return toolResults.some((item) => /Draft validation 失败|validation: failed|Program Draft validation 失败|update_authoring_draft/.test(toolContentPreview(item.content)));
-}
-
-function createDraftRepairDirective(authoringSession) {
-  const draft = [...(authoringSession?.artifacts || [])].reverse().find((item) => item.type === 'program_draft' || item.type === 'skill_draft');
-  const artifactId = draft?.id || '(latest)';
-  const errors = (draft?.validation?.errors || []).slice(0, 12).map((item) => `- ${item}`).join('\n');
-  return [
-    '[AUTHORING_REPAIR_REQUIRED]',
-    '上一轮 Draft validation 失败，本轮不能结束、不能请求用户手动修复、不能整份重建。',
-    `必须立即调用 update_authoring_draft 修复现有 artifact: ${artifactId}。`,
-    '只替换 validation errors 涉及的文件/字段，保留已有正确 UI artifact 和其它文件。',
-    errors ? `当前 validation errors:\n${errors}` : '',
-  ].filter(Boolean).join('\n');
+  return text.length > 5000 ? `${text.slice(0, 5000)}\n...(tool_result 已裁剪，原 ${text.length} 字符)` : content;
 }
 
 function compactMessages(messages) {
@@ -411,9 +345,9 @@ function formatOrphanToolResultAsText(block = {}) {
   const id = String(block.tool_use_id || '').trim();
   const content = toolContentPreview(block.content || block.text || '').trim();
   return [
-    '[RUNTIME_OBSERVATION]',
-    id ? `orphan_tool_result_id=${id}` : '',
-    content || '(empty observation)',
+    'Previous tool result was detached from its tool call.',
+    id ? `tool_result_id=${id}` : '',
+    content || '(empty result)',
   ].filter(Boolean).join('\n');
 }
 
@@ -430,7 +364,7 @@ function repairDanglingToolUseMessages(messages) {
     const syntheticResults = missing.map((id) => ({
       type: 'tool_result',
       tool_use_id: id,
-      content: '[系统恢复] 上轮工具结果在暂停或断线前未写入上下文，已补齐占位结果；请基于当前 Authoring Session 和 validation errors 继续。',
+      content: 'Previous tool call result is unavailable because the session was interrupted before it was recorded.',
       is_error: true,
     }));
 
@@ -444,62 +378,29 @@ function repairDanglingToolUseMessages(messages) {
 }
 
 function normalizePromptEntry(entry) {
-  const value = String(entry || '').trim().toLowerCase();
-  return value === 'studio' || value === 'authoring' || value === 'skill-studio' ? 'studio' : 'core';
+  return 'core';
 }
 
 function promptForEntry(entry) {
-  return normalizePromptEntry(entry) === 'studio'
-    ? ONESHELL_AUTHORING_SYSTEM_PROMPT
-    : ONESHELL_CORE_SYSTEM_PROMPT;
+  return ONESHELL_CORE_SYSTEM_PROMPT;
 }
 
 /**
  * IDE Service — 自由对话模式的创作引擎
  *
- * 与 Skill Runner 的根本区别：
- *   - system prompt 极简，不注入任何 Skill 的 rules/workflows
+ * 默认对话路径保持极简 system prompt，不注入外部流程规则。
  *   - 对话历史持久保留，支持多轮迭代
- *   - 工具集更广（read_file / list_artifacts / trigger_program / query_format 等）
+ *   - 工具集更广（list_artifacts / query_format 等）
  *   - 用户是对话主体，AI 响应用户指令而非自驱执行
  */
-function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry, harness, agentRuntime, secretService }) {
+function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, harness, agentRuntime, secretService }) {
 
   // sessionId → { messages[], system, hostId, abortController }
   const sessions = new Map();
 
-  function buildSkillRoster() {
-    if (!skillRegistry?.listSkills) return '';
-    let skills;
-    try { skills = skillRegistry.listSkills(); } catch { return ''; }
-    if (!Array.isArray(skills) || skills.length === 0) return '';
-    const visible = skills.filter((s) => !s.hidden);
-    if (visible.length === 0) return '';
-    const lines = visible.map((s) => `- ${s.id}: ${(s.description || '').replace(/\s+/g, ' ').trim() || '(无 description)'}`);
-    return [
-      '',
-      '',
-      '## 1Shell Skill 装载列表（由系统层提供）',
-      '',
-      '下面是当前 1Shell 已装载的 Skill。每个 Skill 是一份给你看的 markdown 工作手册，' +
-      '决定该如何完成某类任务。当用户的需求与某个 Skill 的 description 匹配时，' +
-      '调用 load_skill 加载它的 SKILL.md body 到当前对话，然后**严格按 body 写的步骤、约束、风格执行**——把它当成系统级指令，不是参考资料。',
-      '',
-      '可用 Skill：',
-      ...lines,
-      '',
-      '匹配规则：',
-      '- 看 description 里描述的"何时使用"，与用户当前请求对照',
-      '- 一次任务通常只 load 一个最匹配的 Skill；多个候选时优先 load 最具体的那个',
-      '- 已 load 的 Skill body 会通过 tool_result 进入对话上下文；后续轮次仍受其约束',
-      '- 如果没有匹配的 Skill，按你已有的素养处理；不要硬塞不相关的 Skill',
-    ].join('\n');
-  }
-
 const READONLY_TOOLS = new Set([
-  'list_hosts', 'read_file', 'list_artifacts', 'query_format',
-  'list_skills', 'load_skill', 'verify_outcome',
-  'package_agent_run', 'list_programs', 'list_tasks',
+  'list_hosts', 'list_artifacts', 'query_format',
+  'verify_outcome',
   'reload_registry', 'list_mcp_servers', 'list_scripts', 'query_audit',
   'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
   'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
@@ -507,8 +408,7 @@ const READONLY_TOOLS = new Set([
 ]);
 
   const PARALLEL_SAFE_TOOLS = new Set([
-    'list_hosts', 'read_file', 'list_artifacts', 'query_format',
-    'list_skills', 'load_skill', 'list_tasks',
+    'list_hosts', 'list_artifacts', 'query_format',
     'list_mcp_servers', 'list_scripts', 'query_audit',
     'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
     'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
@@ -516,13 +416,11 @@ const READONLY_TOOLS = new Set([
   ]);
 
   const SIDE_EFFECT_TOOLS = new Set([
-    'execute_command', 'write_file', 'write_program', 'create_task', 'write_task', 'run_skill', 'trigger_program', 'trigger_task',
+    'execute_command',
     'reload_registry', 'add_mcp_server', 'remove_mcp_server', 'deploy_local_mcp',
-    'create_program_draft', 'create_skill_draft', 'update_authoring_draft',
-    'commit_authoring_artifact', 'verify_authoring_artifact',
   ]);
 
-const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outcome', 'package_agent_run']);
+const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outcome']);
 
   function makeAbortError(message = 'Cancelled') {
     const err = new Error(message);
@@ -703,7 +601,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
 
   function toolRequiresVerification(toolName, input = {}) {
     const name = String(toolName || '').trim();
-    if (name === 'package_agent_run') return input?.write === true;
     if (!name || AGENT_CONTROL_TOOLS.has(name)) return false;
     if (SIDE_EFFECT_TOOLS.has(name)) return true;
     if (READONLY_TOOLS.has(name)) return false;
@@ -736,22 +633,18 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     });
   }
 
-  function sourceForEntry(entry) {
-    return normalizePromptEntry(entry) === 'studio' ? 'studio' : 'ide';
-  }
-
-  function startIdeAgentRun({ session, sessionId, runId, message, context, entry, tools = [], claudeCodeEnabled, legacyFlags = {}, taskProfile = null }) {
+  function startIdeAgentRun({ session, sessionId, runId, message, context, entry, tools = [], claudeCodeEnabled, legacyFlags = {}, goalProfile = null }) {
     if (!agentRuntime?.startRun) throw new Error('Agent runtime 未初始化，1Shell AI 无法启动 AgentRun');
     try {
-      const source = sourceForEntry(entry);
-      const policy = createIdeAgentPolicy({ tools, entry, remotePolicy: session?.toolPolicy, taskProfile });
+      const source = 'ide';
+      const policy = createIdeAgentPolicy({ tools, entry, remotePolicy: session?.toolPolicy, goalProfile });
       const state = agentRuntime.startRun({
         source,
         goal: String(message || '').trim(),
         context: {
           ...redactAgentTraceValue(context),
           hostId: session?.hostId || context?.hosts?.[0]?.id || 'local',
-          taskProfile,
+          goalProfile,
         },
         tools: tools.map((tool) => ({ name: tool.name, type: 'ide' })),
         policy,
@@ -766,14 +659,14 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
           claudeCodeEnabled: !!claudeCodeEnabled,
           legacySafeMode: legacyFlags.safeMode,
           legacyUnlimitedTurns: legacyFlags.unlimitedTurns,
-          taskProfile,
+          goalProfile,
           tracePurpose: 'agent_run_is_the_runtime_owner_for_all_1shell_ai_behavior',
         },
       }, { runId });
       session.agentRunId = state.runId;
       session.agentPolicy = policy;
       writeIdeAgentLedger(state.runId, { phase: 'understand' });
-      recordIdeAgentPhase(state.runId, 'understand', 'AgentRun started; understanding task and available policy.');
+      recordIdeAgentPhase(state.runId, 'understand', 'AgentRun started; understanding goal and available policy.');
       return state;
     } catch (err) {
       logger?.warn?.(`[ide] failed to start AgentRun trace: ${err.message}`);
@@ -806,7 +699,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     try {
       const outcome = evaluateAgentRunOutcome(safeGetIdeAgentState(runId), { fallbackTaskStatus: fallback });
       const status = String(outcome?.taskStatus || fallback || 'unverified').trim();
-      if (['verified', 'failed', 'blocked', 'unverified'].includes(status)) return status;
+      if (['verified', 'failed', 'blocked', 'unverified', 'partial'].includes(status)) return status;
       return 'unverified';
     } catch (err) {
       logger?.warn?.(`[ide] failed to evaluate AgentRun outcome: ${err.message}`);
@@ -830,7 +723,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     const forcedTaskStatus = String(meta.forcedTaskStatus || '').trim();
     const finalStatus = ['verified', 'failed', 'blocked', 'unverified', 'partial'].includes(forcedTaskStatus)
       ? forcedTaskStatus
-      : (['verified', 'failed', 'blocked', 'unverified'].includes(String(outcome.taskStatus || '')) ? outcome.taskStatus : 'unverified');
+      : (['verified', 'failed', 'blocked', 'unverified', 'partial'].includes(String(outcome.taskStatus || '')) ? outcome.taskStatus : 'unverified');
     const aiText = textParts.length > 0 ? textParts.join('').slice(0, 1000) : '';
     const existingSummary = Array.isArray(existing?.summary) ? existing.summary : [];
     const summary = [...existingSummary, ...(aiText ? [aiText] : [])].filter(Boolean).slice(-6);
@@ -956,7 +849,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       const state = agentRuntime.getState(runId);
       const verdict = canUseTool(state, tc.name);
       if (verdict.allow) {
-        const profileVerdict = evaluateIdeAgentProfileToolUse(session?.agentTaskProfile || state?.spec?.policy?.taskProfile, tc.name, tc.input || {});
+        const profileVerdict = evaluateIdeAgentProfileToolUse(session?.agentGoalProfile || state?.spec?.policy?.goalProfile, tc.name, tc.input || {});
         if (profileVerdict.allow) return null;
         recordTraceEvent('policy', 'tool_denied', {
           source: 'ide',
@@ -1266,7 +1159,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
 
   function ensureSessionCancellation(session) {
     if (!session.cancelHandlers) session.cancelHandlers = new Set();
-    if (!session.activeSkillRunIds) session.activeSkillRunIds = new Set();
   }
 
   function registerCancelHandler(session, handler) {
@@ -1299,8 +1191,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     switch (tc.name) {
       case 'execute_command':
         return { title: '执行命令', detail: `主机: ${input.hostId || 'local'}\n命令: ${input.command || ''}` };
-      case 'write_file':
-        return { title: '写入文件', detail: `路径: ${input.path || ''}\n内容: ${(input.content || '').substring(0, 300)}` };
       case 'create_directory':
         return { title: '创建目录', detail: `主机: ${input.hostId || 'local'}\n路径: ${input.path || ''}` };
       case 'delete_path':
@@ -1459,7 +1349,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
               toolUseId: tc.id,
               name: tc.name,
               result: toolContentPreview(result?.content || '').substring(0, 4000),
-              is_error: result?.is_error === true,
+              is_error: isIdeToolResultError(result),
             });
           }
         }
@@ -1478,15 +1368,61 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       const id = String(observation.id || observation.toolCallId || '').trim();
       if (id && session.controllerObservationIds.has(id)) continue;
       if (id) session.controllerObservationIds.add(id);
-      blocks.push(observationToProviderMessageBlock(observation, { providerToolUseIds }));
+      const block = observationToProviderMessageBlock(observation, { providerToolUseIds });
+      if (block) blocks.push(block);
     }
     if (blocks.length > 0) session.messages.push({ role: 'user', content: blocks });
   }
 
+  // Normalize a Harness dispatchTool result into an observation the streaming adapter can
+  // feed back to the model as a tool_result on the next turn.
+  function normalizeIdeToolObservation(toolCall = {}, result = {}) {
+    const raw = result?.raw && typeof result.raw === 'object' ? result.raw : {};
+    const contentText = toolContentPreview(result.content || '');
+    const facts = extractToolResultFacts(result, raw, contentText);
+    const exitCode = firstFiniteNumber(raw.exitCode, result.exitCode, facts.exitCode);
+    const isError = result.is_error === true
+      || result.isError === true
+      || facts.ok === false
+      || facts.isError === true
+      || (typeof exitCode === 'number' && exitCode !== 0);
+    const stdout = String(raw.stdout || result.stdout || facts.stdout || '');
+    const stderr = String(raw.stderr || result.stderr || facts.stderr || '');
+    return {
+      id: toolCall.id,
+      providerToolUseId: toolCall.id,
+      toolName: toolCall.toolName,
+      ok: !isError,
+      isError,
+      exitCode,
+      content: contentText || facts.summary || stdout || stderr || '',
+      stdout,
+      stderr,
+      summary: facts.summary || '',
+      error: String(result.error || facts.error || (isError ? facts.summary : '') || '').slice(0, 1000),
+    };
+  }
+
+  function isIdeToolResultError(result = {}) {
+    const raw = result?.raw && typeof result.raw === 'object' ? result.raw : {};
+    const contentText = toolContentPreview(result?.content || '');
+    const facts = extractToolResultFacts(result || {}, raw, contentText);
+    const exitCode = firstFiniteNumber(raw.exitCode, result?.exitCode, facts.exitCode);
+    return result?.is_error === true
+      || result?.isError === true
+      || facts.ok === false
+      || facts.isError === true
+      || (typeof exitCode === 'number' && exitCode !== 0);
+  }
+
   function observationToProviderMessageBlock(observation = {}, { providerToolUseIds = new Set() } = {}) {
+    if (isRuntimeOnlyObservation(observation)) {
+      const runtimeText = runtimeObservationTextForProvider(observation);
+      return runtimeText ? { type: 'text', text: runtimeText } : null;
+    }
     const content = compactToolResultForModel(
       observation.toolName || observation.kind || 'observation',
-      observation.content || observation.stdout || observation.stdoutExcerpt || observation.stderr || observation.stderrExcerpt || observation.error || '',
+      formatObservationContentForProvider(observation),
     );
     const toolUseId = providerToolUseIdForObservation(observation, providerToolUseIds);
     if (toolUseId) {
@@ -1501,6 +1437,104 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       type: 'text',
       text: toolContentPreview(content) || String(observation.content || observation.error || ''),
     };
+  }
+
+  function firstFiniteNumber(...values) {
+    for (const value of values) {
+      if (value === undefined || value === null || value === '') continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+    }
+    return undefined;
+  }
+
+  function extractToolResultFacts(result = {}, raw = {}, contentText = '') {
+    const facts = {};
+    mergeToolFactSource(facts, result);
+    mergeToolFactSource(facts, raw);
+    const parsed = parseToolResultJson(contentText);
+    if (parsed) {
+      mergeToolFactSource(facts, parsed);
+      if (parsed.data && typeof parsed.data === 'object' && !Array.isArray(parsed.data)) {
+        mergeToolFactSource(facts, parsed.data);
+      }
+    }
+    if (facts.exitCode === undefined) {
+      const match = String(contentText || '').match(/(?:\[exitCode\]|exitCode|exit_code)\s*[:=\]]?\s*(-?\d+)/i);
+      if (match) facts.exitCode = Number(match[1]);
+    }
+    if (facts.ok === undefined && /"ok"\s*:\s*false/i.test(String(contentText || ''))) facts.ok = false;
+    if (facts.ok === undefined && /"ok"\s*:\s*true/i.test(String(contentText || ''))) facts.ok = true;
+    if (facts.isError === undefined && /^\s*\[ERROR\]/i.test(String(contentText || ''))) facts.isError = true;
+    if (!facts.error && facts.isError) facts.error = facts.summary || String(contentText || '').slice(0, 1000);
+    return facts;
+  }
+
+  function mergeToolFactSource(target, source = {}) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return;
+    if (typeof source.ok === 'boolean') target.ok = source.ok;
+    if (typeof source.isError === 'boolean') target.isError = source.isError;
+    if (typeof source.is_error === 'boolean') target.isError = source.is_error;
+    const exitCode = firstFiniteNumber(source.exitCode, source.exit_code);
+    if (exitCode !== undefined) target.exitCode = exitCode;
+    if (!target.summary && source.summary !== undefined) target.summary = String(source.summary || '');
+    if (!target.error && source.error !== undefined) target.error = String(source.error || '');
+    if (!target.stdout && source.stdout !== undefined) target.stdout = String(source.stdout || '');
+    if (!target.stderr && source.stderr !== undefined) target.stderr = String(source.stderr || '');
+  }
+
+  function parseToolResultJson(contentText = '') {
+    const text = String(contentText || '').trim();
+    if (!text.startsWith('{') || !text.endsWith('}')) return null;
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function formatObservationContentForProvider(observation = {}) {
+    const body = toolContentPreview(
+      observation.content
+      || observation.stdout
+      || observation.stdoutExcerpt
+      || observation.stderr
+      || observation.stderrExcerpt
+      || observation.error
+      || '',
+    ).trim();
+    const lines = [
+      observation.toolName ? `tool=${observation.toolName}` : '',
+      observation.ok === true ? 'ok=true' : (observation.ok === false || observation.isError === true ? 'ok=false' : ''),
+      observation.isError === true ? 'is_error=true' : '',
+      Number.isFinite(Number(observation.exitCode)) ? `exitCode=${Number(observation.exitCode)}` : '',
+      observation.error ? `error=${String(observation.error).slice(0, 1000)}` : '',
+      observation.summary ? `summary=${String(observation.summary).slice(0, 1000)}` : '',
+    ].filter(Boolean);
+    if (lines.length === 0) return body;
+    return [lines.join('\n'), body].filter(Boolean).join('\n\n');
+  }
+
+  function runtimeObservationTextForProvider(observation = {}) {
+    const kind = String(observation.kind || observation.type || '').trim();
+    const toolName = String(observation.toolName || observation.tool_name || '').trim();
+    if (kind !== 'interrupt_resolution' && toolName !== 'agent_interrupt') return '';
+    const data = observation.data && typeof observation.data === 'object' && !Array.isArray(observation.data) ? observation.data : {};
+    const resolution = data.resolution && typeof data.resolution === 'object' && !Array.isArray(data.resolution) ? data.resolution : {};
+    const lines = ['User input received for the interrupted run.'];
+    const status = String(data.status || resolution.status || '').trim();
+    if (status) lines.push(`status=${status}`);
+    const reason = String(resolution.reason || observation.error || '').trim();
+    if (reason) lines.push(`reason=${reason.slice(0, 1000)}`);
+    const note = String(resolution.note || '').trim();
+    if (note) lines.push(`note=${note.slice(0, 1000)}`);
+    if (resolution.answers && typeof resolution.answers === 'object' && !Array.isArray(resolution.answers)) {
+      try {
+        lines.push(`answers=${JSON.stringify(redactAgentTraceValue(resolution.answers)).slice(0, 2000)}`);
+      } catch { /* ignore malformed answers */ }
+    }
+    return lines.filter(Boolean).join('\n');
   }
 
   function providerToolUseIdForObservation(observation = {}, providerToolUseIds = new Set()) {
@@ -1521,7 +1555,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     const toolName = String(observation.toolName || observation.tool_name || '').trim();
     return kind.startsWith('runtime_')
       || ['recover', 'verify', 'interrupt_resolution'].includes(kind)
-      || ['agent_controller', 'agent_final_gate', 'agent_recovery_planner', 'agent_interrupt'].includes(toolName);
+      || ['agent_controller', 'agent_interrupt'].includes(toolName);
   }
 
   function createIdeStreamingModelAdapter({ socket, sessionId, runId, session, model, proxyUrl, agentTools, context }) {
@@ -1536,8 +1570,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         sanitizeProviderMessageHistory(session.messages);
         repairDanglingToolUseMessages(session.messages);
         const compactedMessages = compactMessages(session.messages);
-        const skillRoster = buildSkillRoster();
-        const baseSystem = session.system + skillRoster;
+        const baseSystem = session.system;
         const apiBody = JSON.stringify({
           model,
           max_tokens: 8192,
@@ -1640,9 +1673,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
             if (retryErr.name === 'AbortError' && session.cancelled) throw retryErr;
             const isRetryable = wasTimeout || isTransientProviderError(retryErr);
             if (!isRetryable || attempt >= MAX_PROVIDER_TRANSIENT_RETRIES) throw retryErr;
-            if (isRunCurrent(session, runId)) {
-              emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: `\n[${wasTimeout ? '超时 240 秒' : '连接中断'}，第 ${attempt + 1} 次重试...]\n` });
-            }
             await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
           }
         }
@@ -1651,20 +1681,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         if (isAbortError(err)) throw err;
         if (isTransientProviderError(err) && providerTransientRetryCount < 1) {
           providerTransientRetryCount += 1;
-          const retryMessage = `[PROVIDER_TRANSIENT_RETRY]\n上游 Provider 暂时失败：${String(err.message || err).slice(0, 500)}`;
-          session.messages.push({ role: 'user', content: retryMessage });
           if (isRunCurrent(session, runId)) {
-            emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: '\n[上游 Provider 暂时失败，已保留上下文并自动续跑一次...]\n' });
-            emitToSession(session, socket, 'ide:thinking', { sessionId, runId });
-          }
-          return ideStreamingModelAdapter(request);
-        }
-        if (isTransientProviderError(err) && providerTransientRetryCount < 1) {
-          providerTransientRetryCount += 1;
-          const retryMessage = `[PROVIDER_TRANSIENT_RETRY]\n上游 Provider 暂时失败：${String(err.message || err).slice(0, 500)}`;
-          session.messages.push({ role: 'user', content: retryMessage });
-          if (isRunCurrent(session, runId)) {
-            emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: '\n[上游 Provider 暂时失败，已保留上下文并自动续跑一次...]\n' });
             emitToSession(session, socket, 'ide:thinking', { sessionId, runId });
           }
           return ideStreamingModelAdapter(request);
@@ -1678,7 +1695,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       const textParts = data.content.filter(b => b.type === 'text').map(b => b.text);
       const toolCalls = data.content.filter(b => b.type === 'tool_use');
       for (const tc of toolCalls) {
-        tc.input = normalizeIdeAgentToolInput(session.agentTaskProfile, tc.name, tc.input || {});
+        tc.input = normalizeIdeAgentToolInput(session.agentGoalProfile, tc.name, tc.input || {});
       }
       if (textParts.length > 0) {
         const fullText = textParts.join('');
@@ -1723,7 +1740,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     const requiredDirectToolByInternalTool = {
       execute_command: 'host_exec',
       list_hosts: 'list_hosts',
-      list_tasks: 'list_programs',
       list_remote_dir: 'list_remote_dir',
       read_remote_file: 'read_remote_file',
       write_remote_file: 'write_remote_file',
@@ -1738,8 +1754,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       return deniedByPolicy(`Remote MCP Token 不允许 1Shell AI 使用能力: ${directTool}`);
     }
     const writeTools = new Set([
-      'execute_command', 'write_file', 'write_program', 'create_task', 'run_skill', 'trigger_program',
-      'write_task', 'trigger_task',
+      'execute_command',
       'run_script', 'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
       'upload_file', 'download_file', 'add_mcp_server',
       'remove_mcp_server', 'deploy_local_mcp', 'ack_probe_alert', 'install_probe_agent',
@@ -1753,10 +1768,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     }
     const hostFieldsByTool = {
       execute_command: ['hostId'],
-      run_skill: ['hostId'],
       run_script: ['hostId'],
-      trigger_program: ['hostId'],
-      trigger_task: ['hostId'],
       list_remote_dir: ['hostId'],
       read_remote_file: ['hostId'],
       write_remote_file: ['hostId'],
@@ -1934,10 +1946,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         parts.push('**MCP Server**：');
         for (const s of context.mcpServers) parts.push(`  - \`${s.name}\` → ${s.url}`);
       }
-      if (context.skills?.length > 0) {
-        parts.push('**用户选择的 Skill**（可通过 read_file 读取其内容，通过 execute_command 在目标主机执行）：');
-        for (const s of context.skills) parts.push(`  - \`${s.id}\` · ${s.name}`);
-      }
       if (parts.length > 0) contextBlock = parts.join('\n') + '\n\n';
     }
 
@@ -1950,7 +1958,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       hostId: context?.hosts?.[0]?.id || 'local',
       abortController: null,
       activeChildProcess: null,
-      activeSkillRunIds: new Set(),
       cancelHandlers: new Set(),
       cancelNotified: false,
       cancelled: false,
@@ -1964,7 +1971,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       claudeCodeEnabled: false,
       toolPolicy: context?.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null,
       agentPolicy: null,
-      agentTaskProfile: null,
+      agentGoalProfile: null,
       finalizationRepairRounds: 0,
     };
     sessions.set(sessionId, session);
@@ -1996,8 +2003,8 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       session.claudeCodeEnabled = !!claudeCodeEnabled;
     }
 
-    const agentTaskProfile = createIdeAgentTaskProfile({ message, context, entry });
-    session.agentTaskProfile = agentTaskProfile;
+    const agentGoalProfile = createIdeAgentGoalProfile({ message, context, entry });
+    session.agentGoalProfile = agentGoalProfile;
     session.finalizationRepairRounds = 0;
 
     const { allTools, mcpToolMap } = buildIdeToolCatalog(session);
@@ -2010,10 +2017,10 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       entry,
       tools: allTools,
       claudeCodeEnabled: session.claudeCodeEnabled,
-      taskProfile: agentTaskProfile,
+      goalProfile: agentGoalProfile,
       legacyFlags: ignoredLegacyFlags,
     });
-    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry, remotePolicy: session.toolPolicy, taskProfile: agentTaskProfile });
+    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry, remotePolicy: session.toolPolicy, goalProfile: agentGoalProfile });
     const agentTools = filterToolsForAgent(allTools, agentPolicy);
 
     sanitizeProviderMessageHistory(session.messages);
@@ -2049,154 +2056,69 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
 
     logger?.debug?.(`[ide] Agent tool catalog exposed (${agentTools.length}/${allTools.length} allowed by policy)`);
 
-    const AGENT_CONTROLLER_MAX_TURNS = resolveNullablePositiveInteger(agentPolicy.maxTurns);
-    const MAX_TOOL_ROUNDS = AGENT_CONTROLLER_MAX_TURNS || 128;
-    let round = 0;
-    let providerTransientRetryCount = 0;
-    let authoringDraftRepairRounds = 0;
+    const MAX_TOOL_ROUNDS = resolveNullablePositiveInteger(agentPolicy.maxTurns) || 128;
 
-    const runRuntimeVerifierPlanForIde = async (gateReason = 'ide_final_gate') => {
-      const verifierAc = new AbortController();
-      const unregisterVerifierCancel = registerCancelHandler(session, () => verifierAc.abort());
-      const dispatchOptionsForVerifier = createIdeRuntimeDispatchOptions({ socket, sessionId, runId, session, mcpToolMap });
-      const verifierDispatchOptions = dispatchOptionsForVerifier({
-        action: { id: `runtime-verifier-${Date.now()}`, toolName: 'verify_outcome', args: { hostId: session.hostId || 'local' } },
-        verifier: true,
-      });
-      try {
-        return await runVerifierPlan({
-          runtime: agentRuntime,
-          runId,
-          hostId: session.hostId || 'local',
-          inputs: context?.inputs || {},
-          executeTool: verifierDispatchOptions.executeTool,
-          requestApproval: verifierDispatchOptions.requestApproval,
-          signal: verifierAc.signal,
-          reason: gateReason,
-        });
-      } finally {
-        unregisterVerifierCancel();
+    const modelAdapter = createIdeStreamingModelAdapter({ socket, sessionId, runId, session, model, proxyUrl, agentTools, context });
+    const dispatchOptionsForAction = createIdeRuntimeDispatchOptions({ socket, sessionId, runId, session, mcpToolMap });
+
+    try {
+      let observations = [];
+      let lastResult = null;
+      let round = 0;
+      for (; round < MAX_TOOL_ROUNDS; round++) {
+        throwIfStopped(session, runId);
+        recordIdeAgentTurn(runId, round + 1, { status: 'running', stage: observations.length > 0 ? 'observe' : 'decide' });
+        lastResult = await modelAdapter({ runId, turn: round + 1, observations });
+        const toolCalls = Array.isArray(lastResult?.toolCalls) ? lastResult.toolCalls : [];
+        if (toolCalls.length === 0) break; // model produced a final answer (end_turn)
+        observations = [];
+        for (const tc of toolCalls) {
+          throwIfStopped(session, runId);
+          const extra = dispatchOptionsForAction({ action: { id: tc.id, toolName: tc.toolName, args: tc.args, options: {} } });
+          const dispatched = await agentRuntime.dispatchTool(runId, tc.toolName, tc.args || {}, extra);
+          observations.push(normalizeIdeToolObservation(tc, dispatched));
+        }
       }
-    };
 
-    const legacyLoopRequested = context?.legacyIdeLoop === true || context?.agentControllerLoop === false;
-    if (legacyLoopRequested) {
-      recordIdeAgentObservation(runId, {
-        kind: 'runtime_policy',
-        stage: 'observe',
-        toolName: 'agent_controller',
-        ok: true,
-        content: 'Legacy IDE loop flags were ignored; AgentRunController remains the only IDE AI execution loop.',
-        data: {
-          legacyIdeLoop: context?.legacyIdeLoop === true,
-          agentControllerLoop: context?.agentControllerLoop,
-          ignored: true,
-        },
-      });
-      recordTraceEvent('policy', 'legacy_agent_loop_ignored', {
-        source: 'ide',
-        runId,
+      const finalResult = buildIdeFinalResult(runId, [lastResult?.text || lastResult?.report || lastResult?.content || ''], {
         sessionId,
-        hostId: session.hostId,
-        toolName: 'agent_controller',
-        summary: 'Ignored legacy IDE loop flags and kept AgentRunController ownership.',
+        round,
+        entry: session.entry,
       });
-    }
-    const useControllerDrivenLoop = true;
-    if (useControllerDrivenLoop) {
-      try {
-        const modelAdapter = createIdeStreamingModelAdapter({
-          socket,
-          sessionId,
-          runId,
-          session,
-          model,
-          proxyUrl,
-          agentTools,
-          context,
-        });
-        const dispatchOptionsForAction = createIdeRuntimeDispatchOptions({
-          socket,
-          sessionId,
-          runId,
-          session,
-          mcpToolMap,
-        });
-        const turnLoop = await runAgentControllerLoop({
-          runtime: agentRuntime,
-          runId,
-          initial: agentRuntime.getState?.(runId) || agentState,
-          modelAdapter,
-          maxTurns: AGENT_CONTROLLER_MAX_TURNS,
-          dispatchOptionsForAction,
-          additionalFinalGates: [
-            ({ state, finalText: candidateText, repairCount }) => evaluateIdeAgentFinalTurn({
-              taskProfile: session.agentTaskProfile,
-              state,
-              ledger: readIdeAgentLedger(runId),
-              text: candidateText,
-              repairCount,
-            }),
-          ],
-        });
-        if (turnLoop.interrupt) {
-          recordIdeAgentPhase(runId, 'context', `AgentRun interrupted: ${turnLoop.interrupt.reason || turnLoop.interrupt.type || 'interrupt'}`);
-          return;
-        }
-        const finalGate = turnLoop.finalGate || { reasons: [] };
-        const finalResult = buildIdeFinalResult(runId, [turnLoop.result?.text || turnLoop.result?.report || turnLoop.result?.content || ''], {
-          sessionId,
-          round: turnLoop.turns?.length || 0,
-          entry: session.entry,
-          forcedTaskStatus: finalGate.forcedStatus || '',
-          finalGateReasons: finalGate.reasons || [],
-          controllerAction: finalGate.forcedStatus === 'blocked' ? 'blocked' : 'finalize',
-          controllerLoop: true,
-        });
-        if (isRunCurrent(session, runId)) {
-          emitToSession(session, socket, 'ide:done', {
-            sessionId,
-            runId,
-            round: turnLoop.turns?.length || 0,
-            taskStatus: finalResult.taskStatus || 'unverified',
-          });
-        }
-        recordIdeAgentPhase(runId, 'result', `Final outcome: ${finalResult.taskStatus || 'unverified'}`, { status: 'done', evidence: finalResult.data?.outcomeReasons || [] });
-        endIdeAgentRun(runId, {
-          runnerStatus: turnLoop.runnerStatus || 'completed',
-          taskStatus: finalResult.taskStatus || 'unverified',
-          result: finalResult,
-        });
-        return;
-      } catch (err) {
-        if (isAbortError(err)) {
-          recordTraceEvent('runtime', 'run_aborted', {
-            source: 'ide',
-            runId,
-            sessionId,
-            hostId: session.hostId,
-            toolName: 'agent_run',
-            summary: err.message || 'agent run aborted',
-            data: { cancelled: !!session.cancelled, code: err.code || '', name: err.name || '' },
-          });
-          if (session.currentRunId === runId) emitCancelledOnce(session, sessionId, socket);
-          cancelIdeAgentRun(runId, err.message || 'cancelled');
-          return;
-        }
-        logger?.error?.('IDE controller loop failed', { sessionId, error: err.message });
-        recordTraceEvent('runtime', 'run_failed', {
+      if (isRunCurrent(session, runId)) {
+        emitToSession(session, socket, 'ide:done', { sessionId, runId, round, taskStatus: finalResult.taskStatus || 'unverified' });
+      }
+      recordIdeAgentPhase(runId, 'result', `Final outcome: ${finalResult.taskStatus || 'unverified'}`, { status: 'done', evidence: finalResult.data?.outcomeReasons || [] });
+      endIdeAgentRun(runId, { runnerStatus: 'completed', taskStatus: finalResult.taskStatus || 'unverified', result: finalResult });
+      return;
+    } catch (err) {
+      if (isAbortError(err)) {
+        recordTraceEvent('runtime', 'run_aborted', {
           source: 'ide',
           runId,
           sessionId,
           hostId: session.hostId,
           toolName: 'agent_run',
-          summary: err.message || 'agent run failed',
-          data: { name: err.name || '', stack: String(err.stack || '').slice(0, 2000) },
+          summary: err.message || 'agent run aborted',
+          data: { cancelled: !!session.cancelled, code: err.code || '', name: err.name || '' },
         });
-        if (isRunCurrent(session, runId)) emitToSession(session, socket, 'ide:error', { sessionId, runId, error: err.message });
-        endIdeAgentRun(runId, { runnerStatus: 'failed', taskStatus: 'failed', error: err.message });
+        if (session.currentRunId === runId) emitCancelledOnce(session, sessionId, socket);
+        cancelIdeAgentRun(runId, err.message || 'cancelled');
         return;
       }
+      logger?.error?.('IDE agent loop failed', { sessionId, error: err.message });
+      recordTraceEvent('runtime', 'run_failed', {
+        source: 'ide',
+        runId,
+        sessionId,
+        hostId: session.hostId,
+        toolName: 'agent_run',
+        summary: err.message || 'agent run failed',
+        data: { name: err.name || '', stack: String(err.stack || '').slice(0, 2000) },
+      });
+      if (isRunCurrent(session, runId)) emitToSession(session, socket, 'ide:error', { sessionId, runId, error: err.message });
+      endIdeAgentRun(runId, { runnerStatus: 'failed', taskStatus: 'failed', error: err.message });
+      return;
     }
 
   }
@@ -2312,9 +2234,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     }
     for (const handler of [...session.cancelHandlers]) {
       try { handler(); } catch { /* ignore */ }
-    }
-    for (const runId of [...session.activeSkillRunIds]) {
-      try { session.skillRunner?.cancelRun?.(runId); } catch { /* ignore */ }
     }
     if (session.activeChildProcess) {
       try { session.activeChildProcess.kill(); } catch { /* ignore */ }

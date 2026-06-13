@@ -48,7 +48,7 @@ function createHarness({ bridgeService, hostService, auditService, db, logger, s
     recordEvent: trace.recordEvent,
     /**
      * 构造一次调用的上下文。各入口用预设 + 覆盖项拼装。
-     * @param {string} source - 'program-ai' | 'ide' | 'mcp-remote' | 'mcp-local' | 'program-exec'
+     * @param {string} source - 'console-ai' | 'ide-ai' | 'mcp-remote' | 'mcp-local' | 'cli-agent' | 'external-agent'
      * @param {object} overrides
      */
     buildContext(source, overrides = {}) {

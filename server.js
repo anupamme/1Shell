@@ -166,14 +166,10 @@ const skillRunner = createSkillRunner({
     try { libraryService.reload(); } catch { /* ignore */ }
   },
 });
-// ─── Program Engine (长驻程序) ───────────────────────────────────────────
-// Program Engine 与 Task Packager 已随 Program/Task 系统移除。
 // ─── IDE Service (自由创作引擎) ─────────────────────────────────────────
 const ideTools = createIdeTools({
   bridgeService,
   hostService,
-  skillRegistry: libraryService,
-  skillRunner,
   auditService,
   mcpRegistry,
   localMcpService,
@@ -190,9 +186,6 @@ const ideTools = createIdeTools({
   dataDir,
   cliSandbox,
   harness,
-  onFileWritten: () => {
-    try { libraryService.reload(); } catch { /* ignore */ }
-  },
 });
 const ideService = createIdeService({
   ideTools,

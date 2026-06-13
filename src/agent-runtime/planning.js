@@ -122,7 +122,7 @@ function buildPreDecisionPlan(state = {}, { turn = null, observations = [] } = {
   if ((Array.isArray(world.sideEffects) ? world.sideEffects : []).some((item) => item?.requiresVerification && item?.verified !== true)) evidenceNeeded.push('side_effect_verification');
   return {
     status: failures.length > 0 ? 'needs_recovery' : 'planning',
-    intent: failures.length > 0 ? 'recover_before_next_action' : 'choose_next_agent_action',
+    intent: failures.length > 0 ? 'open_failure_recorded' : 'await_model_decision',
     objective: state.goal || state.spec?.goal || '',
     turn,
     steps: [
@@ -130,13 +130,13 @@ function buildPreDecisionPlan(state = {}, { turn = null, observations = [] } = {
         id: `turn-${turn || 'next'}-observe`,
         status: observations.length > 0 ? 'done' : 'pending',
         kind: 'observe',
-        summary: observations.length > 0 ? `Process ${observations.length} new observation(s).` : 'Use current runtime world state.',
+        summary: observations.length > 0 ? `Observed ${observations.length} new result(s).` : 'No new observation in this turn.',
       },
       {
         id: `turn-${turn || 'next'}-decide`,
         status: 'pending',
         kind: failures.length > 0 ? 'recover' : 'decide',
-        summary: failures.length > 0 ? 'Select a concrete recovery action or block with evidence.' : 'Select action, verification, user input, or finalization.',
+        summary: failures.length > 0 ? 'Open failure before next model decision.' : 'Model decision pending.',
       },
     ],
     blockers: [
@@ -211,7 +211,7 @@ function buildObservationPlanUpdate(observations = [], { turn = null, state = {}
 
 function buildRecoveryPolicyUpdate(recovery = {}, { state = {} } = {}) {
   const current = state?.runtimeState?.recovery || {};
-  const verifierPlan = recovery?.observation?.data?.verifierPlan || state?.runtimeState?.verifier || {};
+  const verifierPlan = recovery?.data?.verifierPlan || state?.runtimeState?.verifier || {};
   const failedObservationIds = Array.isArray(recovery?.observations)
     ? recovery.observations.map((item) => item?.id).filter(Boolean)
     : [];
@@ -228,12 +228,8 @@ function buildRecoveryPolicyUpdate(recovery = {}, { state = {} } = {}) {
     reason: recovery.reason || '',
     failedToolNames: recovery.failedToolNames || [],
     failedObservationIds,
-    strategy: recovery.recoveryType === 'verification_repair'
-      ? 'repair_failed_verification_then_verify_again'
-      : 'diagnose_failed_tool_then_retry_alternative_or_block',
-    nextSteps: recovery.recoveryType === 'verification_repair'
-      ? ['inspect_verifier_evidence', 'repair_failed_condition', 'run_verifier_again']
-      : ['inspect_failure_evidence', 'choose_repair_or_alternative_tool', 'observe_result'],
+    strategy: '',
+    nextSteps: [],
     verifierRequired: verifierPlan?.required === true,
   };
 }

@@ -1,10 +1,7 @@
 'use strict';
 
-const { evaluateAgentFinalGate } = require('./final-gate');
 const { runAgentControllerLoop } = require('./controller');
 const { evaluateAgentRunOutcome, normalizeAgentTaskStatus } = require('./outcome');
-const { normalizeModelResult, runModelAdapter } = require('./model-adapter');
-const { renderSkillSystemPrompt, resolveAgentSkills } = require('./skills');
 
 function createAgentRunner(defaults = {}) {
   return {
@@ -19,9 +16,6 @@ async function runAgentTask({
   spec = null,
   runId = '',
   modelAdapter,
-  skillResolver = null,
-  skillRegistry = null,
-  builtins = {},
   verify = null,
   endRun = true,
   runnerStatus = 'completed',
@@ -43,15 +37,11 @@ async function runAgentTask({
   await callHook(onStarted, { state: initial, runId: initial.runId, spec: initial.spec });
 
   try {
-    const skills = await resolveAgentSkills({ spec: initial.spec, skillResolver, skillRegistry, builtins });
-    const skillPrompt = renderSkillSystemPrompt(skills);
     const turnLoop = await runAgentTurnLoop({
       runtime,
       runId: initial.runId,
       initial,
       modelAdapter,
-      skills,
-      skillPrompt,
       maxTurns,
       checkpointTurns,
       interruptOn,
@@ -66,7 +56,6 @@ async function runAgentTask({
         runId: initial.runId,
         state: runtime.getState?.(initial.runId) || initial,
         result,
-        skills,
         turns: turnLoop.turns,
         observations: turnLoop.observations,
       });
@@ -89,7 +78,6 @@ async function runAgentTask({
       state: runtime.getState?.(initial.runId) || state,
       result,
       outcome,
-      skills,
       turns: turnLoop.turns,
       observations: turnLoop.observations,
       interrupt: turnLoop.interrupt,
@@ -109,7 +97,7 @@ async function runAgentTask({
       });
     }
     await callHook(onEnded, { runId: initial.runId, state: runtime.getState?.(initial.runId) || state, result: null, outcome, error: err });
-    logger?.warn?.('[agent-runtime] agent task failed', { runId: initial.runId, error: err.message });
+    logger?.warn?.('[agent-runtime] agent run failed', { runId: initial.runId, error: err.message });
     throw err;
   }
 }
@@ -121,9 +109,6 @@ async function resumeAgentTask({
   interruptId = '',
   resolution = {},
   modelAdapter,
-  skillResolver = null,
-  skillRegistry = null,
-  builtins = {},
   verify = null,
   endRun = true,
   runnerStatus = 'completed',
@@ -150,15 +135,11 @@ async function resumeAgentTask({
 
   try {
     const resumeContext = createResumeContext(resumed.checkpoint, resumed.interrupt, resolution);
-    const skills = await resolveAgentSkills({ spec: initial.spec, skillResolver, skillRegistry, builtins });
-    const skillPrompt = renderSkillSystemPrompt(skills);
     const turnLoop = await runAgentTurnLoop({
       runtime,
       runId: id,
       initial,
       modelAdapter,
-      skills,
-      skillPrompt,
       maxTurns,
       checkpointTurns,
       interruptOn,
@@ -174,7 +155,6 @@ async function resumeAgentTask({
         runId: id,
         state: runtime.getState?.(id) || initial,
         result,
-        skills,
         turns: turnLoop.turns,
         observations: turnLoop.observations,
         resumed,
@@ -198,7 +178,6 @@ async function resumeAgentTask({
       state: runtime.getState?.(id) || state,
       result,
       outcome,
-      skills,
       turns: turnLoop.turns,
       observations: turnLoop.observations,
       interrupt: turnLoop.interrupt,
@@ -229,8 +208,6 @@ async function runAgentTurnLoop({
   runId,
   initial,
   modelAdapter,
-  skills,
-  skillPrompt,
   maxTurns = null,
   checkpointTurns = false,
   interruptOn = null,
@@ -246,8 +223,6 @@ async function runAgentTurnLoop({
     runId,
     initial,
     modelAdapter,
-    skills,
-    skillPrompt,
     maxTurns,
     checkpointTurns,
     interruptOn,
@@ -258,198 +233,6 @@ async function runAgentTurnLoop({
     dispatchOptionsForAction,
     additionalFinalGates,
   });
-  /* legacy loop retained below as reference during the AgentRunController migration */
-  const turnLimit = toPositiveInteger(maxTurns, 1);
-  const startIndex = toNonNegativeInteger(startTurn, normalizeExistingTurns(initialTurns).length);
-  const turns = normalizeExistingTurns(initialTurns);
-  let observations = normalizeObservationArray(initialObservations);
-  let result = null;
-  let interrupt = null;
-  let runnerStatus = '';
-  let finalGate = null;
-  let finalGateRepairCount = 0;
-
-  for (let offset = 0; offset < turnLimit; offset++) {
-    const index = startIndex + offset;
-    const turnNumber = index + 1;
-    const state = runtime.getState?.(runId) || initial;
-    runtime.recordTurn?.(runId, {
-      index,
-      turn: turnNumber,
-      status: 'running',
-      stage: observations.length > 0 ? 'observe' : 'decide',
-      metadata: {
-        maxTurns: turnLimit,
-        observationsBefore: observations.length,
-      },
-    });
-    const rawResult = await runModelAdapter(modelAdapter, {
-      runtime,
-      runId,
-      state,
-      spec: state.spec,
-      goal: state.goal,
-      context: state.spec?.context || {},
-      policy: state.spec?.policy || {},
-      skills,
-      skillPrompt,
-      turn: turnNumber,
-      turnIndex: index,
-      maxTurns: turnLimit,
-      observations,
-      previousTurns: turns,
-      resume,
-      dispatchTool: (toolName, args = {}, options = {}) => runtime.dispatchTool(runId, toolName, args, options),
-    });
-    result = normalizeModelResult(rawResult);
-
-    const toolCalls = normalizeModelToolCalls(result);
-    runtime.recordTurn?.(runId, {
-      index,
-      turn: turnNumber,
-      status: 'running',
-      stage: toolCalls.length > 0 ? 'act' : 'observe',
-      decision: summarizeModelResult(result),
-      actions: toolCalls.map(summarizeToolCall),
-    });
-    const turn = {
-      index,
-      turn: turnNumber,
-      result: summarizeModelResult(result),
-      toolCalls: toolCalls.map(summarizeToolCall),
-      observations: [],
-    };
-    turns.push(turn);
-
-    const interruptRequest = await resolveInterruptRequest({ result, interruptOn, state, turn });
-    if (interruptRequest) {
-      interrupt = createRuntimeInterrupt(runtime, runId, interruptRequest, index + 1);
-      turn.interrupt = summarizeInterrupt(interrupt || interruptRequest);
-      runnerStatus = ['approval', 'request_approval'].includes(interrupt?.type) ? 'waiting_approval' : 'interrupted';
-      runtime.recordTurn?.(runId, {
-        index,
-        turn: turnNumber,
-        status: 'interrupted',
-        stage: 'observe',
-        metadata: { interrupt: turn.interrupt },
-      });
-      createTurnCheckpointIfNeeded(runtime, runId, checkpointTurns, turn, { interrupt: turn.interrupt });
-      break;
-    }
-
-    if (toolCalls.length === 0) {
-      finalGate = evaluateAgentFinalGate(runtime.getState?.(runId) || initial, {
-        result,
-        finalText: result.text || result.report || result.content || '',
-        repairCount: finalGateRepairCount,
-      });
-      if (finalGate.shouldContinue && offset < turnLimit - 1) {
-        finalGateRepairCount += 1;
-        const gateObservation = {
-          id: `runtime-gate-${turnNumber}`,
-          kind: 'runtime_gate',
-          toolName: 'agent_final_gate',
-          ok: false,
-          isError: true,
-          content: finalGate.message,
-          data: { reasons: finalGate.reasons },
-        };
-        observations = [gateObservation];
-        turn.observations = observations;
-        runtime.recordObservation?.(runId, {
-          ...gateObservation,
-          turn: turnNumber,
-          stage: 'verify',
-        });
-        runtime.recordTurn?.(runId, {
-          index,
-          turn: turnNumber,
-          status: 'completed',
-          stage: 'verify',
-          observations,
-          metadata: { finalGateReasons: finalGate.reasons },
-        });
-        createTurnCheckpointIfNeeded(runtime, runId, checkpointTurns, turn, { finalGate });
-        continue;
-      }
-      if (finalGate.shouldContinue) {
-        finalGate = {
-          ...finalGate,
-          shouldContinue: false,
-          forcedStatus: 'blocked',
-          reasons: [...(finalGate.reasons || []), 'turn_budget_exhausted'],
-        };
-      }
-      runtime.recordTurn?.(runId, {
-        index,
-        turn: turnNumber,
-        status: 'completed',
-        stage: 'observe',
-        metadata: finalGate?.reasons?.length ? {
-          finalGateReasons: finalGate.reasons,
-          forcedStatus: finalGate.forcedStatus || '',
-        } : {},
-      });
-      createTurnCheckpointIfNeeded(runtime, runId, checkpointTurns, turn);
-      break;
-    }
-    observations = await dispatchTurnToolCalls({ runtime, runId, toolCalls });
-    turn.observations = observations;
-    runtime.recordTurn?.(runId, {
-      index,
-      turn: turnNumber,
-      status: isFinalModelResult(result) ? 'completed' : 'running',
-      stage: 'observe',
-      observations,
-    });
-    createTurnCheckpointIfNeeded(runtime, runId, checkpointTurns, turn);
-    if (isFinalModelResult(result)) {
-      finalGate = evaluateAgentFinalGate(runtime.getState?.(runId) || initial, {
-        result,
-        finalText: result.text || result.report || result.content || '',
-        repairCount: finalGateRepairCount,
-      });
-      if (finalGate.shouldContinue && offset < turnLimit - 1) {
-        finalGateRepairCount += 1;
-        observations = [{
-          id: `runtime-gate-${turnNumber}`,
-          kind: 'runtime_gate',
-          toolName: 'agent_final_gate',
-          ok: false,
-          isError: true,
-          content: finalGate.message,
-          data: { reasons: finalGate.reasons },
-        }];
-        runtime.recordObservation?.(runId, {
-          ...observations[0],
-          turn: turnNumber,
-          stage: 'verify',
-        });
-        continue;
-      }
-      if (finalGate.shouldContinue) {
-        finalGate = {
-          ...finalGate,
-          shouldContinue: false,
-          forcedStatus: 'blocked',
-          reasons: [...(finalGate.reasons || []), 'turn_budget_exhausted'],
-        };
-      }
-      break;
-    }
-  }
-
-  return { result: result || { text: '' }, turns, observations, interrupt, runnerStatus, finalGate };
-}
-
-async function dispatchTurnToolCalls({ runtime, runId, toolCalls }) {
-  if (!runtime?.dispatchTool) throw new Error('Agent runtime dispatchTool is not configured');
-  const observations = [];
-  for (const toolCall of toolCalls) {
-    const dispatched = await runtime.dispatchTool(runId, toolCall.toolName, toolCall.args, toolCall.options);
-    observations.push(normalizeToolObservation(toolCall, dispatched));
-  }
-  return observations;
 }
 
 function normalizeModelToolCalls(result = {}) {
@@ -508,107 +291,6 @@ function normalizeToolOptions(value) {
   return options;
 }
 
-function normalizeToolObservation(toolCall, result = {}) {
-  const raw = result?.raw && typeof result.raw === 'object' ? result.raw : {};
-  const exitCode = typeof raw.exitCode === 'number'
-    ? raw.exitCode
-    : (typeof result.exitCode === 'number' ? result.exitCode : undefined);
-  const isError = result.is_error === true || (typeof exitCode === 'number' && exitCode !== 0);
-  return {
-    id: toolCall.id,
-    toolName: toolCall.toolName,
-    ok: !isError,
-    isError,
-    exitCode,
-    durationMs: typeof raw.durationMs === 'number' ? raw.durationMs : (typeof result.durationMs === 'number' ? result.durationMs : 0),
-    content: compactText(result.content || raw.stdout || raw.stderr || '', 4000),
-    stdout: compactText(raw.stdout || result.stdout || '', 4000),
-    stderr: compactText(raw.stderr || result.stderr || '', 2000),
-    data: normalizeObject(result.data),
-  };
-}
-
-function summarizeModelResult(result = {}) {
-  return {
-    title: result.title || '',
-    status: result.status || '',
-    text: compactText(result.text || result.report || result.content || '', 1000),
-    final: result.final === true || result.done === true,
-  };
-}
-
-function summarizeToolCall(toolCall) {
-  return {
-    id: toolCall.id,
-    toolName: toolCall.toolName,
-    args: toolCall.args,
-    options: toolCall.options,
-  };
-}
-
-function isFinalModelResult(result = {}) {
-  return result.final === true || result.done === true || result.stop === true || String(result.finishReason || result.finish_reason || '').toLowerCase() === 'stop';
-}
-
-async function resolveInterruptRequest({ result = {}, interruptOn = null, state = null, turn = null } = {}) {
-  const direct = normalizeInterruptRequest(result.interrupt || result.interruptRequest || result.interrupt_request);
-  if (direct) return direct;
-  if (result.needsApproval === true || result.needs_approval === true) {
-    return normalizeInterruptRequest({
-      type: 'approval',
-      reason: result.reason || 'approval_required',
-      message: result.message || result.text || '',
-      payload: result.approval || result.data || {},
-    });
-  }
-  if (typeof interruptOn === 'function') {
-    const requested = await interruptOn({ result, state, turn });
-    return normalizeInterruptRequest(requested);
-  }
-  return null;
-}
-
-function normalizeInterruptRequest(value) {
-  if (!value) return null;
-  if (value === true) return { type: 'manual', reason: 'interrupt_requested', message: '' };
-  if (typeof value === 'string') return { type: 'manual', reason: value, message: value };
-  if (!value || typeof value !== 'object') return null;
-  return {
-    type: String(value.type || value.kind || 'manual').trim() || 'manual',
-    reason: String(value.reason || value.message || value.type || 'interrupt_requested'),
-    message: String(value.message || value.reason || ''),
-    scope: normalizeObject(value.scope),
-    payload: normalizeObject(value.payload || value.data),
-    taskStatus: value.taskStatus || value.task_status,
-    runnerStatus: value.runnerStatus || value.runner_status,
-  };
-}
-
-function createRuntimeInterrupt(runtime, runId, request, turn) {
-  if (!request) return null;
-  if (!runtime?.createInterrupt) return { ...request, turn };
-  return runtime.createInterrupt(runId, { ...request, turn });
-}
-
-function createTurnCheckpointIfNeeded(runtime, runId, enabled, turn, data = {}) {
-  if (!enabled || !runtime?.createCheckpoint) return null;
-  return runtime.createCheckpoint(runId, {
-    reason: 'turn',
-    label: `turn-${turn.turn}`,
-    turn: turn.turn,
-    data: {
-      turn: {
-        index: turn.index,
-        turn: turn.turn,
-        result: turn.result,
-        toolCalls: turn.toolCalls,
-        observations: turn.observations,
-      },
-      ...normalizeObject(data),
-    },
-  });
-}
-
 function summarizeInterrupt(interrupt = {}) {
   return {
     id: interrupt.id || '',
@@ -650,10 +332,6 @@ function normalizeCheckpointTurn(value) {
     toolCalls: Array.isArray(value.toolCalls) ? value.toolCalls.map(normalizePlainObject).filter(Boolean) : [],
     observations: normalizeObservationArray(value.observations),
   };
-}
-
-function normalizeExistingTurns(value) {
-  return Array.isArray(value) ? value.map(normalizeCheckpointTurn).filter(Boolean) : [];
 }
 
 function normalizeObservationArray(value) {
@@ -741,12 +419,6 @@ async function callHook(hook, payload) {
 
 function normalizeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
-}
-
-function compactText(value, maxLength) {
-  const text = String(value || '');
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, maxLength)}\n...[truncated ${text.length - maxLength} chars]`;
 }
 
 function toPositiveInteger(value, fallback) {

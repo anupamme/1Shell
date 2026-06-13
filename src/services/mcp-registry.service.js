@@ -11,8 +11,7 @@ const path = require('path');
  *
  * 用途：
  *   - 仓库页管理（增删改查）
- *   - 创作台从这里选"工具"
- *   - 生成的 Skill frontmatter 里 mcpServers 引用这里的 id（运行时再展开）
+ *   - Skill frontmatter 里 mcpServers 引用这里的 id（运行时再展开）
  *
  * 仅支持远程 URL 类 MCP（与现有 runner 能力一致）。
  */

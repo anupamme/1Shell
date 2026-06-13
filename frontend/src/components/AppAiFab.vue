@@ -1,65 +1,69 @@
 <script setup lang="ts">
-// AppAiFab.vue — P5 跨页浮动 1Shell AI
-// 1:1 复刻 [public/ai-fab.js](public/ai-fab.js) + 新增拖拽到任意位置（用户拍板）
-//
-// 用户拍板规则：
-// - 排除页：main (MainConsole) + skill-studio（这俩内置 1Shell AI 不重复入口）
-// - 拖拽：持久化 + 默认右下 + 边界约束（不允许拖出视窗）
-// - 面板跟 FAB：根据 FAB 在屏幕的象限,面板自动靠 FAB 反向展开
-// - 业务隔离：sessionId 用 fab-* 前缀,与 MainConsole useIdePanel 完全独立
-
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 
-import { useAiFab, type ModuleContext } from '@/composables/useAiFab';
-import ToolProgressBar from '@/components/ToolProgressBar.vue';
 import AppIcon from '@/components/AppIcon.vue';
-import SecretRefPicker from '@/components/SecretRefPicker.vue';
-import { renderMarkdown } from '@/utils/markdown';
+import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
+import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
+import { useIdeChat } from '@/composables/useIdeChat';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
-const route = useRoute();
-const fab = useAiFab();
+interface ModuleContext {
+  name: string;
+  icon: string;
+  hint: string;
+}
 
-// ── 排除页（与刀 5a/5b 内置 1Shell AI 重复入口的页面不显示 FAB） ──
-const EXCLUDED_ROUTES = new Set(['console', 'skill-studio']);
+interface Pos {
+  x: number;
+  y: number;
+}
+
+const route = useRoute();
+const moduleCtx = ref<ModuleContext>({ name: '1Shell', icon: 'robot', hint: '' });
+const ide = useIdeChat({
+  sessionPrefix: 'fab',
+  context: () => ({
+    module: moduleCtx.value.name,
+    moduleHint: moduleCtx.value.hint,
+  }),
+});
+
+const EXCLUDED_ROUTES = new Set(['ide']);
 const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
 
-// ── 模块感知（按路由 name 查 hint，1:1 沿用 ai-fab.js:8-25 MODULE_MAP） ──
 const MODULE_MAP: Record<string, ModuleContext> = {
-  scripts: { name: '脚本库', icon: '📜', hint: '当前在脚本库页面。可管理和执行 Shell 脚本。' },
-  skills: { name: 'Skill 仓库', icon: '🧩', hint: '当前在 Skill 仓库页面。可查看、运行已有的 AI Skills。' },
-  tasks: { name: '自动化任务', icon: '⚙', hint: '当前在自动化任务页面。可管理可复用任务（定时任务 + 自动修复）。' },
-  programs: { name: '自动化任务', icon: '⚙', hint: '当前在自动化任务页面。可管理可复用任务（定时任务 + 自动修复）。' },
-  probe: { name: '探针监控', icon: '🔍', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
-  audit: { name: '审计日志', icon: '📋', hint: '当前在审计日志页面。可查询操作日志。' },
-  'cli-setup': { name: 'AI 配置', icon: '⚙', hint: '当前在 AI 引擎配置页面。' },
+  console: { name: '主控', icon: 'console', hint: '当前在主控页面。可结合主机和终端上下文处理运维目标。' },
+  scripts: { name: '脚本库', icon: 'terminal', hint: '当前在脚本库页面。可管理和执行 Shell 脚本。' },
+  skills: { name: 'Skill 仓库', icon: 'package', hint: '当前在 Skill 仓库页面。可查看和运行已有能力。' },
+  probe: { name: '探针监控', icon: 'radio', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
+  audit: { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },
+  hosts: { name: '主机', icon: 'server', hint: '当前在主机页面。可查看和管理连接目标。' },
+  'cli-setup': { name: 'AI 配置', icon: 'cog', hint: '当前在 AI 引擎配置页面。' },
 };
 
 watch(
   () => route.name,
   (name) => {
     const key = String(name || '');
-    const ctx = MODULE_MAP[key] || { name: '1Shell', icon: '🖥', hint: '' };
-    fab.setModuleContext(ctx);
+    moduleCtx.value = MODULE_MAP[key] || { name: '1Shell', icon: 'robot', hint: '' };
   },
   { immediate: true },
 );
 
-onMounted(() => { fab.initialize(); });
-
-// ── 拖拽位置（持久化 + 边界约束） ──
 const STORAGE_KEY = '1shell-fab-pos';
 const FAB_SIZE = 52;
 const FAB_MARGIN = 16;
-
-interface Pos { x: number; y: number; }
+const PANEL_WIDTH = 460;
+const PANEL_HEIGHT = 620;
+const PANEL_GAP = 12;
+const DRAG_THRESHOLD = 4;
 
 function defaultPos(): Pos {
-  // 默认右下：right: 28, bottom: 28（与老 ai-fab.js:42 一致）
-  const x = window.innerWidth - FAB_SIZE - 28;
-  const y = window.innerHeight - FAB_SIZE - 28;
-  return { x, y };
+  return {
+    x: window.innerWidth - FAB_SIZE - 28,
+    y: window.innerHeight - FAB_SIZE - 28,
+  };
 }
 
 function clampPos(p: Pos): Pos {
@@ -84,28 +88,24 @@ function loadPos(): Pos {
 }
 
 const pos = ref<Pos>(loadPos());
-
-function persistPos(): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(pos.value));
-}
-
-// 窗口尺寸变化时重新约束（避免 FAB 飞出新视窗）
-function onWindowResize(): void {
-  pos.value = clampPos(pos.value);
-  persistPos();
-}
-
-onMounted(() => { window.addEventListener('resize', onWindowResize); });
-onBeforeUnmount(() => { window.removeEventListener('resize', onWindowResize); });
-
-// ── 拖拽 vs 点击区分（按下 → 移动超过 4px 算拖拽，否则算点击） ──
-const DRAG_THRESHOLD = 4;
+const panelOpen = ref(false);
+const chatEl = ref<HTMLElement | null>(null);
+let followOutput = true;
 let dragStartMouseX = 0;
 let dragStartMouseY = 0;
 let dragStartPosX = 0;
 let dragStartPosY = 0;
 let isDragging = false;
 let dragStarted = false;
+
+function persistPos(): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(pos.value));
+}
+
+function onWindowResize(): void {
+  pos.value = clampPos(pos.value);
+  persistPos();
+}
 
 function onMouseDown(e: MouseEvent): void {
   if (e.button !== 0) return;
@@ -135,31 +135,19 @@ function onMouseUp(): void {
   isDragging = false;
   if (dragStarted) {
     persistPos();
-  } else {
-    togglePanel();
+    return;
   }
+  togglePanel();
 }
-
-// ── 面板开关 + 跟 FAB 走 ──
-const panelOpen = ref(false);
 
 function togglePanel(): void {
   panelOpen.value = !panelOpen.value;
-  if (panelOpen.value) {
-    void nextTick(() => scrollChatToBottom(true));
-  }
+  if (panelOpen.value) void nextTick(() => scrollChatToBottom(true));
 }
 
 function closePanel(): void {
   panelOpen.value = false;
 }
-
-// 面板根据 FAB 在屏幕哪个象限选展开方向
-// - FAB 在屏幕右半 → 面板出现在 FAB 左边（向左展开）；左半 → 右边
-// - FAB 在屏幕下半 → 面板向上展开；上半 → 向下展开
-const PANEL_WIDTH = 400;
-const PANEL_HEIGHT = 520;
-const PANEL_GAP = 12;
 
 const panelPos = computed<{ left: number; top: number }>(() => {
   const fabX = pos.value.x;
@@ -169,35 +157,19 @@ const panelPos = computed<{ left: number; top: number }>(() => {
   const winW = window.innerWidth;
   const winH = window.innerHeight;
 
-  // 水平方向
-  let left: number;
-  if (fabCenterX > winW / 2) {
-    // FAB 在右半 → 面板向左展开
-    left = fabX - PANEL_WIDTH - PANEL_GAP;
-    if (left < FAB_MARGIN) left = FAB_MARGIN;
-  } else {
-    // FAB 在左半 → 面板向右展开
-    left = fabX + FAB_SIZE + PANEL_GAP;
-    if (left + PANEL_WIDTH + FAB_MARGIN > winW) left = winW - PANEL_WIDTH - FAB_MARGIN;
-  }
+  let left = fabCenterX > winW / 2 ? fabX - PANEL_WIDTH - PANEL_GAP : fabX + FAB_SIZE + PANEL_GAP;
+  if (left < FAB_MARGIN) left = FAB_MARGIN;
+  if (left + PANEL_WIDTH + FAB_MARGIN > winW) left = winW - PANEL_WIDTH - FAB_MARGIN;
 
-  // 垂直方向：尽量与 FAB 对齐顶端,边界外回缩
-  let top: number;
-  if (fabCenterY > winH / 2) {
-    // FAB 在下半 → 面板顶端 ≈ FAB 顶端 - (panel - fab)
-    top = fabY + FAB_SIZE - PANEL_HEIGHT;
-  } else {
-    top = fabY;
-  }
+  let top = fabCenterY > winH / 2 ? fabY + FAB_SIZE - PANEL_HEIGHT : fabY;
   if (top < FAB_MARGIN) top = FAB_MARGIN;
   if (top + PANEL_HEIGHT + FAB_MARGIN > winH) top = winH - PANEL_HEIGHT - FAB_MARGIN;
 
   return { left, top };
 });
 
-// ── 聊天面板交互 ──
-const chatEl = ref<HTMLElement | null>(null);
-let followOutput = true;
+watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollChatToBottom()); });
+watch(() => ide.timeline.value, () => { void nextTick(() => scrollChatToBottom()); }, { deep: true });
 
 function onChatScroll(): void {
   const el = chatEl.value;
@@ -208,176 +180,451 @@ function scrollChatToBottom(force = false): void {
   scrollToBottomIfPinned(chatEl.value, force || followOutput);
 }
 
-watch(() => fab.turns.value.length, () => { void nextTick(() => scrollChatToBottom()); });
-watch(() => fab.turns.value, () => { void nextTick(() => scrollChatToBottom()); }, { deep: true });
-
 function onInputKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
-    fab.sendMessage();
-  }
-}
-
-function lineClass(kind: string): string {
-  return {
-    stdout: 'ai-fab-line-stdout',
-    stderr: 'ai-fab-line-stderr',
-    info: 'ai-fab-line-info',
-    error: 'ai-fab-line-error',
-    success: 'ai-fab-line-success',
-    stream: 'ai-fab-line-stdout',
-  }[kind] || 'ai-fab-line-stdout';
-}
-
-function onApproveKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    fab.approveCustom();
+    ide.sendMessage();
   }
 }
 
 function onSecretRefSubmit(secretRef: string): void {
-  fab.approveCustomText.value = secretRef;
-  fab.approveCustom();
+  ide.approveCustomText.value = secretRef;
+  ide.approveCustom();
 }
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize);
+  ide.dispose();
+});
+
+onMounted(() => {
+  window.addEventListener('resize', onWindowResize);
+});
 </script>
 
 <template>
   <template v-if="visible">
-    <!-- FAB 圆形按钮（可拖拽） -->
     <button
       type="button"
       class="ai-fab-btn"
       :class="{ 'ai-fab-btn--open': panelOpen }"
       :style="{ left: pos.x + 'px', top: pos.y + 'px' }"
+      aria-label="打开 1Shell AI"
       title="1Shell AI（可拖拽）"
       @mousedown="onMouseDown"
     >
-      <AppIcon v-if="!panelOpen" name="robot" :size="28" :stroke-width="1.8" />
+      <AppIcon v-if="!panelOpen" name="robot" :size="27" :stroke-width="1.8" />
       <AppIcon v-else name="close" :size="20" :stroke-width="2" />
     </button>
 
-    <!-- 聊天面板（位置跟 FAB 走） -->
-    <div
+    <section
       v-if="panelOpen"
       class="ai-fab-panel"
       :style="{ left: panelPos.left + 'px', top: panelPos.top + 'px' }"
     >
-      <!-- header -->
-      <div class="ai-fab-header">
-        <span class="ai-fab-header-icon">{{ fab.moduleCtx.value.icon }}</span>
+      <header class="ai-fab-header">
+        <span class="ai-fab-header-icon">
+          <AppIcon :name="moduleCtx.icon" :size="18" />
+        </span>
         <span class="ai-fab-title">1Shell AI</span>
-        <span class="ai-fab-badge">{{ fab.moduleCtx.value.name }}</span>
+        <span class="ai-fab-badge">{{ moduleCtx.name }}</span>
         <button
           type="button"
-          class="ai-fab-mini-btn ai-fab-stop-header"
-          :disabled="!fab.isRunning.value"
-          @click="fab.stop"
-        >停止</button>
+          class="ai-fab-mini-btn"
+          :disabled="!ide.isRunning.value"
+          @click="ide.stop"
+        >
+          停止
+        </button>
         <button
           type="button"
-          class="ai-fab-mini-btn ai-fab-clear-btn"
-          :disabled="fab.isRunning.value"
-          @click="fab.resetChat"
-        >清空</button>
-        <button
-          type="button"
-          class="ai-fab-mini-btn ai-fab-close-btn"
-          @click="closePanel"
-        >关闭</button>
-      </div>
+          class="ai-fab-mini-btn"
+          :disabled="ide.isRunning.value || !ide.hasMessages.value"
+          @click="ide.resetChat"
+        >
+          清空
+        </button>
+        <button type="button" class="ai-fab-mini-btn" @click="closePanel">
+          关闭
+        </button>
+      </header>
 
-      <!-- chat -->
       <div ref="chatEl" class="ai-fab-chat" @scroll="onChatScroll">
-        <div v-if="!fab.hasMessages.value" class="ai-fab-placeholder">
-          <div class="ai-fab-placeholder-icon"><AppIcon name="robot" :size="32" :stroke-width="1.6" /></div>
-          <div>1Shell AI 助手</div>
-          <div class="ai-fab-placeholder-hint">{{ fab.moduleCtx.value.hint || '输入需求，AI 会在你的主机上执行操作' }}</div>
-        </div>
-        <template v-for="(turn, i) in fab.turns.value" :key="i">
-          <div v-if="turn.role === 'user'" class="ai-fab-user-msg">{{ turn.text }}</div>
-          <div v-else class="ai-fab-ai-wrap">
-            <div class="ai-fab-ai-label">🤖 1Shell AI</div>
-            <div class="ai-fab-ai-body">
-              <ToolProgressBar v-if="turn.toolCalls?.length" :calls="turn.toolCalls" class="mb-2" />
-              <div
-                v-for="(line, j) in turn.lines || []"
-                :key="j"
-                :class="['ai-fab-line', 'markdown-body', lineClass(line.kind)]"
-                v-html="renderMarkdown(line.text)"
-              ></div>
-            </div>
+        <div v-if="!ide.hasMessages.value" class="ai-fab-placeholder">
+          <div class="ai-fab-placeholder-icon">
+            <AppIcon name="robot" :size="30" :stroke-width="1.6" />
           </div>
-        </template>
+          <strong>1Shell AI</strong>
+          <span>{{ moduleCtx.hint || '输入目标后，这里会显示工作笔记、工具调用和最终回复。' }}</span>
+        </div>
+        <IdeAgentTimeline v-else :items="ide.timeline.value" density="compact" />
       </div>
 
-      <!-- input -->
       <div class="ai-fab-input-area">
+        <IdeApprovalCard
+          :request="ide.approveRequest.value"
+          :custom-text="ide.approveCustomText.value"
+          density="compact"
+          @update:custom-text="(value) => { ide.approveCustomText.value = value; }"
+          @allow="ide.approveAllow"
+          @deny="ide.approveDeny"
+          @custom="ide.approveCustom"
+          @secret-submit="onSecretRefSubmit"
+        />
+        <label class="sr-only" for="ai-fab-input">输入给 1Shell AI 的消息</label>
         <textarea
-          v-model="fab.inputText.value"
-          rows="2"
-          placeholder="描述你的需求..."
+          id="ai-fab-input"
+          v-model="ide.inputText.value"
+          rows="3"
+          placeholder="输入你的目标..."
           class="ai-fab-input"
+          :disabled="ide.isRunning.value"
           spellcheck="false"
           @keydown="onInputKeydown"
         />
         <div class="ai-fab-bottom-row">
-          <span class="ai-fab-status">{{ fab.statusText.value }}</span>
+          <span class="ai-fab-status">{{ ide.statusText.value }}</span>
           <button
-            v-if="!fab.isRunning.value"
+            v-if="!ide.isRunning.value"
             type="button"
             class="ai-fab-send-btn"
-            :disabled="!fab.inputText.value.trim()"
-            @click="fab.sendMessage"
-          >发送 →</button>
+            :disabled="!ide.inputText.value.trim()"
+            @click="ide.sendMessage"
+          >
+            <AppIcon name="arrow-up" :size="14" :stroke-width="2" />
+            <span>发送</span>
+          </button>
           <button
             v-else
             type="button"
             class="ai-fab-stop-btn"
-            @click="fab.stop"
-          >停止</button>
+            @click="ide.stop"
+          >
+            停止
+          </button>
         </div>
       </div>
-    </div>
-
-    <!-- Agent 审批条（fixed bottom + slide-up） -->
-    <Transition name="approve-bar">
-      <div v-if="fab.approveRequest.value" class="approve-bar">
-        <div class="approve-bar-head">
-          <span>🛡</span>
-          <span class="approve-bar-title">{{ fab.approveRequest.value.title }}</span>
-          <span class="approve-bar-countdown">{{ fab.approveRequest.value.countdown }}s</span>
-        </div>
-        <div class="approve-bar-body">
-          <div class="approve-bar-desc">
-            <template v-if="fab.approveRequest.value.mode === 'approval'">AI 要执行 {{ fab.approveRequest.value.toolName }}：</template>
-            <template v-else-if="fab.approveRequest.value.mode === 'request_secret'">AI 需要 Secret 引用：</template>
-            <template v-else>AI 需要你补充信息：</template>
-          </div>
-          <pre class="approve-bar-detail">{{ fab.approveRequest.value.detail }}</pre>
-          <SecretRefPicker
-            v-if="fab.approveRequest.value.mode === 'request_secret'"
-            :secret-name="fab.approveRequest.value.secretName"
-            :label="fab.approveRequest.value.label"
-            :provider="fab.approveRequest.value.provider"
-            @submit="onSecretRefSubmit"
-          />
-        </div>
-        <div class="approve-bar-foot">
-          <button type="button" class="approve-bar-deny" @click="fab.approveDeny">✕ 拒绝</button>
-          <div class="approve-bar-custom">
-            <input
-              v-model="fab.approveCustomText.value"
-              type="text"
-              class="approve-bar-custom-input"
-              :placeholder="fab.approveRequest.value.mode === 'request_secret' ? '填写 secret ref/id...' : '自定义回复...'"
-              @keydown="onApproveKeydown"
-            />
-            <button type="button" class="approve-bar-custom-btn" @click="fab.approveCustom">回复</button>
-          </div>
-          <button v-if="fab.approveRequest.value.mode === 'approval'" type="button" class="approve-bar-allow" @click="fab.approveAllow">✓ 允许</button>
-        </div>
-      </div>
-    </Transition>
+    </section>
   </template>
 </template>
+
+<style scoped>
+.ai-fab-btn {
+  position: fixed;
+  z-index: 8000;
+  width: 52px;
+  height: 52px;
+  border: 0;
+  border-radius: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  background: #0284c7;
+  box-shadow: 0 14px 34px rgba(2, 132, 199, 0.34);
+  cursor: grab;
+  transition: background-color 180ms ease, box-shadow 180ms ease, border-radius 180ms ease;
+}
+
+.ai-fab-btn:hover {
+  background: #0369a1;
+  box-shadow: 0 16px 38px rgba(2, 132, 199, 0.42);
+}
+
+.ai-fab-btn:focus-visible {
+  outline: 3px solid rgba(14, 165, 233, 0.34);
+  outline-offset: 3px;
+}
+
+.ai-fab-btn--open {
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.ai-fab-panel {
+  position: fixed;
+  z-index: 8001;
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  height: 620px;
+  max-height: calc(100vh - 32px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.94);
+  color: #0f172a;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(18px);
+}
+
+:global(html.dark) .ai-fab-panel {
+  background: rgba(15, 23, 42, 0.94);
+  color: #e2e8f0;
+  border-color: rgba(71, 85, 105, 0.78);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
+}
+
+.ai-fab-header {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+:global(html.dark) .ai-fab-header {
+  background: rgba(15, 23, 42, 0.72);
+  border-bottom-color: rgba(51, 65, 85, 0.72);
+}
+
+.ai-fab-header-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #0369a1;
+  background: #e0f2fe;
+  border: 1px solid #bae6fd;
+}
+
+:global(html.dark) .ai-fab-header-icon {
+  color: #7dd3fc;
+  background: rgba(14, 165, 233, 0.12);
+  border-color: rgba(56, 189, 248, 0.24);
+}
+
+.ai-fab-title {
+  min-width: 0;
+  flex: 1;
+  font-size: 14px;
+  font-weight: 750;
+  color: #0f172a;
+}
+
+:global(html.dark) .ai-fab-title {
+  color: #e2e8f0;
+}
+
+.ai-fab-badge {
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #0369a1;
+  background: rgba(14, 165, 233, 0.1);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ai-fab-mini-btn,
+.ai-fab-send-btn,
+.ai-fab-stop-btn {
+  min-height: 36px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.ai-fab-mini-btn {
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  background: rgba(255, 255, 255, 0.72);
+  color: #475569;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ai-fab-mini-btn:hover:not(:disabled) {
+  color: #0369a1;
+  border-color: rgba(14, 165, 233, 0.42);
+}
+
+.ai-fab-mini-btn:disabled,
+.ai-fab-send-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+:global(html.dark) .ai-fab-mini-btn {
+  background: rgba(15, 23, 42, 0.72);
+  border-color: rgba(71, 85, 105, 0.8);
+  color: #cbd5e1;
+}
+
+.ai-fab-chat {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.ai-fab-placeholder {
+  min-height: 260px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
+  color: #64748b;
+}
+
+.ai-fab-placeholder-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #0369a1;
+  background: #e0f2fe;
+  border: 1px solid #bae6fd;
+}
+
+.ai-fab-placeholder strong {
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.ai-fab-placeholder span {
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+:global(html.dark) .ai-fab-placeholder {
+  color: #94a3b8;
+}
+
+:global(html.dark) .ai-fab-placeholder strong {
+  color: #e2e8f0;
+}
+
+.ai-fab-input-area {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+:global(html.dark) .ai-fab-input-area {
+  background: rgba(15, 23, 42, 0.78);
+  border-top-color: rgba(51, 65, 85, 0.72);
+}
+
+.ai-fab-input {
+  width: 100%;
+  min-height: 82px;
+  max-height: 150px;
+  resize: vertical;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  background: rgba(255, 255, 255, 0.92);
+  color: #0f172a;
+  padding: 10px 11px;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.ai-fab-input:focus {
+  border-color: #0284c7;
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.16);
+}
+
+.ai-fab-input:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
+:global(html.dark) .ai-fab-input {
+  background: rgba(2, 6, 23, 0.72);
+  border-color: rgba(71, 85, 105, 0.9);
+  color: #e2e8f0;
+}
+
+.ai-fab-bottom-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ai-fab-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #64748b;
+  font-size: 12px;
+}
+
+:global(html.dark) .ai-fab-status {
+  color: #94a3b8;
+}
+
+.ai-fab-send-btn {
+  min-width: 82px;
+  border: 1px solid #0284c7;
+  color: #ffffff;
+  background: #0284c7;
+  padding: 0 13px;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.ai-fab-send-btn:hover:not(:disabled) {
+  background: #0369a1;
+  border-color: #0369a1;
+}
+
+.ai-fab-stop-btn {
+  min-width: 72px;
+  border: 1px solid rgba(220, 38, 38, 0.38);
+  color: #b91c1c;
+  background: #fef2f2;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.ai-fab-stop-btn:hover {
+  background: #fee2e2;
+  border-color: rgba(185, 28, 28, 0.54);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 560px) {
+  .ai-fab-panel {
+    left: 12px !important;
+    right: 12px;
+    width: auto;
+  }
+
+  .ai-fab-header {
+    flex-wrap: wrap;
+  }
+}
+</style>
