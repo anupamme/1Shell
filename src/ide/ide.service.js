@@ -253,8 +253,8 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
 
 // ─── 上下文压缩 ─────────────────────────────────────────────────────────
 // 保留最近 KEEP_RECENT 条消息完整，更早的 tool_result 截断到 TRUNCATE_TO 字符
-const KEEP_RECENT = 8;
-const TRUNCATE_TO = 200;
+const KEEP_RECENT = 40;
+const TRUNCATE_TO = 6000;
 const MAX_PROVIDER_TRANSIENT_RETRIES = 2;
 const MAX_AUTHORING_DRAFT_REPAIR_ROUNDS = 4;
 
@@ -1537,8 +1537,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         repairDanglingToolUseMessages(session.messages);
         const compactedMessages = compactMessages(session.messages);
         const skillRoster = buildSkillRoster();
-        const runtimeDecisionContext = request.runtimeContext || buildAgentDecisionContext(agentRuntime.getState?.(runId) || null);
-        const baseSystem = session.system + buildIdeAgentSystemDirective(session.agentTaskProfile) + skillRoster + runtimeDecisionContext;
+        const baseSystem = session.system + skillRoster;
         const apiBody = JSON.stringify({
           model,
           max_tokens: 8192,

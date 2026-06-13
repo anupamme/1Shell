@@ -124,41 +124,14 @@ function shouldRequestAgentApproval(toolName, { readonlyTools, sideEffectTools, 
   return false;
 }
 
-function createIdeAgentTaskProfile({ message = '', context = null, entry = 'core' } = {}) {
-  const text = normalizeText(message);
-  const promptEntry = String(entry || 'core').trim().toLowerCase();
-  const wantsCreate = hasAny(text, ['创建', '新建', '生成', '做一个', '制作', '设计', 'create', 'new', 'generate']);
-  const mentionsTask = hasAny(text, ['自动化任务', '任务', 'program', '程序']);
-  const mentionsDeploy = hasAny(text, ['部署', 'github', 'gitlab', '仓库', 'repo', 'docker', '端口', 'vps', '项目']);
-  const mentionsExisting = hasAny(text, ['已有', '现有', '修改', '查看', '列出', 'list', 'existing', 'update']);
-  const hasGithubUrl = /https?:\/\/(?:www\.)?github\.com\/[^\s"'<>]+/i.test(text);
-  const hasConcretePort = /(?:端口|port)\D{0,8}\d{2,5}/i.test(text);
-  const contextHostIds = Array.isArray(context?.hosts) ? context.hosts.map((host) => String(host?.id || '').trim()).filter(Boolean) : [];
-
-  if (wantsCreate && mentionsTask) {
-    const deployTask = mentionsDeploy;
-    return {
-      intent: 'automation_task_authoring',
-      taskKind: deployTask ? 'deploy_project' : 'generic',
-      entry: promptEntry,
-      solveCapturePackage: true,
-      allowExistingLookup: mentionsExisting,
-      hasConcreteExecutionInputs: hasGithubUrl && hasConcretePort && contextHostIds.length > 0,
-      requiredInputs: deployTask ? [...DEPLOY_TASK_INPUTS] : [],
-      requiredRuntimePhases: deployTask ? [...DEPLOY_TASK_PHASES] : [],
-      expectedResultFields: deployTask
-        ? ['status', 'hostId', 'githubUrl', 'deployMethod', 'port', 'accessUrl', 'verificationEvidence']
-        : ['status', 'summary', 'verificationEvidence'],
-      expectedFailureFields: deployTask
-        ? ['failedPhase', 'completedItems', 'reason', 'nextSteps']
-        : ['failedPhase', 'completedItems', 'reason', 'nextSteps'],
-    };
-  }
-
+function createIdeAgentTaskProfile({ entry = 'core' } = {}) {
+  // Program/Task authoring was removed; 1Shell AI is a pure agent with no task-authoring
+  // profile. Always return a neutral profile so no tool is blocked, no user-facing text is
+  // rewritten, and no task-artifact final gate is forced.
   return {
     intent: '',
     taskKind: '',
-    entry: promptEntry,
+    entry: String(entry || 'core').trim().toLowerCase(),
     solveCapturePackage: false,
     allowExistingLookup: false,
     hasConcreteExecutionInputs: false,
