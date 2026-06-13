@@ -74,14 +74,15 @@ function createExecutors({ bridgeService, hostService, fallback = null } = {}) {
 }
 
 function prepareCommandForExecution(command, context = {}) {
+  const normalizedCommand = normalizeCommandForExecution(command);
   if (context.agentPrivilegeIsolation !== true) {
-    return { ok: true, command, isolated: false };
+    return { ok: true, command: normalizedCommand, isolated: false };
   }
   const user = cleanUser(context.agentUser || 'oneshell-agent');
   if (!user) {
     return { ok: false, error: 'Agent 权限隔离用户非法，请在设置中使用普通 Linux 用户名（如 oneshell-agent）' };
   }
-  const innerCommand = isReadonlyCommand(command) ? withReadonlySudo(command) : command;
+  const innerCommand = isReadonlyCommand(normalizedCommand) ? withReadonlySudo(normalizedCommand) : normalizedCommand;
   return {
     ok: true,
     command: `runuser -u ${user} -- bash -lc ${shellQuote(innerCommand)}`,
@@ -89,6 +90,10 @@ function prepareCommandForExecution(command, context = {}) {
     user,
     readonlySudo: innerCommand !== command,
   };
+}
+
+function normalizeCommandForExecution(command) {
+  return String(command || '').replace(/(^|[\n;]|\&\&|\|\|)(\s*)printf\s+(['"])-/g, '$1$2printf -- $3-');
 }
 
 function withReadonlySudo(command) {
@@ -132,4 +137,4 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-module.exports = { createExecutors, prepareCommandForExecution };
+module.exports = { createExecutors, normalizeCommandForExecution, prepareCommandForExecution };

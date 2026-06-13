@@ -24,6 +24,16 @@ function createSecretRouter({ secretService }) {
     }
   });
 
+  router.get('/secrets/:id', (req, res) => {
+    try {
+      const secret = secretService.get?.(req.params.id) || null;
+      if (!secret) return res.status(404).json({ ok: false, error: '保存的凭据不存在或已删除' });
+      return res.json({ ok: true, secret });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
   router.delete('/secrets/:id', (req, res) => {
     try {
       const deleted = secretService.remove(req.params.id);

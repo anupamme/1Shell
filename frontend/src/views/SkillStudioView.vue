@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // IDE 工作台（skill-studio） — 老 skill-studio.html (516) + skill-studio.js (934) 主入口
 // 迭代 1：全部 UI 骨架 + 7 socket on + 5 emit + deploy_mcp + refine 入口 + 历史抽屉 + 文件浏览器
-// 迭代 2 接：安全模式审批条 + 本地 MCP 启停
+// 迭代 2 接：Agent 审批条 + 本地 MCP 启停
 import { ref } from 'vue';
 import { useStudioRunner } from '@/composables/useStudioRunner';
 import HostList from '@/components/studio/HostList.vue';
@@ -112,15 +112,11 @@ function openFilePicker(): void {
           <InputArea
             :task-value="r.taskInput.value"
             :summary="r.summaryText.value"
-            :safe-mode="r.safeMode.value"
-            :unlimited-turns="r.unlimitedTurns.value"
             :cc-collab="r.ccCollab.value"
             :is-running="r.isRunning.value"
             @update:task-value="(v: string) => (r.taskInput.value = v)"
             @send="r.onSend"
             @stop="r.onStop"
-            @update:safe-mode="(v: boolean) => r.setSafeMode(v)"
-            @update:unlimited-turns="(v: boolean) => r.setUnlimitedTurns(v)"
             @update:cc-collab="(v: boolean) => r.setCcCollab(v)"
           />
         </main>
@@ -165,7 +161,7 @@ function openFilePicker(): void {
       @pick="(hid: string, p: string) => r.addPickedPath(hid, p)"
     />
 
-    <!-- 安全模式审批条（底部浮出 · 迭代 2） -->
+    <!-- Agent 审批条（底部浮出 · 迭代 2） -->
     <ApproveBar
       :payload="r.pendingApprove.value"
       :countdown="r.approveCountdown.value"

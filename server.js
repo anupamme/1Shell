@@ -94,14 +94,10 @@ const { createClaudeCodeSkillRegistry } = require('./src/skills/claude-code-skil
 const { createLibraryService } = require('./src/skills/library.service');
 const { createSkillRunner } = require('./src/skills/runner');
 const { createSkillRouter } = require('./src/routes/skill.routes');
-const { createSkillStudioRouter } = require('./src/routes/skill-studio.routes');
 const { createMcpRegistry } = require('./src/services/mcp-registry.service');
 const { createMcpRegistryRouter } = require('./src/routes/mcp-registry.routes');
 const { createExecRouter } = require('./src/routes/exec.routes');
-const { createProgramRegistry } = require('./src/programs/registry');
-const { createProgramStateService } = require('./src/programs/state.service');
-const { createProgramEngine } = require('./src/programs/engine');
-const { createProgramRouter } = require('./src/routes/program.routes');
+const { createAgentRuntime } = require('./src/agent-runtime');
 const { createSecretService } = require('./src/services/secret.service');
 const { createSecretRouter } = require('./src/routes/secret.routes');
 const { registerSkillSocketHandlers } = require('./src/sockets/registerSkillSocketHandlers');
@@ -146,6 +142,7 @@ const bridgeService = createBridgeService({ hostService, auditService, sshPool, 
 const securitySettingsService = createSecuritySettingsService({ dataDir, auditService, logger: log });
 // ─── Harness — AI 与外部世界的统一边界层 ────────────────────────────────
 const harness = createHarness({ bridgeService, hostService, auditService, db, logger: log, securitySettingsService });
+const agentRuntime = createAgentRuntime({ harness, io, logger: log });
 const probeDiagService = createProbeDiagService({ bridgeService, hostService, auditService, logger: log });
 const probeAgentInstallerService = createProbeAgentInstallerService({ rootDir: ROOT_DIR, bridgeService, hostService, probeAgentService, probeRelayService });
 const probeRelayInstallerService = createProbeRelayInstallerService({ rootDir: ROOT_DIR, hostService, bridgeService, probeRelayService });
@@ -170,28 +167,12 @@ const skillRunner = createSkillRunner({
   },
 });
 // ─── Program Engine (长驻程序) ───────────────────────────────────────────
-const programRegistry = createProgramRegistry(path.join(dataDir, 'programs'));
-const programStateService = createProgramStateService({ db });
-const programEngine = createProgramEngine({
-  registry: programRegistry,
-  stateService: programStateService,
-  bridgeService,
-  hostService,
-  aiService,
-  auditService,
-  logger: log,
-  io,
-  skillRegistry,
-  harness,
-  probeService,
-});
+// Program Engine 与 Task Packager 已随 Program/Task 系统移除。
 // ─── IDE Service (自由创作引擎) ─────────────────────────────────────────
 const ideTools = createIdeTools({
   bridgeService,
   hostService,
   skillRegistry: libraryService,
-  programEngine,
-  programRegistry,
   skillRunner,
   auditService,
   mcpRegistry,
@@ -211,7 +192,6 @@ const ideTools = createIdeTools({
   harness,
   onFileWritten: () => {
     try { libraryService.reload(); } catch { /* ignore */ }
-    try { programRegistry.reload(); } catch { /* ignore */ }
   },
 });
 const ideService = createIdeService({
@@ -225,6 +205,8 @@ const ideService = createIdeService({
   mcpRegistry,
   skillRegistry,
   harness,
+  agentRuntime,
+  secretService,
 });
 
 const mcpService = createMcpService({
@@ -237,8 +219,6 @@ const mcpService = createMcpService({
   mcpRegistry,
   scriptService,
   fileService,
-  programEngine,
-  programRegistry,
   probeService,
   probeAgentService,
   probeAggregatorService,
@@ -303,11 +283,9 @@ app.use('/api', createFileRouter({ fileService }));
 app.use('/api', createIpFilterRouter({ ipFilterService }));
 app.use('/api', createScriptRouter({ scriptService, aiService }));
 app.use('/api', createSkillRouter({ libraryService, skillRunner, claudeCodeSkillRegistry, aiService }));
-app.use('/api', createSkillStudioRouter({ hostService, libraryService, mcpRegistry, programRegistry }));
 app.use('/api', createMcpRegistryRouter({ mcpRegistry, localMcpService, localMcpDeployer }));
 app.use('/api', createExecRouter({ bridgeService, hostService }));
 app.use('/api', createSecretRouter({ secretService }));
-app.use('/api', createProgramRouter({ registry: programRegistry, stateService: programStateService, engine: programEngine, hostService, secretService }));
 
 // ─── Socket.IO ──────────────────────────────────────────────────────────
 io.use(authService.authenticateSocket);
@@ -335,9 +313,6 @@ probeService.startScheduler({
 probeTrafficService.startScheduler();
 probeAlertService.ensureDefaults();
 probeAggregatorService.startScheduler();
-
-// ─── Program Engine 启动（所有服务就位后再启）─────────────────────────
-programEngine.start();
 
 // ─── 自动启动本地 MCP Server（不阻塞服务器启动）──────────────────────
 (async () => {
@@ -382,7 +357,6 @@ server.listen(PORT, () => {
 // ─── 优雅退出 ───────────────────────────────────────────────────────────
 function shutdown() {
   log.info('1Shell 正在关闭...');
-  programEngine.stop();
   probeTrafficService.stopScheduler();
   probeAggregatorService.stopScheduler();
   localMcpService.stopAll();

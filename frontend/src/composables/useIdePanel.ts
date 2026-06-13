@@ -1,6 +1,6 @@
 // useIdePanel.ts — MainConsole 刀 5a · 1Shell AI 右栏面板
 // 1:1 复刻 [public/ide-panel.js](public/ide-panel.js)（467 行）
-// 单例：socket lifecycle 绑定 / safe / cc / unlimited 三 toggle / 安全模式审批 / send / stop / clear
+// 单例：socket lifecycle 绑定 / cc toggle / Agent 审批 / send / stop / clear
 //
 // 老版 index.html 实际没有 ide-tool-toggle / ide-tool-picker / ide-tool-chips DOM
 // （ide-panel.js 里 getElementById 为 null 时静默 no-op），故 1:1 不带工具选择器 UI
@@ -9,20 +9,19 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue';
 
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
+import { useApiClient } from '@/composables/useApiClient';
 import { useHostsStore } from '@/stores/hosts';
 import { useNotifyStore } from '@/stores/notify';
-import { bindIdeStreamHandlers } from '@/utils/ideStreamEvents';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
-import { createStreamDeltaBuffer } from '@/utils/streaming';
 import {
-  appendAiLine,
-  appendAiStreamDelta,
-  appendAiToolLog,
+  appendAiAssistantLine,
+  bindAiAgentStreamHandlers,
+  createAiAgentStreamController,
+  createAiAssistantDeltaBuffer,
+} from '@/composables/useAiAgentStream';
+import {
   createAiAssistantTurn,
   createAiUserTurn,
-  finishAiToolCall,
-  markAiAssistantStatus,
-  startAiToolCall,
   type AiAgentTurn,
   type AiAssistantTurn,
   type AiLineKind,
@@ -49,8 +48,34 @@ export interface IdeApproveRequest {
   title: string;
   toolName: string;
   detail: string;
+  mode: 'approval' | 'ask_user' | 'request_secret';
+  responseEvent: 'ide:approve-response' | 'ide:ask-user-response' | 'ide:secret-response';
+  secretName?: string;
+  label?: string;
+  provider?: string;
   /** 剩余秒数（响应式倒计时） */
   countdown: number;
+}
+
+export interface IdePackageDraftResult {
+  ok?: boolean;
+  programId: string;
+  trustLevel: string;
+  sourceTrustLevel?: string;
+  written?: boolean;
+  path?: string;
+  yaml?: string;
+  warnings?: string[];
+  provenance?: { agentRunId?: string; [key: string]: unknown };
+}
+
+export interface IdePackageDraftState {
+  visible: boolean;
+  loading: boolean;
+  saving: boolean;
+  error: string;
+  programId: string;
+  result: IdePackageDraftResult | null;
 }
 
 export interface IdePanelApi {
@@ -58,20 +83,21 @@ export interface IdePanelApi {
   readonly isRunning: Ref<boolean>;
   readonly inputText: Ref<string>;
   readonly statusText: Ref<string>;
-  readonly safeMode: Ref<boolean>;
   readonly claudeCodeEnabled: Ref<boolean>;
-  readonly unlimitedTurns: Ref<boolean>;
   readonly approveRequest: Ref<IdeApproveRequest | null>;
   readonly approveCustomText: Ref<string>;
+  readonly packageDraft: Ref<IdePackageDraftState>;
   readonly hasMessages: ComputedRef<boolean>;
+  readonly canPackageLastRun: ComputedRef<boolean>;
 
   initialize(): void;
   sendMessage(): void;
   stop(): void;
   resetChat(): void;
-  setSafeMode(v: boolean): void;
+  packageLastRun(): Promise<void>;
+  savePackageDraft(): Promise<void>;
+  closePackageDraft(): void;
   setClaudeCodeEnabled(v: boolean): void;
-  setUnlimitedTurns(v: boolean): void;
   approveAllow(): void;
   approveDeny(): void;
   approveCustom(): void;
@@ -102,6 +128,7 @@ function genSessionId(): string {
 
 function create(): InternalIdePanelApi {
   const sessionTerminal = useSessionTerminal();
+  const { requestJson } = useApiClient();
   const hosts = useHostsStore();
   const notify = useNotifyStore();
 
@@ -109,53 +136,33 @@ function create(): InternalIdePanelApi {
   const isRunning = ref(false);
   const inputText = ref('');
   const statusText = ref('待命');
-  const safeMode = ref(false);
   const claudeCodeEnabled = ref(false);
-  const unlimitedTurns = ref(false);
 
   const approveRequest = ref<IdeApproveRequest | null>(null);
   const approveCustomText = ref('');
+  const packageDraft = ref<IdePackageDraftState>({
+    visible: false,
+    loading: false,
+    saving: false,
+    error: '',
+    programId: '',
+    result: null,
+  });
+  const lastVerifiedRunId = ref('');
   let approveTickHandle: number | null = null;
 
   const hasMessages = computed(() => turns.value.length > 0);
+  const canPackageLastRun = computed(() => Boolean(lastVerifiedRunId.value && !isRunning.value));
 
   let sessionId: string | null = null;
   let socket: MinimalSocket | null = null;
   let currentAssistant: AiAssistantTurn | null = null;
-  let currentTextHadDelta = false;
   let stopFallbackHandle: number | null = null;
   let sendAckHandle: number | null = null;
   let sendConnectHandle: number | null = null;
   let pendingConnectSend: (() => void) | null = null;
   let streamCleanup: (() => void) | null = null;
-  let activeRunId: string | null = null;
-  let stopRequested = false;
-  const stoppedRunIds = new Set<string>();
-
-  interface IdeSocketMessage {
-    sessionId?: string;
-    runId?: string;
-  }
-
-  function matchesCurrentRun(msg: IdeSocketMessage | null | undefined, options: { allowStopped?: boolean; allowAfterStop?: boolean } = {}): boolean {
-    if (!msg || msg.sessionId !== sessionId) return false;
-    if (msg.runId) {
-      if (stoppedRunIds.has(msg.runId) && !options.allowStopped) return false;
-      if (activeRunId && msg.runId !== activeRunId) return false;
-      activeRunId = msg.runId;
-    }
-    if (stopRequested && !options.allowAfterStop) return false;
-    return true;
-  }
-
-  function rememberStoppedRun(runId = activeRunId): void {
-    if (!runId) return;
-    stoppedRunIds.add(runId);
-    if (stoppedRunIds.size > 20) {
-      const firstStopped = stoppedRunIds.values().next().value;
-      if (firstStopped) stoppedRunIds.delete(firstStopped);
-    }
-  }
+  const streamController = createAiAgentStreamController(() => sessionId);
 
   function getSocket(): MinimalSocket | null {
     const s = sessionTerminal.getSocket?.() as MinimalSocket | undefined | null;
@@ -163,6 +170,14 @@ function create(): InternalIdePanelApi {
   }
 
   function setStatus(text: string): void { statusText.value = text; }
+
+  function doneStatusText(taskStatus?: string, round?: number): string {
+    const suffix = `(${round ?? 0} 轮)`;
+    if (taskStatus === 'blocked') return `已阻塞 ${suffix}`;
+    if (taskStatus === 'failed') return `失败 ${suffix}`;
+    if (taskStatus === 'unverified' || taskStatus === 'partial') return `未验证 ${suffix}`;
+    return `完成 ${suffix}`;
+  }
 
   function pushUser(text: string): void {
     turns.value.push(createAiUserTurn(text));
@@ -183,15 +198,10 @@ function create(): InternalIdePanelApi {
   }
 
   function appendLine(kind: AiLineKind, text: string): void {
-    const t = ensureAssistant();
-    appendAiLine(t, kind, text);
-    touchTurns();
+    appendAiAssistantLine(deltaBuffer, ensureAssistant, touchTurns, kind, text);
   }
 
-  const deltaBuffer = createStreamDeltaBuffer((flushed) => {
-    appendAiStreamDelta(ensureAssistant(), flushed);
-    touchTurns();
-  });
+  const deltaBuffer = createAiAssistantDeltaBuffer(ensureAssistant, touchTurns);
 
   function appendDelta(text: string): void {
     deltaBuffer.push(text);
@@ -200,7 +210,7 @@ function create(): InternalIdePanelApi {
   function finalize(): void {
     deltaBuffer.flushNow();
     isRunning.value = false;
-    stopRequested = false;
+    streamController.clearStopRequested();
     currentAssistant = null;
     approveRequest.value = null;
     approveCustomText.value = '';
@@ -237,7 +247,7 @@ function create(): InternalIdePanelApi {
       clearApproveTick();
       return;
     }
-    socket.emit('ide:approve-response', {
+    socket.emit(req.responseEvent, {
       requestId: req.requestId,
       sessionId: req.sessionId,
       action,
@@ -263,93 +273,26 @@ function create(): InternalIdePanelApi {
     streamCleanup = null;
     socket = s;
 
-    streamCleanup = bindIdeStreamHandlers(s, [
-      ['ide:thinking', (msg: unknown) => {
-        const m = msg as IdeSocketMessage;
-        if (!matchesCurrentRun(m)) return;
-        currentTextHadDelta = false;
-        setStatus('思考中...');
-      }],
-      ['ide:text', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { text?: string };
-        if (!matchesCurrentRun(m) || !m.text || currentTextHadDelta) return;
-        appendDelta(m.text);
-      }],
-      ['ide:text-delta', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { delta?: string };
-        if (!matchesCurrentRun(m) || !m.delta) return;
-        currentTextHadDelta = true;
-        setStatus('生成中...');
-        appendDelta(m.delta);
-      }],
-      ['ide:tool-start', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { name?: string; input?: unknown; toolUseId?: string };
-        if (!matchesCurrentRun(m)) return;
-        deltaBuffer.flushNow();
-        startAiToolCall(ensureAssistant(), m.toolUseId || `tool-${Date.now()}`, m.name || 'unknown', m.input);
-        touchTurns();
-        setStatus(m.name ? `调用 ${m.name}...` : '调用工具...');
-      }],
-      ['ide:tool-delta', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { toolUseId?: string; stream?: string; text?: string };
-        if (!matchesCurrentRun(m) || !m.toolUseId || !m.text || !currentAssistant) return;
-        deltaBuffer.flushNow();
-        if (appendAiToolLog(currentAssistant, m.toolUseId, m.stream === 'stderr' ? 'stderr' : 'stdout', m.text)) {
-          touchTurns();
-          setStatus('工具执行中...');
-        }
-      }],
-      ['ide:tool-end', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { result?: unknown; is_error?: boolean; toolUseId?: string };
-        if (!matchesCurrentRun(m)) return;
-        if (currentAssistant && m.toolUseId && finishAiToolCall(currentAssistant, m.toolUseId, Boolean(m.is_error), m.result)) {
-          touchTurns();
-        }
-        setStatus(m.is_error ? '工具返回错误' : '思考中...');
-      }],
-      ['ide:done', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { round?: number };
-        if (!matchesCurrentRun(m)) return;
-        deltaBuffer.flushNow();
-        markAiAssistantStatus(currentAssistant, 'done');
-        touchTurns();
-        setStatus(`完成 (${m.round ?? 0} 轮)`);
-        finalize();
-      }],
-      ['ide:error', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { error?: string };
-        if (!matchesCurrentRun(m)) return;
-        setStatus('出错');
-        appendLine('error', `✘ ${m.error || '未知错误'}`);
-        finalize();
-      }],
-      ['ide:cancelled', (msg: unknown) => {
-        const m = msg as IdeSocketMessage;
-        if (!matchesCurrentRun(m, { allowStopped: true, allowAfterStop: true })) return;
-        deltaBuffer.flushNow();
-        markAiAssistantStatus(currentAssistant, 'cancelled');
-        touchTurns();
-        rememberStoppedRun(m.runId);
-        setStatus('已取消');
-        finalize();
-      }],
-      ['ide:approve-request', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & {
-          requestId?: string;
-          title?: string;
-          toolName?: string;
-          detail?: string;
-        };
-        if (!matchesCurrentRun(m) || !m.requestId) return;
-
+    streamCleanup = bindAiAgentStreamHandlers(s, streamController, {
+      setStatus,
+      finalize,
+      appendLine,
+      appendDelta,
+      flushDelta: () => deltaBuffer.flushNow(),
+      ensureAssistant,
+      getAssistant: () => currentAssistant,
+      touchAssistant: touchTurns,
+      onApproveRequest: (m) => {
         clearApproveTick();
         approveCustomText.value = '';
         approveRequest.value = {
-          requestId: m.requestId,
-          sessionId: m.sessionId!,
-          title: m.title || '安全模式',
+          requestId: m.requestId || '',
+          sessionId: m.sessionId || sessionId || '',
+          title: m.title || 'Agent 审批',
           toolName: m.toolName || '操作',
           detail: m.detail || '',
+          mode: 'approval',
+          responseEvent: 'ide:approve-response',
           countdown: 120,
         };
         approveTickHandle = window.setInterval(() => {
@@ -358,28 +301,58 @@ function create(): InternalIdePanelApi {
           req.countdown -= 1;
           if (req.countdown <= 0) respondApprove('deny');
         }, 1000);
+      },
+      onUserInputRequest: (m) => {
+        clearApproveTick();
+        approveCustomText.value = '';
+        approveRequest.value = {
+          requestId: m.requestId,
+          sessionId: m.sessionId || sessionId || '',
+          title: m.title || (m.kind === 'request_secret' ? '需要 Secret 引用' : '需要补充信息'),
+          toolName: m.toolName || (m.kind === 'request_secret' ? 'request_secret' : 'ask_user'),
+          detail: m.detail || m.question || m.reason || '',
+          mode: m.kind,
+          responseEvent: m.responseEvent,
+          secretName: m.secretName || '',
+          label: m.label || '',
+          provider: m.provider || '',
+          countdown: 120,
+        };
+        approveTickHandle = window.setInterval(() => {
+          const req = approveRequest.value;
+          if (!req) { clearApproveTick(); return; }
+          req.countdown -= 1;
+          if (req.countdown <= 0) respondApprove('deny');
+        }, 1000);
+      },
+      onDone: (m) => {
+        lastVerifiedRunId.value = m.runId && m.taskStatus === 'verified' ? m.runId : '';
+        deltaBuffer.flushNow();
+        if (currentAssistant) currentAssistant.status = ['blocked', 'failed'].includes(String(m.taskStatus || '')) ? 'error' : 'done';
+        touchTurns();
+        setStatus(doneStatusText(m.taskStatus, m.round));
+        finalize();
+      },
+    }, [
+      ['connect', () => {
+        if (sessionId && isRunning.value) {
+          s.emit('ide:reattach', { sessionId });
+          setStatus('Socket 已重连，恢复接收...');
+        }
+      }],
+      ['disconnect', () => {
+        if (isRunning.value) setStatus('Socket 已断开，等待重连...');
+      }],
+      ['connect_error', () => {
+        if (isRunning.value) setStatus('Socket 连接异常，等待重连...');
       }],
     ]);
-  }
-
-  function setSafeMode(v: boolean): void {
-    safeMode.value = v;
-    if (socket && sessionId) {
-      socket.emit('ide:safe-mode', { sessionId, enabled: v });
-    }
   }
 
   function setClaudeCodeEnabled(v: boolean): void {
     claudeCodeEnabled.value = v;
     if (socket && sessionId) {
       socket.emit('ide:claude-code-collab', { sessionId, enabled: v });
-    }
-  }
-
-  function setUnlimitedTurns(v: boolean): void {
-    unlimitedTurns.value = v;
-    if (socket && sessionId) {
-      socket.emit('ide:unlimited-turns', { sessionId, enabled: v });
     }
   }
 
@@ -411,9 +384,7 @@ function create(): InternalIdePanelApi {
       sessionId,
       message: text,
       context: buildContext(),
-      safeMode: safeMode.value,
       claudeCodeEnabled: claudeCodeEnabled.value,
-      unlimitedTurns: unlimitedTurns.value,
     }, (ack: { ok?: boolean; error?: string } | undefined) => {
       if (sendAckHandle !== null) {
         window.clearTimeout(sendAckHandle);
@@ -464,17 +435,12 @@ function create(): InternalIdePanelApi {
 
     if (!sessionId) {
       sessionId = genSessionId();
-      socket.emit('ide:safe-mode', { sessionId, enabled: safeMode.value });
       if (claudeCodeEnabled.value) {
         socket.emit('ide:claude-code-collab', { sessionId, enabled: true });
       }
-      if (unlimitedTurns.value) {
-        socket.emit('ide:unlimited-turns', { sessionId, enabled: true });
-      }
     }
 
-    activeRunId = null;
-    stopRequested = false;
+    streamController.resetForNewRun();
     pushUser(text);
     inputText.value = '';
 
@@ -489,8 +455,8 @@ function create(): InternalIdePanelApi {
   function stop(): void {
     if (!socket || !sessionId) return;
     const stoppedSessionId = sessionId;
-    stopRequested = true;
-    rememberStoppedRun();
+    streamController.markStopRequested();
+    streamController.rememberStoppedRun();
     socket.emit('ide:stop', { sessionId: stoppedSessionId }, (ack: { ok?: boolean } | undefined) => {
       if (!ack?.ok && isRunning.value) {
         setStatus('停止请求失败');
@@ -513,13 +479,89 @@ function create(): InternalIdePanelApi {
       socket.emit('ide:clear', { sessionId });
     }
     sessionId = null;
-    activeRunId = null;
-    stopRequested = false;
-    stoppedRunIds.clear();
+    lastVerifiedRunId.value = '';
+    packageDraft.value = {
+      visible: false,
+      loading: false,
+      saving: false,
+      error: '',
+      programId: '',
+      result: null,
+    };
+    streamController.resetForNewSession();
     currentAssistant = null;
     deltaBuffer.clear();
     turns.value = [];
     setStatus('待命');
+  }
+
+  async function packageLastRun(): Promise<void> {
+    const runId = lastVerifiedRunId.value;
+    if (!runId || isRunning.value) {
+      notify.warn('没有可打包的已完成 AgentRun');
+      return;
+    }
+    packageDraft.value = {
+      ...packageDraft.value,
+      visible: true,
+      loading: true,
+      saving: false,
+      error: '',
+      result: null,
+    };
+    try {
+      const result = await requestJson<IdePackageDraftResult>('/api/task-drafts/from-agent-run', {
+        method: 'POST',
+        body: JSON.stringify({
+          runId,
+          programId: packageDraft.value.programId.trim() || undefined,
+          write: false,
+        }),
+      });
+      packageDraft.value = {
+        ...packageDraft.value,
+        loading: false,
+        programId: result.programId || packageDraft.value.programId,
+        result,
+      };
+      notify.success('已生成自动化任务草稿预览');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      packageDraft.value = { ...packageDraft.value, loading: false, error: message };
+      notify.error(`打包失败：${message}`);
+    }
+  }
+
+  async function savePackageDraft(): Promise<void> {
+    const runId = lastVerifiedRunId.value;
+    if (!runId || packageDraft.value.saving) return;
+    packageDraft.value = { ...packageDraft.value, saving: true, error: '' };
+    try {
+      const result = await requestJson<IdePackageDraftResult>('/api/task-drafts/from-agent-run', {
+        method: 'POST',
+        body: JSON.stringify({
+          runId,
+          programId: packageDraft.value.programId.trim() || packageDraft.value.result?.programId || undefined,
+          write: true,
+          overwrite: false,
+        }),
+      });
+      packageDraft.value = {
+        ...packageDraft.value,
+        saving: false,
+        programId: result.programId || packageDraft.value.programId,
+        result,
+      };
+      notify.success(`自动化任务草稿已保存：${result.programId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      packageDraft.value = { ...packageDraft.value, saving: false, error: message };
+      notify.error(`保存失败：${message}`);
+    }
+  }
+
+  function closePackageDraft(): void {
+    packageDraft.value = { ...packageDraft.value, visible: false, error: '' };
   }
 
   let initialized = false;
@@ -552,19 +594,20 @@ function create(): InternalIdePanelApi {
     isRunning,
     inputText,
     statusText,
-    safeMode,
     claudeCodeEnabled,
-    unlimitedTurns,
     approveRequest,
     approveCustomText,
+    packageDraft,
     hasMessages,
+    canPackageLastRun,
     initialize,
     sendMessage,
     stop,
     resetChat,
-    setSafeMode,
+    packageLastRun,
+    savePackageDraft,
+    closePackageDraft,
     setClaudeCodeEnabled,
-    setUnlimitedTurns,
     approveAllow,
     approveDeny,
     approveCustom,

@@ -84,8 +84,7 @@ const remoteMcps = computed(() => allMcpServers.value.filter((m) => !isLocalMcp(
 const localMcps  = computed(() => allMcpServers.value.filter((m) => isLocalMcp(m)));
 
 function isProtectedClaudeCodeSkill(s: ClaudeCodeSkillInfo): boolean {
-  return s.id === 'program-authoring'
-    || s.id === 'oneshell-skill-authoring'
+  return s.id === 'oneshell-skill-authoring'
     || s.deletable === false
     || s.builtin === true
     || s.system === true;

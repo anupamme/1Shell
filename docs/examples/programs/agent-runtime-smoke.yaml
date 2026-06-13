@@ -1,0 +1,49 @@
+# 仅用于开发期验证 Agent Runtime 接入边界，不作为内置用户 Program 模板。
+name: Agent Runtime 只读烟测
+description: 用最小只读 AI Program 验证 Agent Runtime、phase、budget、command verify 与 taskStatus 闭环。
+enabled: true
+hosts: all
+inputs: []
+workflow:
+  phases:
+    - id: collect
+      label: 采集只读信息
+      required: true
+    - id: verify
+      label: 验证闭环
+      required: true
+  budget:
+    max_tool_calls: 8
+    max_commands: 5
+    max_runtime_ms: 180000
+    max_output_chars_per_command: 4000
+  success:
+    requires_phases:
+      - collect
+      - verify
+    requires_verify: true
+verify:
+  - type: command
+    run: "echo agent-runtime-smoke-ok"
+    expect_exit_code: 0
+    timeout: 30000
+triggers:
+  - id: manual
+    type: manual
+    action: run
+actions:
+  run:
+    label: 运行只读烟测
+    steps:
+      - id: smoke_check
+        type: ai
+        label: 只读 Agent Runtime 烟测
+        capabilities:
+          - read_only
+        goal: |
+          在当前目标 VPS 上完成一次只读运行环境烟测，并产出简短报告。
+
+          目标：
+          - 识别少量基础环境信息，给出命令证据摘要。
+          - 不执行安装、写入、删除、重启、停止、reload 或配置变更。
+          - 如果无法安全完成，报告阻塞原因和已完成内容。

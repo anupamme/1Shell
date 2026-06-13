@@ -11,17 +11,15 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import { io, type Socket } from 'socket.io-client';
 
 import { useNotifyStore } from '@/stores/notify';
-import { bindIdeStreamHandlers } from '@/utils/ideStreamEvents';
-import { createStreamDeltaBuffer } from '@/utils/streaming';
 import {
-  appendAiLine,
-  appendAiStreamDelta,
-  appendAiToolLog,
+  appendAiAssistantLine,
+  bindAiAgentStreamHandlers,
+  createAiAgentStreamController,
+  createAiAssistantDeltaBuffer,
+} from '@/composables/useAiAgentStream';
+import {
   createAiAssistantTurn,
   createAiUserTurn,
-  finishAiToolCall,
-  markAiAssistantStatus,
-  startAiToolCall,
   type AiAgentTurn,
   type AiAssistantTurn,
   type AiLineKind,
@@ -39,6 +37,11 @@ export interface FabApproveRequest {
   title: string;
   toolName: string;
   detail: string;
+  mode: 'approval' | 'ask_user' | 'request_secret';
+  responseEvent: 'ide:approve-response' | 'ide:ask-user-response' | 'ide:secret-response';
+  secretName?: string;
+  label?: string;
+  provider?: string;
   countdown: number;
 }
 
@@ -53,7 +56,6 @@ export interface AiFabApi {
   readonly isRunning: Ref<boolean>;
   readonly inputText: Ref<string>;
   readonly statusText: Ref<string>;
-  readonly safeMode: Ref<boolean>;
   readonly approveRequest: Ref<FabApproveRequest | null>;
   readonly approveCustomText: Ref<string>;
   readonly hasMessages: ComputedRef<boolean>;
@@ -64,7 +66,6 @@ export interface AiFabApi {
   sendMessage(): void;
   stop(): void;
   resetChat(): void;
-  setSafeMode(v: boolean): void;
   approveAllow(): void;
   approveDeny(): void;
   approveCustom(): void;
@@ -102,7 +103,6 @@ function create(): InternalAiFabApi {
   const isRunning = ref(false);
   const inputText = ref('');
   const statusText = ref('待命');
-  const safeMode = ref(false);
   const approveRequest = ref<FabApproveRequest | null>(null);
   const approveCustomText = ref('');
   const moduleCtx = ref<ModuleContext>({ name: '1Shell', icon: '🖥', hint: '' });
@@ -114,40 +114,12 @@ function create(): InternalAiFabApi {
   let socket: Socket | null = null;
   let socketBound = false;
   let approveTickHandle: number | null = null;
-  let currentTextHadDelta = false;
   let stopFallbackHandle: number | null = null;
   let sendAckHandle: number | null = null;
   let sendConnectHandle: number | null = null;
   let pendingConnectSend: (() => void) | null = null;
   let streamCleanup: (() => void) | null = null;
-  let activeRunId: string | null = null;
-  let stopRequested = false;
-  const stoppedRunIds = new Set<string>();
-
-  interface IdeSocketMessage {
-    sessionId?: string;
-    runId?: string;
-  }
-
-  function matchesCurrentRun(msg: IdeSocketMessage | null | undefined, options: { allowStopped?: boolean; allowAfterStop?: boolean } = {}): boolean {
-    if (!msg || msg.sessionId !== sessionId) return false;
-    if (msg.runId) {
-      if (stoppedRunIds.has(msg.runId) && !options.allowStopped) return false;
-      if (activeRunId && msg.runId !== activeRunId) return false;
-      activeRunId = msg.runId;
-    }
-    if (stopRequested && !options.allowAfterStop) return false;
-    return true;
-  }
-
-  function rememberStoppedRun(runId = activeRunId): void {
-    if (!runId) return;
-    stoppedRunIds.add(runId);
-    if (stoppedRunIds.size > 20) {
-      const firstStopped = stoppedRunIds.values().next().value;
-      if (firstStopped) stoppedRunIds.delete(firstStopped);
-    }
-  }
+  const streamController = createAiAgentStreamController(() => sessionId);
 
   function ensureSocket(): Socket | null {
     if (socket) return socket;
@@ -179,15 +151,10 @@ function create(): InternalAiFabApi {
   }
 
   function appendLine(kind: AiLineKind, text: string): void {
-    deltaBuffer.flushNow();
-    appendAiLine(ensureAssistant(), kind, text);
-    touchTurns();
+    appendAiAssistantLine(deltaBuffer, ensureAssistant, touchTurns, kind, text);
   }
 
-  const deltaBuffer = createStreamDeltaBuffer((flushed) => {
-    appendAiStreamDelta(ensureAssistant(), flushed);
-    touchTurns();
-  });
+  const deltaBuffer = createAiAssistantDeltaBuffer(ensureAssistant, touchTurns);
 
   function appendDelta(text: string): void {
     deltaBuffer.push(text);
@@ -196,7 +163,7 @@ function create(): InternalAiFabApi {
   function finalize(): void {
     deltaBuffer.flushNow();
     isRunning.value = false;
-    stopRequested = false;
+    streamController.clearStopRequested();
     currentAssistant = null;
     approveRequest.value = null;
     approveCustomText.value = '';
@@ -234,7 +201,7 @@ function create(): InternalAiFabApi {
       clearApproveTick();
       return;
     }
-    socket.emit('ide:approve-response', {
+    socket.emit(req.responseEvent, {
       requestId: req.requestId,
       sessionId: req.sessionId,
       action,
@@ -259,93 +226,26 @@ function create(): InternalAiFabApi {
     if (!socket) return;
     socketBound = true;
 
-    streamCleanup = bindIdeStreamHandlers(socket, [
-      ['ide:thinking', (msg: unknown) => {
-        const m = msg as IdeSocketMessage;
-        if (!matchesCurrentRun(m)) return;
-        currentTextHadDelta = false;
-        setStatus('思考中...');
-      }],
-      ['ide:text', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { text?: string };
-        if (!matchesCurrentRun(m) || !m.text || currentTextHadDelta) return;
-        appendDelta(m.text);
-      }],
-      ['ide:text-delta', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { delta?: string };
-        if (!matchesCurrentRun(m) || !m.delta) return;
-        currentTextHadDelta = true;
-        setStatus('生成中...');
-        appendDelta(m.delta);
-      }],
-      ['ide:tool-start', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { name?: string; input?: unknown; toolUseId?: string };
-        if (!matchesCurrentRun(m)) return;
-        deltaBuffer.flushNow();
-        startAiToolCall(ensureAssistant(), m.toolUseId || `tool-${Date.now()}`, m.name || 'unknown', m.input);
-        touchTurns();
-        setStatus(m.name ? `调用 ${m.name}...` : '调用工具...');
-      }],
-      ['ide:tool-delta', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { toolUseId?: string; stream?: string; text?: string };
-        if (!matchesCurrentRun(m) || !m.toolUseId || !m.text || !currentAssistant) return;
-        deltaBuffer.flushNow();
-        if (appendAiToolLog(currentAssistant, m.toolUseId, m.stream === 'stderr' ? 'stderr' : 'stdout', m.text)) {
-          touchTurns();
-          setStatus('工具执行中...');
-        }
-      }],
-      ['ide:tool-end', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { result?: unknown; is_error?: boolean; toolUseId?: string };
-        if (!matchesCurrentRun(m)) return;
-        if (currentAssistant && m.toolUseId && finishAiToolCall(currentAssistant, m.toolUseId, Boolean(m.is_error), m.result)) {
-          touchTurns();
-        }
-        setStatus(m.is_error ? '工具返回错误' : '思考中...');
-      }],
-      ['ide:done', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { round?: number };
-        if (!matchesCurrentRun(m)) return;
-        deltaBuffer.flushNow();
-        markAiAssistantStatus(currentAssistant, 'done');
-        touchTurns();
-        setStatus(`完成 (${m.round ?? 0} 轮)`);
-        finalize();
-      }],
-      ['ide:error', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & { error?: string };
-        if (!matchesCurrentRun(m)) return;
-        setStatus('出错');
-        appendLine('error', `✘ ${m.error || '未知错误'}`);
-        finalize();
-      }],
-      ['ide:cancelled', (msg: unknown) => {
-        const m = msg as IdeSocketMessage;
-        if (!matchesCurrentRun(m, { allowStopped: true, allowAfterStop: true })) return;
-        deltaBuffer.flushNow();
-        markAiAssistantStatus(currentAssistant, 'cancelled');
-        touchTurns();
-        rememberStoppedRun(m.runId);
-        setStatus('已取消');
-        finalize();
-      }],
-      ['ide:approve-request', (msg: unknown) => {
-        const m = msg as IdeSocketMessage & {
-          requestId?: string;
-          title?: string;
-          toolName?: string;
-          detail?: string;
-        };
-        if (!matchesCurrentRun(m) || !m.requestId) return;
-
+    streamCleanup = bindAiAgentStreamHandlers(socket, streamController, {
+      setStatus,
+      finalize,
+      appendLine,
+      appendDelta,
+      flushDelta: () => deltaBuffer.flushNow(),
+      ensureAssistant,
+      getAssistant: () => currentAssistant,
+      touchAssistant: touchTurns,
+      onApproveRequest: (m) => {
         clearApproveTick();
         approveCustomText.value = '';
         approveRequest.value = {
           requestId: m.requestId,
-          sessionId: m.sessionId!,
-          title: m.title || '安全模式',
+          sessionId: m.sessionId || sessionId || '',
+          title: m.title || 'Agent 审批',
           toolName: m.toolName || '操作',
           detail: m.detail || '',
+          mode: 'approval',
+          responseEvent: 'ide:approve-response',
           countdown: 120,
         };
         approveTickHandle = window.setInterval(() => {
@@ -354,16 +254,31 @@ function create(): InternalAiFabApi {
           req.countdown -= 1;
           if (req.countdown <= 0) respondApprove('deny');
         }, 1000);
-      }],
-    ]);
-  }
-
-  function setSafeMode(v: boolean): void {
-    safeMode.value = v;
-    const socket = getSocket();
-    if (socket && sessionId) {
-      socket.emit('ide:safe-mode', { sessionId, enabled: v });
-    }
+      },
+      onUserInputRequest: (m) => {
+        clearApproveTick();
+        approveCustomText.value = '';
+        approveRequest.value = {
+          requestId: m.requestId,
+          sessionId: m.sessionId || sessionId || '',
+          title: m.title || (m.kind === 'request_secret' ? '需要 Secret 引用' : '需要补充信息'),
+          toolName: m.toolName || (m.kind === 'request_secret' ? 'request_secret' : 'ask_user'),
+          detail: m.detail || m.question || m.reason || '',
+          mode: m.kind,
+          responseEvent: m.responseEvent,
+          secretName: m.secretName || '',
+          label: m.label || '',
+          provider: m.provider || '',
+          countdown: 120,
+        };
+        approveTickHandle = window.setInterval(() => {
+          const req = approveRequest.value;
+          if (!req) { clearApproveTick(); return; }
+          req.countdown -= 1;
+          if (req.countdown <= 0) respondApprove('deny');
+        }, 1000);
+      },
+    });
   }
 
   function setModuleContext(ctx: ModuleContext): void {
@@ -389,7 +304,6 @@ function create(): InternalAiFabApi {
       sessionId,
       message: text,
       context: buildContext(),
-      safeMode: safeMode.value,
     }, (ack: { ok?: boolean; error?: string } | undefined) => {
       if (sendAckHandle !== null) {
         window.clearTimeout(sendAckHandle);
@@ -441,11 +355,9 @@ function create(): InternalAiFabApi {
 
     if (!sessionId) {
       sessionId = genSessionId();
-      socket.emit('ide:safe-mode', { sessionId, enabled: safeMode.value });
     }
 
-    activeRunId = null;
-    stopRequested = false;
+    streamController.resetForNewRun();
     pushUser(text);
     inputText.value = '';
 
@@ -460,8 +372,8 @@ function create(): InternalAiFabApi {
     const socket = getSocket();
     if (!socket || !sessionId) return;
     const stoppedSessionId = sessionId;
-    stopRequested = true;
-    rememberStoppedRun();
+    streamController.markStopRequested();
+    streamController.rememberStoppedRun();
     socket.emit('ide:stop', { sessionId: stoppedSessionId }, (ack: { ok?: boolean } | undefined) => {
       if (!ack?.ok && isRunning.value) {
         setStatus('停止请求失败');
@@ -485,9 +397,7 @@ function create(): InternalAiFabApi {
       socket.emit('ide:clear', { sessionId });
     }
     sessionId = null;
-    activeRunId = null;
-    stopRequested = false;
-    stoppedRunIds.clear();
+    streamController.resetForNewSession();
     currentAssistant = null;
     deltaBuffer.clear();
     turns.value = [];
@@ -520,7 +430,6 @@ function create(): InternalAiFabApi {
     isRunning,
     inputText,
     statusText,
-    safeMode,
     approveRequest,
     approveCustomText,
     hasMessages,
@@ -530,7 +439,6 @@ function create(): InternalAiFabApi {
     sendMessage,
     stop,
     resetChat,
-    setSafeMode,
     approveAllow,
     approveDeny,
     approveCustom,

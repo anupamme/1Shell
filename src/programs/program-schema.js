@@ -60,6 +60,7 @@ function normalizeProgram(doc, id, sourcePath = 'program.yaml') {
   const enabled = doc.enabled !== false;
   const hosts = normalizeHosts(doc.hosts, sourcePath);
   const inputs = normalizeInputs(doc.inputs || [], `${sourcePath} inputs`);
+  const metadata = normalizeMetadata(doc.metadata);
 
   const rawActions = doc.actions || {};
   if (!rawActions || typeof rawActions !== 'object' || Array.isArray(rawActions)) {
@@ -93,7 +94,17 @@ function normalizeProgram(doc, id, sourcePath = 'program.yaml') {
     actions,
     ui,
   };
+  if (metadata) program.metadata = metadata;
+  const workflow = normalizeWorkflowContract(doc.workflow);
+  const verify = normalizeVerifyContract(doc.verify);
+  if (workflow) program.workflow = workflow;
+  if (verify.length > 0) program.verify = verify;
   return program;
+}
+
+function normalizeMetadata(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return JSON.parse(JSON.stringify(raw));
 }
 
 function normalizeHosts(rawHosts, sourcePath) {
@@ -124,7 +135,12 @@ function normalizeAction(raw, actName, sourcePath, rootInputs = []) {
   const label = raw.label ? String(raw.label).trim() : '';
   const inputs = normalizeInputs(raw.inputs || [], `${sourcePath} action="${actName}" inputs`);
   validateInputReferences(steps, [...rootInputs, ...inputs], `${sourcePath} action="${actName}"`);
-  return { name: raw.name ? String(raw.name) : actName, label, inputs, steps, on_fail: onFail };
+  const action = { name: raw.name ? String(raw.name) : actName, label, inputs, steps, on_fail: onFail };
+  const workflow = normalizeWorkflowContract(raw.workflow);
+  const verify = normalizeVerifyContract(raw.verify);
+  if (workflow) action.workflow = workflow;
+  if (verify.length > 0) action.verify = verify;
+  return action;
 }
 
 function validateInputReferences(steps, inputs, sourcePath) {
@@ -217,14 +233,13 @@ function normalizeAiStep(step, id, idx, sourcePath) {
     optional: step.optional === true || step.optional === 'true',
   };
 
-  // capabilities：harness 最小授权声明（如 [read_only]）。
-  // 未声明则不带该字段，引擎/harness 回退默认能力（向后兼容）。
-  if (step.capabilities !== undefined) {
-    if (!Array.isArray(step.capabilities)) {
-      throw new Error(`${sourcePath}: steps[${idx}](${id}) capabilities 必须是数组`);
-    }
-    out.capabilities = step.capabilities.map((c) => String(c).trim()).filter(Boolean);
-  }
+  const capabilities = normalizeStepCapabilities(step, id, idx, sourcePath);
+  if (capabilities !== undefined) out.capabilities = capabilities;
+
+  const workflow = normalizeWorkflowContract(step.workflow);
+  const verify = normalizeVerifyContract(step.verify);
+  if (workflow) out.workflow = workflow;
+  if (verify.length > 0) out.verify = verify;
 
   return out;
 }
@@ -233,7 +248,7 @@ function normalizeExecStep(step, id, idx, sourcePath) {
   const run = String(step.run || '').trim();
   if (!run) throw new Error(`${sourcePath}: steps[${idx}](${id}) 类型为 exec，必须有 run 字段`);
 
-  return {
+  const out = {
     id,
     type: 'exec',
     label: String(step.label || id),
@@ -243,6 +258,19 @@ function normalizeExecStep(step, id, idx, sourcePath) {
     optional: step.optional === true || step.optional === 'true',
     capture_stdout: step.capture_stdout !== false,
   };
+  const capabilities = normalizeStepCapabilities(step, id, idx, sourcePath);
+  if (capabilities !== undefined) out.capabilities = capabilities;
+  return out;
+}
+
+function normalizeStepCapabilities(step, id, idx, sourcePath) {
+  // capabilities：harness 最小授权声明（如 [read_only]）。
+  // 未声明则不带该字段，引擎/harness 回退默认能力（向后兼容）；显式 [] 表示无授权。
+  if (step.capabilities === undefined) return undefined;
+  if (!Array.isArray(step.capabilities)) {
+    throw new Error(`${sourcePath}: steps[${idx}](${id}) capabilities 必须是数组`);
+  }
+  return step.capabilities.map((c) => String(c).trim()).filter(Boolean);
 }
 
 function normalizeRenderStep(step, id, idx, sourcePath) {
@@ -316,6 +344,35 @@ function normalizeVerify(v) {
   if (v.stderr_not_contains) out.stderr_not_contains = String(v.stderr_not_contains);
   if (v.min_duration_ms != null) out.min_duration_ms = Number(v.min_duration_ms) || 0;
   return out;
+}
+
+function normalizeWorkflowContract(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = { ...raw };
+  if (Array.isArray(raw.phases)) {
+    out.phases = raw.phases
+      .map((phase) => {
+        if (!phase || typeof phase !== 'object') return null;
+        const id = String(phase.id || '').trim();
+        if (!id) return null;
+        return {
+          ...phase,
+          id,
+          label: String(phase.label || phase.name || id),
+          required: phase.required === true,
+        };
+      })
+      .filter(Boolean);
+  }
+  if (raw.verify !== undefined) out.verify = normalizeVerifyContract(raw.verify);
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function normalizeVerifyContract(raw) {
+  const items = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw] : []);
+  return items
+    .map((item) => (item && typeof item === 'object' && !Array.isArray(item) ? { ...item } : null))
+    .filter(Boolean);
 }
 
 function checkVerify(verify, execResult) {

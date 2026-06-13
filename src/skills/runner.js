@@ -206,7 +206,7 @@ const TOOLS = [
     name: 'write_local_file',
     description:
       '将文本内容写入 1Shell 宿主机（本机）的文件系统。' +
-      '路径白名单：data/skills/ (Skill)、data/programs/ (Program)。' +
+      '路径白名单：data/skills/ (Skill)、data/programs/ (Task 内部兼容存储)。' +
       '用于创建或更新产物文件（SKILL.md、workflow/*.md、rules/*.md、program.yaml 等）。' +
       '自动创建父目录。**创建或修改这两类产物时必须用此工具，不要用 execute_command + node 写文件。**',
     input_schema: {
@@ -275,7 +275,7 @@ function buildSystemPrompt(skill, host, remoteHosts = [], rules = '') {
         `探测或调试时用 \`echo test\` 而非 \`echo 中文\`。` +
         `没有 ls/grep/cat/find；目录检查请直接用 write_local_file（自动创建父目录）。`
       : null,
-    `- **write_local_file**: 将内容写入 1Shell 本机（宿主机）的文件系统，路径限定在 data/skills/ 或 data/programs/ 目录内。创建或修改 Skill / Program 文件时必须用此工具，不要用 execute_command + node/echo 写文件。自动创建父目录，无需提前 mkdir。`,
+    `- **write_local_file**: 将内容写入 1Shell 本机（宿主机）的文件系统，路径限定在 data/skills/ 或 data/programs/ 目录内。创建或修改 Skill / Task 文件时必须用此工具，不要用 execute_command + node/echo 写文件。自动创建父目录，无需提前 mkdir。`,
     `- **read_skill_file**: 只在需要具体流程、参考资料、示例或脚本时读取单个文件；不要把 workflows/references/examples 全量读取一遍当提示词。`,
     `- **render_result**: 每完成一个阶段性成果就调用本工具推给前端。用户看不到 assistant 文本——只有 render_result 的内容才会显示。` +
       `\n  table 格式支持行操作按钮：rowActions（按钮定义）+ rowActionSkill（点击后运行哪个 Skill）+ rowInputKey（第一列值的参数名，如 "domain"/"container"）。`,

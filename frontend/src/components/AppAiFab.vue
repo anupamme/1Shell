@@ -14,6 +14,7 @@ import { useRoute } from 'vue-router';
 import { useAiFab, type ModuleContext } from '@/composables/useAiFab';
 import ToolProgressBar from '@/components/ToolProgressBar.vue';
 import AppIcon from '@/components/AppIcon.vue';
+import SecretRefPicker from '@/components/SecretRefPicker.vue';
 import { renderMarkdown } from '@/utils/markdown';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
@@ -28,7 +29,8 @@ const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
 const MODULE_MAP: Record<string, ModuleContext> = {
   scripts: { name: '脚本库', icon: '📜', hint: '当前在脚本库页面。可管理和执行 Shell 脚本。' },
   skills: { name: 'Skill 仓库', icon: '🧩', hint: '当前在 Skill 仓库页面。可查看、运行已有的 AI Skills。' },
-  programs: { name: '长驻程序', icon: '⚙', hint: '当前在长驻程序页面。可管理 Programs（定时任务 + 自动修复）。' },
+  tasks: { name: '自动化任务', icon: '⚙', hint: '当前在自动化任务页面。可管理可复用任务（定时任务 + 自动修复）。' },
+  programs: { name: '自动化任务', icon: '⚙', hint: '当前在自动化任务页面。可管理可复用任务（定时任务 + 自动修复）。' },
   probe: { name: '探针监控', icon: '🔍', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
   audit: { name: '审计日志', icon: '📋', hint: '当前在审计日志页面。可查询操作日志。' },
   'cli-setup': { name: 'AI 配置', icon: '⚙', hint: '当前在 AI 引擎配置页面。' },
@@ -233,6 +235,11 @@ function onApproveKeydown(event: KeyboardEvent): void {
     fab.approveCustom();
   }
 }
+
+function onSecretRefSubmit(secretRef: string): void {
+  fab.approveCustomText.value = secretRef;
+  fab.approveCustom();
+}
 </script>
 
 <template>
@@ -267,18 +274,6 @@ function onApproveKeydown(event: KeyboardEvent): void {
           :disabled="!fab.isRunning.value"
           @click="fab.stop"
         >停止</button>
-        <label
-          class="ai-fab-mini-btn ai-fab-safe-label"
-          :class="{ 'ai-fab-safe-label--active': fab.safeMode.value }"
-          title="安全模式：写操作需审批"
-        >
-          <input
-            type="checkbox"
-            :checked="fab.safeMode.value"
-            @change="(e) => fab.setSafeMode((e.target as HTMLInputElement).checked)"
-          />
-          <span>🛡 安全</span>
-        </label>
         <button
           type="button"
           class="ai-fab-mini-btn ai-fab-clear-btn"
@@ -345,7 +340,7 @@ function onApproveKeydown(event: KeyboardEvent): void {
       </div>
     </div>
 
-    <!-- 安全模式审批条（fixed bottom + slide-up） -->
+    <!-- Agent 审批条（fixed bottom + slide-up） -->
     <Transition name="approve-bar">
       <div v-if="fab.approveRequest.value" class="approve-bar">
         <div class="approve-bar-head">
@@ -354,8 +349,19 @@ function onApproveKeydown(event: KeyboardEvent): void {
           <span class="approve-bar-countdown">{{ fab.approveRequest.value.countdown }}s</span>
         </div>
         <div class="approve-bar-body">
-          <div class="approve-bar-desc">AI 要执行 {{ fab.approveRequest.value.toolName }}：</div>
+          <div class="approve-bar-desc">
+            <template v-if="fab.approveRequest.value.mode === 'approval'">AI 要执行 {{ fab.approveRequest.value.toolName }}：</template>
+            <template v-else-if="fab.approveRequest.value.mode === 'request_secret'">AI 需要 Secret 引用：</template>
+            <template v-else>AI 需要你补充信息：</template>
+          </div>
           <pre class="approve-bar-detail">{{ fab.approveRequest.value.detail }}</pre>
+          <SecretRefPicker
+            v-if="fab.approveRequest.value.mode === 'request_secret'"
+            :secret-name="fab.approveRequest.value.secretName"
+            :label="fab.approveRequest.value.label"
+            :provider="fab.approveRequest.value.provider"
+            @submit="onSecretRefSubmit"
+          />
         </div>
         <div class="approve-bar-foot">
           <button type="button" class="approve-bar-deny" @click="fab.approveDeny">✕ 拒绝</button>
@@ -364,12 +370,12 @@ function onApproveKeydown(event: KeyboardEvent): void {
               v-model="fab.approveCustomText.value"
               type="text"
               class="approve-bar-custom-input"
-              placeholder="自定义回复..."
+              :placeholder="fab.approveRequest.value.mode === 'request_secret' ? '填写 secret ref/id...' : '自定义回复...'"
               @keydown="onApproveKeydown"
             />
             <button type="button" class="approve-bar-custom-btn" @click="fab.approveCustom">回复</button>
           </div>
-          <button type="button" class="approve-bar-allow" @click="fab.approveAllow">✓ 允许</button>
+          <button v-if="fab.approveRequest.value.mode === 'approval'" type="button" class="approve-bar-allow" @click="fab.approveAllow">✓ 允许</button>
         </div>
       </div>
     </Transition>

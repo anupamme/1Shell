@@ -1,11 +1,20 @@
 'use strict';
 
 /**
- * Program Engine — 长驻程序调度与 L1 确定性执行。
+ * Task Engine — long-running reusable task scheduling and deterministic L1 execution.
  */
 
 const cron = require('node-cron');
 const { checkVerify, DEFAULT_STEP_TIMEOUT_MS } = require('./program-schema');
+const {
+  createProgramAgentRunSpec,
+  evaluateAgentRunOutcome,
+  normalizeAgentPhaseStatus,
+  normalizeAgentTaskStatus,
+} = require('./agent-adapter');
+const { PROGRAM_RUNTIME_SYSTEM_PROMPT } = require('./runtime-prompt');
+const { runAgentTask } = require('../agent-runtime/runner');
+const { runAgentVerification } = require('../agent-runtime/verifiers');
 const { collectSecretValues, redactKnownSecrets, redactCredentialPatterns, redactObjectSecretValues } = require('../../lib/secret-redaction');
 
 function createProgramEngine({
@@ -20,6 +29,7 @@ function createProgramEngine({
   skillRegistry,
   harness,
   probeService,
+  agentRuntime,
 }) {
   const scheduledTasks = new Map();
   const runningInstances = new Map();
@@ -152,7 +162,7 @@ function createProgramEngine({
 
   async function triggerManual({ programId, hostId, triggerId, actionName, inputs, wait = false }) {
     const program = registry.get(programId);
-    if (!program) throw new Error(`Program 不存在: ${programId}`);
+    if (!program) throw new Error(`任务不存在: ${programId}`);
 
     let trigger;
     if (triggerId) {
@@ -221,6 +231,7 @@ function createProgramEngine({
       aiResults: [],
       aiCommandResults: [],
       aiResultDraft: null,
+      agentRuns: new Map(),
       workflow: createWorkflowState(action),
       inputs,
       secretValues: secretValuesForAction(program, action, inputs),
@@ -234,7 +245,7 @@ function createProgramEngine({
     emitWorkflow({ runId, programId: program.id, hostId, workflow: runState.workflow });
     auditService?.log?.({
       action: 'program_run_start',
-      source: 'program',
+      source: 'task',
       hostId,
       hostName: hostService.findHost?.(hostId)?.name || hostId,
       details: JSON.stringify({ programId: program.id, triggerId: trigger.id, actionName: trigger.action }),
@@ -364,7 +375,7 @@ function createProgramEngine({
     });
     auditService?.log?.({
       action: 'program_run_end',
-      source: 'program',
+      source: 'task',
       hostId,
       hostName: hostService.findHost?.(hostId)?.name || hostId,
       exit_code: status === 'success' ? 0 : 1,
@@ -380,10 +391,35 @@ function createProgramEngine({
     const run = renderInputTemplates(step.run, inputs);
     const auditCommand = redactRunText(runState, run);
     try {
-      const result = await bridgeService.execOnHost(hostId, run, timeout, { source: 'program-l1', auditCommand });
-      if (hostId !== 'local' && result.exitCode !== 0 && result.durationMs < 150) {
+      if (!harness?.dispatch) {
+        return { stdout: '', stderr: '[harness] 未配置，拒绝执行任务 exec 命令', exitCode: 126, durationMs: 0 };
+      }
+      const ctx = harness.buildContext('program-l1', {
+        hostId,
+        hostScope: [hostId],
+        capabilities: Array.isArray(step.capabilities) ? step.capabilities : undefined,
+        allowApproval: false,
+        secrets: runState?.secretValues || [],
+        auditCommand,
+        runId: runState?.runId,
+      });
+      const dispatched = await harness.dispatch('execute_command', { command: run, hostId, timeout }, ctx);
+      const result = commandResultFromToolResult(dispatched);
+      if (hostId !== 'local' && dispatched?.raw && result.exitCode !== 0 && result.durationMs < 150) {
         await new Promise((r) => setTimeout(r, 200));
-        try { return await bridgeService.execOnHost(hostId, run, timeout, { source: 'program-l1-retry', auditCommand }); }
+        try {
+          const retryCtx = harness.buildContext('program-l1-retry', {
+            hostId,
+            hostScope: [hostId],
+            capabilities: Array.isArray(step.capabilities) ? step.capabilities : undefined,
+            allowApproval: false,
+            secrets: runState?.secretValues || [],
+            auditCommand,
+            runId: runState?.runId,
+          });
+          const retried = await harness.dispatch('execute_command', { command: run, hostId, timeout }, retryCtx);
+          return commandResultFromToolResult(retried);
+        }
         catch (err) { return { stdout: '', stderr: redactRunText(runState, err.message), exitCode: 1, durationMs: 0 }; }
       }
       return result;
@@ -392,12 +428,21 @@ function createProgramEngine({
     }
   }
 
+  function commandResultFromToolResult(result) {
+    if (result?.raw && typeof result.raw === 'object') return result.raw;
+    return {
+      stdout: '',
+      stderr: String(result?.content || '[harness] 命令未执行'),
+      exitCode: result?.is_error === false ? 0 : 126,
+      durationMs: 0,
+    };
+  }
+
   async function runAiStep(program, action, step, hostId, runState) {
-    if (!aiService?.requestProgramWorkflowStep) {
+    if (!aiService?.requestAgentTurn) {
       throw new Error('AI workflow runner 未配置');
     }
-    let runtimeSkillBody = '';
-    try { runtimeSkillBody = (skillRegistry?.getSkillBody?.('program-runtime') || '').trim(); } catch { /* ignore */ }
+    const runtimeSystemPrompt = PROGRAM_RUNTIME_SYSTEM_PROMPT;
     const baseHost = hostService.findHost?.(hostId) || { id: hostId, name: hostId };
     // OS 感知：把探针采集到的目标机 OS/平台（发行版 / 架构 / 内核）作为上下文喂给 AI，
     // 让 AI 一上来就知道目标机是什么系统，据此选包管理器和命令，无需先花一轮自己探测。
@@ -407,22 +452,51 @@ function createProgramEngine({
       platform = hostService.getHostPlatformText?.(hostId, snapshot) || null;
     } catch { /* ignore */ }
     const host = platform ? { ...baseHost, platform } : baseHost;
+    const agentState = startProgramAgentRun({ program, action, step, hostId, host, runState });
+    const agentRunId = agentState?.runId || '';
+    if (!agentRunId || !agentRuntime?.getState || !agentRuntime?.dispatchTool) {
+      throw new Error('Agent runtime is required for AI task steps; legacy direct workflow fallback is disabled');
+    }
     recordTraceEvent('instruction', 'instruction_received', {
       source: 'program-ai-workflow',
       runId: runState.runId,
       hostId,
       toolName: 'program_instruction',
-      summary: `${program.name || program.id || 'Program'} / ${step.label || step.id || 'AI step'}: ${step.goal || step.result || action.label || action.name || ''}`,
+      summary: `${program.name || program.id || '任务'} / ${step.label || step.id || 'AI step'}: ${step.goal || step.result || action.label || action.name || ''}`,
       secrets: runState.secretValues || [],
     });
-    return aiService.requestProgramWorkflowStep({
-      program,
-      action: { name: action.name, label: action.label },
-      step,
-      host,
-      inputs: redactObjectSecretValues(runState.inputs, inputDefsForAction(program, action)),
-      previousResults: runState.aiResults.map((item) => ({ ...item, result: redactRunText(runState, item.result) })),
-      systemPrompt: runtimeSkillBody,
+    try {
+      const modelAdapter = {
+        runTurn: (request = {}) => aiService.requestAgentTurn({
+        state: request.state,
+        spec: request.spec,
+        goal: request.goal || step.goal || step.result || action.label || action.name || program.name || program.id,
+        context: {
+          ...(request.context && typeof request.context === 'object' ? request.context : {}),
+          program: { id: program.id, name: program.name, description: program.description },
+          action: { name: action.name, label: action.label },
+          step,
+          host,
+          inputs: redactObjectSecretValues(runState.inputs, inputDefsForAction(program, action)),
+          previousResults: runState.aiResults.map((item) => ({ ...item, result: redactRunText(runState, item.result) })),
+        },
+        policy: request.policy,
+        skillPrompt: [runtimeSystemPrompt, request.skillPrompt || request.skill_prompt || ''].filter(Boolean).join('\n\n'),
+        turn: request.turn,
+        maxTurns: request.maxTurns,
+        observations: request.observations,
+        previousTurns: request.previousTurns,
+        resume: request.resume,
+        runtimeContext: request.runtimeContext,
+        runtimeStateSnapshot: request.runtimeStateSnapshot,
+        commandProtocol: request.commandProtocol,
+        program,
+        action: { name: action.name, label: action.label },
+        step,
+        host,
+        inputs: redactObjectSecretValues(runState.inputs, inputDefsForAction(program, action)),
+        previousResults: runState.aiResults.map((item) => ({ ...item, result: redactRunText(runState, item.result) })),
+        systemPrompt: undefined,
       executeCommand: async ({ command, timeout, finalResult }) => {
         if (!command) return { content: '[ERROR] command 参数为空', is_error: true };
         const redactedCommand = redactRunText(runState, command);
@@ -436,11 +510,28 @@ function createProgramEngine({
           secrets: runState.secretValues || [],
         });
 
+        if (agentRunId && agentRuntime?.dispatchTool) {
+          const dispatched = await dispatchAgentCommand({ agentRunId, command, hostId, timeout: resolvedTimeout, runState, redactedCommand });
+          if (!dispatched.raw) {
+            recordAiCommandResult({ runState, runId: runState.runId, programId: program.id, hostId, stepId: step.id, command: redactedCommand, result: { stdout: '', stderr: dispatched.content, exitCode: 126, durationMs: 0 }, finalResult });
+            return { content: dispatched.content, is_error: true };
+          }
+          const redactedResult = redactCommandResult(runState, dispatched.raw);
+          recordAiCommandResult({ runState, runId: runState.runId, programId: program.id, hostId, stepId: step.id, command: redactedCommand, result: redactedResult, finalResult });
+          if (finalResult) {
+            const stdout = String(redactedResult.stdout || '').trim();
+            const stderr = String(redactedResult.stderr || '').trim();
+            return { content: stdout || stderr || `(命令退出码 ${redactedResult.exitCode}，无输出)`, is_error: redactedResult.exitCode !== 0 };
+          }
+          return { content: formatAiCommandResult(redactedResult), is_error: redactedResult.exitCode !== 0 };
+        }
+
         // 经 harness 统一边界：guard（capability + 灾难拦截）→ 人审(此路关闭) → 执行 → 打码 → 轨迹
         if (harness?.dispatch) {
           const ctx = harness.buildContext('program-ai-workflow', {
             hostId,
-            capabilities: Array.isArray(step.capabilities) && step.capabilities.length ? step.capabilities : undefined,
+            hostScope: [hostId],
+            capabilities: Array.isArray(step.capabilities) ? step.capabilities : undefined,
             allowApproval: false,
             secrets: runState.secretValues || [],
             auditCommand: redactedCommand,
@@ -462,16 +553,9 @@ function createProgramEngine({
           return { content: formatAiCommandResult(redactedResult), is_error: redactedResult.exitCode !== 0 };
         }
 
-        // fallback：harness 未注入时保持旧路径
-        const result = await bridgeService.execOnHost(hostId, command, resolvedTimeout, { source: 'program-ai-workflow', auditCommand: redactedCommand });
-        const redactedResult = redactCommandResult(runState, result);
-        recordAiCommandResult({ runState, runId: runState.runId, programId: program.id, hostId, stepId: step.id, command: redactedCommand, result: redactedResult, finalResult });
-        if (finalResult) {
-          const stdout = String(redactedResult.stdout || '').trim();
-          const stderr = String(redactedResult.stderr || '').trim();
-          return { content: stdout || stderr || `(命令退出码 ${redactedResult.exitCode}，无输出)`, is_error: redactedResult.exitCode !== 0 };
-        }
-        return { content: formatAiCommandResult(redactedResult), is_error: redactedResult.exitCode !== 0 };
+        const message = '[harness] 未配置，拒绝执行任务 AI 命令';
+        recordAiCommandResult({ runState, runId: runState.runId, programId: program.id, hostId, stepId: step.id, command: redactedCommand, result: { stdout: '', stderr: message, exitCode: 126, durationMs: 0 }, finalResult });
+        return { content: message, is_error: true };
       },
       reportPhase: async ({ phase, status, message }) => {
         recordTraceEvent('reasoning', 'phase_decision', {
@@ -482,6 +566,7 @@ function createProgramEngine({
           summary: `${phase || 'phase'} ${status || 'running'} ${message || ''}`.trim(),
           secrets: runState.secretValues || [],
         });
+        updateAgentPhase(agentRunId, phase, status, message);
         emitProgramPhase({
           runId: runState.runId,
           programId: program.id,
@@ -493,14 +578,21 @@ function createProgramEngine({
         });
       },
       updateResult: async ({ title, status, content, final }) => {
+        const redactedContent = redactRunText(runState, content);
         recordTraceEvent(final ? 'result' : 'reasoning', final ? 'final_result' : 'reasoning_summary', {
           source: 'program-ai-workflow',
           runId: runState.runId,
           hostId,
           toolName: final ? 'publish_result' : 'update_result',
           summary: `${title || program.name || step.label || 'AI 执行结果'} ${status || ''}`.trim(),
-          resultSummary: redactRunText(runState, content),
+          resultSummary: redactedContent,
           secrets: runState.secretValues || [],
+        });
+        updateAgentResult(agentRunId, {
+          title: title || program.name || step.label || 'AI 执行结果',
+          status,
+          content: redactedContent,
+          final,
         });
         emitAiResultDraft({
           runState,
@@ -510,11 +602,70 @@ function createProgramEngine({
           stepId: step.id,
           title: title || program.name || step.label || 'AI 执行结果',
           status,
-          content: redactRunText(runState, content),
+          content: redactedContent,
           final,
         });
       },
-    });
+      }),
+      };
+
+      const runnerResult = await runAgentTask({
+        runtime: agentRuntime,
+        runId: agentRunId,
+        modelAdapter,
+        skillRegistry,
+        verify: () => runAgentVerify({ agentRunId, hostId, runState }),
+        maxTurns: resolveAgentStepTurnBudget(step, action),
+        dispatchOptionsForAction: ({ action: agentAction } = {}) => {
+          const actionArgs = agentAction?.args && typeof agentAction.args === 'object' ? agentAction.args : {};
+          const actionHostId = String(actionArgs.hostId || actionArgs.host_id || hostId || '').trim();
+          const command = String(actionArgs.command || '').trim();
+          return {
+            scope: actionHostId ? { hostId: actionHostId } : { hostId },
+            allowApproval: false,
+            secrets: runState.secretValues || [],
+            auditCommand: command ? redactRunText(runState, command) : '',
+          };
+        },
+        endRun: false,
+        fallbackTaskStatus: 'unverified',
+        logger,
+      });
+      const normalizedResult = normalizeProgramAiResult(runnerResult.result);
+      const finalText = redactRunText(runState, normalizedResult.text);
+      if (finalText) {
+        const title = program.name || step.label || 'AI task result';
+        const status = normalizedResult.status || 'unverified';
+        updateAgentResult(agentRunId, {
+          title,
+          status,
+          content: finalText,
+          final: true,
+        });
+        emitAiResultDraft({
+          runState,
+          runId: runState.runId,
+          programId: program.id,
+          hostId,
+          stepId: step.id,
+          title,
+          status,
+          content: finalText,
+          final: true,
+        });
+      }
+      endProgramAgentRun(agentRunId, { runnerStatus: 'completed', fallbackTaskStatus: 'unverified' });
+      return { ...normalizedResult, text: finalText || normalizedResult.text };
+    } catch (err) {
+      const hasDraft = Boolean(runState.aiResultDraft?.content);
+      endProgramAgentRun(agentRunId, {
+        runnerStatus: hasDraft ? 'completed' : 'failed',
+        taskStatus: hasDraft ? 'partial' : 'failed',
+        fallbackTaskStatus: hasDraft ? 'partial' : 'failed',
+        error: err.message,
+      });
+      throw err;
+    }
   }
 
   function emitWorkflow(payload) {
@@ -524,7 +675,122 @@ function createProgramEngine({
   function recordTraceEvent(stage, eventType, payload = {}) {
     try {
       harness?.recordEvent?.({ stage, eventType, ...payload });
-    } catch { /* trace must not block Program execution */ }
+    } catch { /* trace must not block task execution */ }
+  }
+
+  function startProgramAgentRun({ program, action, step, hostId, host, runState }) {
+    if (!agentRuntime?.startRun) return null;
+    try {
+      const spec = createProgramAgentRunSpec({
+        program,
+        action,
+        step,
+        hostId,
+        runId: runState.runId,
+        inputs: redactObjectSecretValues(runState.inputs, inputDefsForAction(program, action)),
+        host,
+        workflow: runState.workflow,
+      });
+      const state = agentRuntime.startRun(spec);
+      runState.agentRuns.set(step.id, state.runId);
+      io?.emit?.('program:agent-run-started', { runId: runState.runId, programId: program.id, hostId, stepId: step.id, agentRunId: state.runId });
+      return state;
+    } catch (err) {
+      logger?.warn?.('[program-engine] agent runtime start failed', { runId: runState.runId, programId: program.id, stepId: step.id, error: err.message });
+      return null;
+    }
+  }
+
+  async function dispatchAgentCommand({ agentRunId, command, hostId, timeout, runState, redactedCommand }) {
+    try {
+      return await agentRuntime.dispatchTool(agentRunId, 'execute_command', { command, hostId, timeout }, {
+        scope: { hostId },
+        allowApproval: false,
+        secrets: runState.secretValues || [],
+        auditCommand: redactedCommand,
+      });
+    } catch (err) {
+      logger?.warn?.('[program-engine] agent runtime command dispatch failed', { runId: runState.runId, agentRunId, error: err.message });
+      return { content: `[ERROR] ${err.message}`, is_error: true };
+    }
+  }
+
+  async function runAgentVerify({ agentRunId, hostId, runState }) {
+    if (!agentRunId) return null;
+    return runAgentVerification({
+      runtime: agentRuntime,
+      runId: agentRunId,
+      hostId,
+      inputs: runState.inputs,
+      secrets: runState.secretValues || [],
+      defaultTimeoutMs: DEFAULT_STEP_TIMEOUT_MS,
+      renderTemplate: (value, sourceInputs) => renderInputTemplates(value, sourceInputs),
+      redactText: (value) => redactRunText(runState, value),
+      redactResult: (result) => redactCommandResult(runState, result),
+      compactText,
+      recordEvent: ({ redactedCommand }) => recordTraceEvent('verify', 'verify_command', {
+        source: 'program-ai-workflow',
+        runId: runState.runId,
+        hostId,
+        toolName: 'verify_command',
+        summary: `验证命令：${redactedCommand}`,
+        secrets: runState.secretValues || [],
+      }),
+      logger,
+    });
+  }
+
+  function updateAgentPhase(agentRunId, phase, status, message) {
+    if (!agentRunId || !agentRuntime?.updatePhase || !phase) return;
+    try {
+      agentRuntime.updatePhase(agentRunId, phase, {
+        status: normalizeAgentPhaseStatus(status),
+        message: message || '',
+      });
+    } catch (err) {
+      logger?.warn?.('[program-engine] agent runtime phase update failed', { agentRunId, phase, error: err.message });
+    }
+  }
+
+  function updateAgentResult(agentRunId, { title, status, content, final }) {
+    if (!agentRunId) return;
+    try {
+      if (final && agentRuntime?.publishResult) {
+        agentRuntime.publishResult(agentRunId, {
+          title,
+          content,
+          status: status || 'unknown',
+          taskStatus: normalizeAgentTaskStatus(status, 'unverified'),
+        });
+        return;
+      }
+      agentRuntime?.updateArtifact?.(agentRunId, {
+        id: 'program-ai-result-draft',
+        type: 'report',
+        title: title || 'AI 执行结果',
+        content,
+        data: { status: status || 'running', final: final === true },
+      });
+    } catch (err) {
+      logger?.warn?.('[program-engine] agent runtime result update failed', { agentRunId, error: err.message });
+    }
+  }
+
+  function endProgramAgentRun(agentRunId, { runnerStatus = 'completed', taskStatus = null, fallbackTaskStatus = 'unverified', error = '' } = {}) {
+    if (!agentRunId || !agentRuntime?.endRun) return;
+    try {
+      const state = agentRuntime.getState?.(agentRunId);
+      const outcome = taskStatus
+        ? { taskStatus, reasons: [`explicit_${taskStatus}`] }
+        : evaluateAgentRunOutcome(state, { fallbackTaskStatus });
+      const result = state?.result
+        ? { ...state.result, outcomeReasons: outcome.reasons }
+        : null;
+      agentRuntime.endRun(agentRunId, { runnerStatus, taskStatus: outcome.taskStatus, result, error });
+      io?.emit?.('program:agent-run-ended', { agentRunId, runnerStatus, taskStatus: outcome.taskStatus, reasons: outcome.reasons });
+    } catch (err) {
+      logger?.warn?.('[program-engine] agent runtime end failed', { agentRunId, error: err.message });
+    }
   }
 
   function setInstanceEnabled(programId, hostId, enabled) {
@@ -580,14 +846,14 @@ function createProgramEngine({
     const payload = {
       format: 'message',
       title: finalResult ? '最终输出已生成' : '采集结果已更新',
-      subtitle: finalResult ? 'Program 正在输出命令生成的结果' : 'Program 正在运行',
+      subtitle: finalResult ? '任务正在输出命令生成的结果' : '任务正在运行',
       level: failedCount > 0 ? 'warning' : 'info',
       content: finalResult
-        ? '最终报告已由 Program 命令生成，正在写入结果区。'
+        ? '最终报告已由任务命令生成，正在写入结果区。'
         : `已采集 ${runState.aiCommandResults.length} 组命令结果${failedCount ? `，其中 ${failedCount} 组返回非零退出码` : ''}。`,
       output: {
         status: finalResult ? 'final_result' : 'collecting',
-        summary: finalResult ? '最终报告由 Program 命令直接输出。' : `已采集 ${runState.aiCommandResults.length} 组命令结果。`,
+        summary: finalResult ? '最终报告由任务命令直接输出。' : `已采集 ${runState.aiCommandResults.length} 组命令结果。`,
         collectedCommands: runState.aiCommandResults,
       },
     };
@@ -626,7 +892,7 @@ function createProgramEngine({
       ],
     } : {
       format: 'message',
-      title: status === 'success' ? 'Program 执行结果' : 'Program 终态说明',
+      title: status === 'success' ? '任务执行结果' : '任务终态说明',
       subtitle: `状态：${status}`,
       level: status === 'success' ? 'success' : (status === 'warning' ? 'warning' : 'error'),
       content: fallbackContent,
@@ -673,6 +939,14 @@ function updateWorkflowStep(runState, stepId, status, message = '') {
   if (!step) return;
   step.status = status;
   step.message = message || '';
+}
+
+function resolveAgentStepTurnBudget(step = {}, action = {}) {
+  const raw = step.maxTurns ?? step.max_turns ?? action.maxTurns ?? action.max_turns;
+  if (raw === undefined || raw === null || raw === false || raw === 'none' || raw === 'unbounded') return null;
+  const number = Number(raw);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return Math.max(1, Math.floor(number));
 }
 
 function buildProgramRenderPayload(step, stepOutputs) {
@@ -725,6 +999,14 @@ function buildProgramRenderPayload(step, stepOutputs) {
     }
   }
   return base;
+}
+
+function normalizeProgramAiResult(result) {
+  if (result && typeof result === 'object') {
+    const text = result.text || result.report || result.content || result.output || '';
+    return { ...result, text: String(text || '') };
+  }
+  return { text: String(result || '') };
 }
 
 function formatAiCommandResult({ stdout = '', stderr = '', exitCode = 0, durationMs = 0 }) {

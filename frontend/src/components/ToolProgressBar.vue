@@ -41,8 +41,16 @@ function hasLogs(call: ToolCallItem): boolean {
   return Boolean(call.logs?.some((item) => item.text));
 }
 
+function hasNotes(call: ToolCallItem): boolean {
+  return Boolean(call.notes?.some((item) => item.text));
+}
+
 function visibleLogs(call: ToolCallItem) {
   return (call.logs || []).filter((item) => item.text).slice(-40);
+}
+
+function visibleNotes(call: ToolCallItem) {
+  return (call.notes || []).filter((item) => item.text).slice(-12);
 }
 
 function latestLogSummary(call: ToolCallItem): string {
@@ -60,46 +68,49 @@ function hasDetail(call: ToolCallItem): boolean {
 
 <template>
   <div v-if="visible" class="tool-progress-bar grid gap-2">
-    <details
+    <div
       v-for="call in calls"
       :key="call.toolUseId"
-      :open="call.status === 'running' && hasLogs(call)"
-      class="rounded-xl border bg-white/70 text-[11px] shadow-sm transition-colors dark:bg-slate-950/40"
-      :class="{
-        'border-blue-200 dark:border-blue-500/30': call.status === 'running',
-        'border-emerald-200 dark:border-emerald-500/30': call.status === 'done',
-        'border-red-200 dark:border-red-500/30': call.status === 'error',
-      }"
+      class="grid gap-1"
     >
-      <summary class="flex cursor-pointer list-none items-start gap-2 px-3 py-2 font-mono leading-none">
-        <span
-          class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full"
-          :class="{
-            'bg-blue-500 animate-pulse': call.status === 'running',
-            'bg-emerald-500': call.status === 'done',
-            'bg-red-500': call.status === 'error',
-          }"
-        ></span>
-        <span class="min-w-0 flex-1">
-          <span class="flex min-w-0 items-center gap-2">
-            <span class="truncate text-slate-800 dark:text-slate-100">{{ toolDisplayName(call.name) }}</span>
-            <span v-if="toolDisplayName(call.name) !== call.name" class="truncate text-[10px] text-slate-400">{{ call.name }}</span>
+      <details
+        :open="call.status === 'running' && hasLogs(call)"
+        class="rounded-xl border bg-white/70 text-[11px] shadow-sm transition-colors dark:bg-slate-950/40"
+        :class="{
+          'border-blue-200 dark:border-blue-500/30': call.status === 'running',
+          'border-emerald-200 dark:border-emerald-500/30': call.status === 'done',
+          'border-red-200 dark:border-red-500/30': call.status === 'error',
+        }"
+      >
+        <summary class="flex cursor-pointer list-none items-start gap-2 px-3 py-2 font-mono leading-none">
+          <span
+            class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full"
+            :class="{
+              'bg-blue-500 animate-pulse': call.status === 'running',
+              'bg-emerald-500': call.status === 'done',
+              'bg-red-500': call.status === 'error',
+            }"
+          ></span>
+          <span class="min-w-0 flex-1">
+            <span class="flex min-w-0 items-center gap-2">
+              <span class="truncate text-slate-800 dark:text-slate-100">{{ toolDisplayName(call.name) }}</span>
+              <span v-if="toolDisplayName(call.name) !== call.name" class="truncate text-[10px] text-slate-400">{{ call.name }}</span>
+            </span>
+            <span class="mt-1 block truncate text-[10px] leading-snug text-slate-500 dark:text-slate-400">{{ inputSummary(call) }}</span>
+            <span v-if="call.status === 'running' && latestLogSummary(call)" class="mt-0.5 block truncate text-[10px] leading-snug text-blue-500 dark:text-blue-300">{{ latestLogSummary(call) }}</span>
+            <span v-else-if="call.status !== 'running'" class="mt-0.5 block truncate text-[10px] leading-snug text-slate-400 dark:text-slate-500">{{ resultSummary(call) }}</span>
           </span>
-          <span class="mt-1 block truncate text-[10px] leading-snug text-slate-500 dark:text-slate-400">{{ inputSummary(call) }}</span>
-          <span v-if="call.status === 'running' && latestLogSummary(call)" class="mt-0.5 block truncate text-[10px] leading-snug text-blue-500 dark:text-blue-300">{{ latestLogSummary(call) }}</span>
-          <span v-else-if="call.status !== 'running'" class="mt-0.5 block truncate text-[10px] leading-snug text-slate-400 dark:text-slate-500">{{ resultSummary(call) }}</span>
-        </span>
-        <span
-          class="shrink-0 rounded-full px-2 py-0.5 text-[10px]"
-          :class="{
-            'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-200': call.status === 'running',
-            'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200': call.status === 'done',
-            'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-200': call.status === 'error',
-          }"
-        >{{ statusLabel(call) }}</span>
-      </summary>
+          <span
+            class="shrink-0 rounded-full px-2 py-0.5 text-[10px]"
+            :class="{
+              'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-200': call.status === 'running',
+              'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200': call.status === 'done',
+              'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-200': call.status === 'error',
+            }"
+          >{{ statusLabel(call) }}</span>
+        </summary>
 
-      <div v-if="hasDetail(call)" class="grid gap-2 border-t border-slate-200 px-3 py-2 dark:border-slate-800">
+        <div v-if="hasDetail(call)" class="grid gap-2 border-t border-slate-200 px-3 py-2 dark:border-slate-800">
         <div v-if="hasLogs(call)">
           <div class="mb-1 flex items-center justify-between font-semibold text-slate-500 dark:text-slate-400">
             <span>Live output</span>
@@ -116,6 +127,20 @@ function hasDetail(call: ToolCallItem): boolean {
           <pre class="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg p-2 font-mono text-[10px] leading-relaxed" :class="call.status === 'error' ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-200' : 'bg-slate-100 text-slate-700 dark:bg-slate-900 dark:text-slate-200'">{{ call.error || detailText(call.result) }}</pre>
         </div>
       </div>
-    </details>
+      </details>
+      <div v-if="hasNotes(call)" class="grid gap-1 pl-4">
+        <div
+          v-for="(note, idx) in visibleNotes(call)"
+          :key="idx"
+          class="rounded-lg px-2 py-1 text-[10px] leading-relaxed"
+          :class="{
+            'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-200': note.kind === 'error',
+            'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200': note.kind === 'success',
+            'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-200': note.kind === 'info',
+            'bg-violet-50 text-violet-700 dark:bg-violet-500/10 dark:text-violet-200': note.kind === 'thought',
+          }"
+        >{{ note.text }}</div>
+      </div>
+    </div>
   </div>
 </template>

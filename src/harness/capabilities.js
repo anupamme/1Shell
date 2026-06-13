@@ -18,11 +18,13 @@ const READ_ONLY_COMMAND_PREFIXES = [
   'pwd', 'whoami', 'id', 'hostname', 'uname', 'uptime', 'date', 'env', 'printenv',
   'ps', 'top', 'htop', 'free', 'df', 'du', 'lsblk', 'mount', 'vmstat', 'iostat',
   'who', 'w', 'last', 'lscpu', 'lsmem', 'lsof', 'nproc',
+  'set', 'cd',
   'systemctl', // 仅放行 status/show/list-*，见 isReadonlySystemctl
   'journalctl',
   'ip', 'ifconfig', 'ss', 'netstat', 'route', 'ping', 'traceroute', 'dig', 'nslookup', 'host',
   'grep', 'egrep', 'fgrep', 'awk', 'sed', 'cut', 'sort', 'uniq', 'wc', 'tr', 'find', 'locate',
   'echo', 'printf', 'true', 'false', 'test', 'which', 'whereis', 'type', 'command',
+  'git',
   'docker', // 仅放行 ps/images/inspect/logs/stats，见 isReadonlyDocker
   'curl', 'wget', // 仅放行 GET 类探测；写副作用由命令参数判断，这里只做最小限制
 ];
@@ -36,6 +38,11 @@ const SYSTEMCTL_READONLY_SUBCOMMANDS = new Set([
 // docker 的只读子命令
 const DOCKER_READONLY_SUBCOMMANDS = new Set([
   'ps', 'images', 'image', 'inspect', 'logs', 'stats', 'top', 'port', 'version', 'info', 'system',
+]);
+
+const GIT_READONLY_SUBCOMMANDS = new Set([
+  'status', 'log', 'show', 'diff', 'rev-parse', 'branch', 'remote', 'ls-files',
+  'describe', 'tag', 'config', 'symbolic-ref', 'name-rev', 'shortlog',
 ]);
 
 function firstToken(command) {
@@ -65,6 +72,91 @@ function isReadonlyDocker(command) {
   return false;
 }
 
+function isReadonlyGit(command) {
+  return GIT_READONLY_SUBCOMMANDS.has(secondToken(command));
+}
+
+function splitShellSegments(command) {
+  const text = String(command || '');
+  const out = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    const next = text[i + 1] || '';
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      current += ch;
+      quote = ch;
+      continue;
+    }
+    if (ch === '\n' || ch === ';' || ch === '|') {
+      pushSegment(out, current);
+      current = '';
+      if (ch === '|' && next === '|') i += 1;
+      continue;
+    }
+    if (ch === '&' && next === '&') {
+      pushSegment(out, current);
+      current = '';
+      i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  pushSegment(out, current);
+  return out;
+}
+
+function pushSegment(out, segment) {
+  const normalized = String(segment || '').trim();
+  if (normalized) out.push(normalized);
+}
+
+function isAssignmentOnly(command) {
+  return /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)?$/.test(String(command || '').trim());
+}
+
+function hasWriteRedirection(command) {
+  const text = String(command || '')
+    .replace(/(?:^|\s)(?:[12]?>|&>)\s*\/dev\/null\b/g, ' ')
+    .replace(/(?:^|\s)2>&1\b/g, ' ');
+  return /(?<![0-9>])>(?!>)/.test(text) || />>/.test(text);
+}
+
+function isReadonlySed(command) {
+  return !/\s-i(?:\.[^\s]+)?(?:\s|$)/i.test(String(command || ''));
+}
+
+function isReadonlyFind(command) {
+  const text = String(command || '');
+  if (/\s-delete(?:\s|$)/i.test(text)) return false;
+  const execMatch = text.match(/\s-exec(?:dir)?\s+([^\s;\\]+)/i);
+  if (!execMatch) return true;
+  const execCmd = execMatch[1].replace(/^.*\//, '');
+  if (!READ_ONLY_COMMAND_PREFIXES.includes(execCmd)) return false;
+  if (execCmd === 'sed') return isReadonlySed(text.slice(execMatch.index));
+  if (execCmd === 'systemctl') return isReadonlySystemctl(text);
+  if (execCmd === 'docker') return isReadonlyDocker(text);
+  if (execCmd === 'git') return isReadonlyGit(text);
+  return true;
+}
+
 /**
  * 命令是否属于"只读"——用于 read_only capability 准入。
  * 保守策略：含 shell 串联/重定向写入/管道到写命令时，一律视为非只读。
@@ -74,22 +166,23 @@ function isReadonlyCommand(command) {
   if (!text) return false;
 
   // 含输出重定向（> >>）视为写
-  if (/[^0-9]>>?/.test(text) || /\btee\b/.test(text)) return false;
+  if (hasWriteRedirection(text) || /\btee\b/.test(text)) return false;
   // 含明显写命令关键字，视为非只读（即便作为子命令）
-  if (/\b(rm|mv|cp|dd|mkfs|chmod|chown|chgrp|ln|truncate|install|kill|pkill|reboot|shutdown|halt|poweroff|iptables|ufw|nft|useradd|userdel|passwd|apt|apt-get|yum|dnf|pacman|pip|npm|git)\b/.test(text)) {
-    return false;
-  }
 
   // 命令可能用 ; && || | 串联，逐段判断，全部只读才算只读
-  const segments = text.split(/\s*(?:&&|\|\||;|\|)\s*/).filter(Boolean);
+  const segments = splitShellSegments(text);
   if (segments.length === 0) return false;
 
   for (const seg of segments) {
+    if (isAssignmentOnly(seg)) continue;
     const cmd = firstToken(seg);
     if (!cmd) return false;
     if (!READ_ONLY_COMMAND_PREFIXES.includes(cmd)) return false;
     if (cmd === 'systemctl' && !isReadonlySystemctl(seg)) return false;
     if (cmd === 'docker' && !isReadonlyDocker(seg)) return false;
+    if (cmd === 'git' && !isReadonlyGit(seg)) return false;
+    if (cmd === 'sed' && !isReadonlySed(seg)) return false;
+    if (cmd === 'find' && !isReadonlyFind(seg)) return false;
   }
   return true;
 }
@@ -114,6 +207,21 @@ const CAPABILITY_RULES = {
       'query_probe', 'list_probes', 'query_audit',
     ]),
     commandCheck: null, // 不做命令级限制（灾难拦截由 guard 兜底）
+  },
+  agent_control: {
+    label: 'Agent 控制',
+    allowedTools: new Set([
+      'ask_user', 'request_secret', 'verify_outcome',
+    ]),
+    commandCheck: null,
+  },
+  task_artifact: {
+    label: '任务产物',
+    allowedTools: new Set([
+      'create_task', 'write_task', 'package_agent_run', 'trigger_task',
+      'list_tasks', 'list_programs',
+    ]),
+    commandCheck: null,
   },
 };
 

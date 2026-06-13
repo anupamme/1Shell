@@ -1,10 +1,12 @@
 'use strict';
 
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const yaml = require('js-yaml');
 const { EventEmitter } = require('events');
+const fetch = require('node-fetch');
 const { ROOT_DIR } = require('../config/env');
 const { createOneShellCoreTools } = require('../tools/oneshell-core.tools');
 const { emitIdeEvent } = require('./ide.events');
@@ -21,7 +23,230 @@ function isPathAllowed(relPath) {
   });
 }
 
-function createIdeTools({ bridgeService, hostService, skillRegistry, programEngine, programRegistry, skillRunner, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, onFileWritten, cliSandbox, harness }) {
+function formatPackageAgentRunResult(result = {}) {
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const provenance = result.provenance || {};
+  const lines = [
+    `自动化任务草稿已生成：${result.programId || '(未命名)'}`,
+    `trustLevel: ${result.trustLevel || 'unknown'}`,
+    `sourceTrustLevel: ${result.sourceTrustLevel || 'unknown'}`,
+    `written: ${result.written ? 'true' : 'false'}`,
+    `path: ${result.path || ''}`,
+    `source AgentRun: ${provenance.agentRunId || ''}`,
+  ];
+  if (warnings.length > 0) {
+    lines.push('', 'warnings:', ...warnings.map((item) => `- ${item}`));
+  }
+  lines.push(
+    '',
+    '注意：这是从已验证 AgentRun 生成的 draft_from_trace 草稿，不是 proven 自动化任务；只有 replay 验证通过后才能标记 proven。',
+  );
+  const yamlText = String(result.yaml || '').trim();
+  if (yamlText) {
+    const preview = yamlText.length > 6000 ? `${yamlText.slice(0, 6000)}\n...[truncated]` : yamlText;
+    lines.push('', 'program.yaml preview:', '```yaml', preview, '```');
+  }
+  return lines.join('\n');
+}
+
+function formatPackageAgentRunResultClean(result = {}) {
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const provenance = result.provenance || {};
+  const lines = [
+    `Automation task draft generated: ${result.programId || '(unnamed)'}`,
+    `trustLevel: ${result.trustLevel || 'unknown'}`,
+    `sourceTrustLevel: ${result.sourceTrustLevel || 'unknown'}`,
+    `written: ${result.written ? 'true' : 'false'}`,
+    `path: ${result.path || ''}`,
+    `source AgentRun: ${provenance.agentRunId || ''}`,
+  ];
+  if (warnings.length > 0) lines.push('', 'warnings:', ...warnings.map((item) => `- ${item}`));
+  lines.push(
+    '',
+    'Note: this is a draft_from_trace artifact generated from an AgentRun. It is not a proven automation task until replay verification passes.',
+  );
+  const yamlText = String(result.yaml || '').trim();
+  if (yamlText) {
+    const preview = yamlText.length > 6000 ? `${yamlText.slice(0, 6000)}\n...[truncated]` : yamlText;
+    lines.push('', 'program.yaml preview:', '```yaml', preview, '```');
+  }
+  return lines.join('\n');
+}
+
+const DEPLOY_GITHUB_TASK_INPUTS = Object.freeze([
+  { name: 'hostId', label: 'VPS', type: 'string', required: true, description: 'Target 1Shell host/VPS ID. The task page injects this from the selected target host.' },
+  { name: 'port', label: 'Port', type: 'number', required: true, description: 'Public port to expose after deployment.' },
+  { name: 'dockerDeploy', label: 'Docker deploy', type: 'boolean', required: true, default: true, description: 'Deploy with Docker when true; otherwise use native runtime.' },
+  { name: 'githubUrl', label: 'GitHub URL', type: 'string', required: true, placeholder: 'https://github.com/user/repo', description: 'GitHub repository URL.' },
+]);
+
+const DEPLOY_GITHUB_TASK_PHASES = Object.freeze([
+  { id: 'env_check', label: 'Environment check', required: true },
+  { id: 'repo_fetch', label: 'Fetch repository', required: true },
+  { id: 'project_analysis', label: 'Analyze project', required: true },
+  { id: 'dependency_install', label: 'Install dependencies', required: true },
+  { id: 'deploy', label: 'Deploy', required: true },
+  { id: 'verify', label: 'Verify', required: true },
+  { id: 'result', label: 'Result', required: true },
+]);
+
+function createTaskYamlFromStructuredInput(input = {}, { agentRunId = '' } = {}) {
+  const template = String(input.template || 'custom').trim() || 'custom';
+  const taskId = normalizeTaskId(input.taskId || input.programId);
+  const name = String(input.name || taskId).trim() || taskId;
+  const description = String(input.description || defaultTaskDescription(template)).trim();
+  const inputs = normalizeTaskInputs(input.inputs, template);
+  const phases = normalizeTaskPhases(input.phases, template);
+  const goal = String(input.goal || defaultTaskGoal(template)).trim();
+  const verify = defaultTaskVerify(template);
+  const doc = {
+    name,
+    description,
+    enabled: input.enabled === true,
+    hosts: 'all',
+    inputs,
+    triggers: [
+      { id: 'manual', type: 'manual', action: 'run' },
+    ],
+    actions: {
+      run: {
+        label: 'Run task',
+        steps: [
+          {
+            id: 'run_task',
+            type: 'ai',
+            label: name,
+            goal,
+            workflow: { phases },
+            verify,
+          },
+        ],
+      },
+    },
+    workflow: { phases },
+    verify,
+    metadata: {
+      product_term: 'automation_task',
+      task_status: 'draft_unverified',
+      internal_storage: 'data/programs',
+      creation: {
+        source: 'ide_agent_create_task',
+        sourceAgentRunId: String(input.sourceAgentRunId || agentRunId || '').trim(),
+        template,
+        trustLevel: 'unverified_draft',
+        lowTrustReason: 'Created from structured task intent before a verified AgentRun package/replay path.',
+        requiresReplay: true,
+        createdAt: new Date().toISOString(),
+      },
+      result_contract: template === 'deploy_github_project'
+        ? {
+          success: ['status', 'hostId', 'githubUrl', 'deployMethod', 'port', 'accessUrl', 'verificationEvidence'],
+          failure: ['failedPhase', 'completedItems', 'reason', 'nextSteps'],
+        }
+        : undefined,
+    },
+  };
+  return {
+    taskId,
+    yaml: yaml.dump(pruneUndefined(doc), { lineWidth: 120, noRefs: true, sortKeys: false }),
+  };
+}
+
+function normalizeTaskId(value) {
+  const id = String(value || '').trim();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) throw new Error('taskId must be kebab-case');
+  return id;
+}
+
+function normalizeTaskInputs(raw, template) {
+  const source = template === 'deploy_github_project' && (!Array.isArray(raw) || raw.length === 0)
+    ? DEPLOY_GITHUB_TASK_INPUTS
+    : (Array.isArray(raw) ? raw : []);
+  return source.map((item) => ({
+    name: String(item.name || item.id || '').trim(),
+    label: String(item.label || item.name || item.id || '').trim(),
+    type: normalizeTaskInputType(item.type),
+    required: item.required === true,
+    default: item.default === null || item.default === undefined ? undefined : item.default,
+    placeholder: item.placeholder ? String(item.placeholder) : '',
+    description: item.description ? String(item.description) : '',
+    options: Array.isArray(item.options) ? item.options : undefined,
+  })).filter((item) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(item.name));
+}
+
+function normalizeTaskInputType(value) {
+  const type = String(value || 'string').trim();
+  return ['string', 'number', 'boolean', 'select', 'password', 'text'].includes(type) ? type : 'string';
+}
+
+function normalizeTaskPhases(raw, template) {
+  const source = template === 'deploy_github_project' && (!Array.isArray(raw) || raw.length === 0)
+    ? DEPLOY_GITHUB_TASK_PHASES
+    : (Array.isArray(raw) ? raw : []);
+  return source.map((item) => ({
+    id: String(item.id || item.name || '').trim(),
+    label: String(item.label || item.name || item.id || '').trim(),
+    required: item.required !== false,
+  })).filter((item) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(item.id));
+}
+
+function defaultTaskDescription(template) {
+  if (template === 'deploy_github_project') return 'Deploy a GitHub project to a selected VPS and port, optionally using Docker.';
+  return 'Reusable 1Shell automation task.';
+}
+
+function defaultTaskGoal(template) {
+  if (template !== 'deploy_github_project') {
+    return [
+      'Execute the automation task using the provided inputs.',
+      'Report each important phase, verify the result before success, and publish a concise final result.',
+    ].join('\n');
+  }
+  return [
+    'Deploy the GitHub project selected by inputs.githubUrl to the selected VPS.',
+    '',
+    'Inputs:',
+    '- hostId: target VPS / 1Shell host ID',
+    '- port: public port to expose',
+    '- dockerDeploy: true means use Docker when possible; false means use native runtime',
+    '- githubUrl: GitHub repository URL',
+    '',
+    'Runtime phases:',
+    '1. env_check: inspect OS, package manager, docker/runtime availability, port availability.',
+    '2. repo_fetch: clone or update the GitHub repository.',
+    '3. project_analysis: detect stack, start/build commands, environment needs, and deployment method.',
+    '4. dependency_install: install required dependencies or build Docker image.',
+    '5. deploy: start the service on the requested port and persist/restart it when appropriate.',
+    '6. verify: verify local service, exposed port, and final access URL with evidence.',
+    '7. result: publish final structured result.',
+    '',
+    'Success result must include status, VPS, GitHub project, deployment method, port, access URL, and verification evidence.',
+    'Failure result must include failed phase, completed items, failure reason, and next-step suggestions.',
+  ].join('\n');
+}
+
+function defaultTaskVerify(template) {
+  if (template !== 'deploy_github_project') return [];
+  return [
+    {
+      type: 'manual',
+      reason: 'Deployment verification is performed by the runtime Agent using commands/HTTP/port checks derived from inputs.',
+    },
+  ];
+}
+
+function pruneUndefined(value) {
+  if (Array.isArray(value)) return value.map(pruneUndefined);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === undefined) continue;
+    out[key] = pruneUndefined(item);
+  }
+  return out;
+}
+
+function createIdeTools({ bridgeService, hostService, skillRegistry, programEngine, programRegistry, skillRunner, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, taskPackagerService, dataDir, onFileWritten, cliSandbox, harness }) {
   const coreTools = createOneShellCoreTools({
     bridgeService,
     hostService,
@@ -67,6 +292,88 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
       input_schema: { type: 'object', properties: {}, required: [] },
     },
     {
+      name: 'list_tasks',
+      description: 'List registered 1Shell automation tasks. This is the task-named replacement for legacy list_programs.',
+      input_schema: { type: 'object', properties: {}, required: [] },
+    },
+    {
+      name: 'package_agent_run',
+      description:
+        '从已验证的 AgentRun 生成自动化任务草稿。' +
+        '\n默认只返回 draft_from_trace 预览，不会标记 proven；只有 write=true 才写入 data/programs。' +
+        '\n如果用户说“把刚才的操作打包成任务”，优先使用本工具，而不是根据聊天摘要重新猜流程。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string', description: '源 AgentRun ID；不填默认当前会话 AgentRun' },
+          taskId: { type: 'string', description: 'Optional task ID (kebab-case). Internally stored under data/programs.' },
+          programId: { type: 'string', description: '可选任务 ID（kebab-case，内部仍写入 data/programs）' },
+          write: { type: 'boolean', description: '是否写入 data/programs；默认 false，仅返回草稿预览' },
+          overwrite: { type: 'boolean', description: 'write=true 时是否覆盖已有任务；默认 false' },
+          allowUnverifiedDraft: { type: 'boolean', description: '是否允许未 verified 的低可信草稿；默认 false' },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'ask_user',
+      description:
+        '当缺少关键输入、验收标准或方案选择时，暂停当前 AgentRun 并向用户提问。' +
+        '\n不要猜项目地址、目标主机、端口、账号、方案偏好或验收条件；缺失时调用本工具。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: '要问用户的问题，必须具体、可直接回答' },
+          reason: { type: 'string', description: '为什么需要这个信息' },
+          options: { type: 'array', items: { type: 'string' }, description: '可选答案列表（可选）' },
+        },
+        required: ['question'],
+      },
+    },
+    {
+      name: 'request_secret',
+      description:
+        '当任务需要第三方 token、密码、API key 等敏感信息时，暂停当前 AgentRun 并请求用户提供 Secret 引用。' +
+        '\n不要要求用户在普通文本中粘贴明文密钥；让用户先保存到 Secret Manager，再只提供 secret ref/id。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '所需 secret 的稳定名称，如 cloudflare_api_token' },
+          label: { type: 'string', description: '展示给用户看的名称' },
+          reason: { type: 'string', description: '为什么需要这个 secret' },
+          provider: { type: 'string', description: '第三方平台或用途，如 Cloudflare/GitHub' },
+        },
+        required: ['name', 'reason'],
+      },
+    },
+    {
+      name: 'verify_outcome',
+      description:
+        '验证当前任务是否真的完成，并把证据写入 AgentRun outcome。' +
+        '\n执行过部署、安装、修改文件、启动服务、配置第三方平台等副作用操作后，结束前必须尽量调用本工具验证。' +
+        '\n不要只凭自然语言宣布成功；验证失败时应继续修复或明确说明 blocked/unverified。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['command', 'http', 'file_exists', 'port', 'manual'], description: '验证类型' },
+          reason: { type: 'string', description: '为什么用这个验证方式' },
+          hostId: { type: 'string', description: '目标主机 ID，默认 local' },
+          command: { type: 'string', description: 'type=command 时执行的只读验证命令，exitCode=0 视为通过' },
+          url: { type: 'string', description: 'type=http 时请求的 URL' },
+          method: { type: 'string', description: 'HTTP 方法，默认 GET' },
+          expectedStatus: { type: 'number', description: '期望 HTTP 状态码；不填则 2xx/3xx 通过' },
+          contains: { type: 'string', description: '期望 stdout/stderr 或 HTTP body 包含的文本（可选）' },
+          path: { type: 'string', description: 'type=file_exists 时检查的文件/目录路径' },
+          host: { type: 'string', description: 'type=port 时检查的主机名/IP；默认来自 hostId 或 127.0.0.1' },
+          port: { type: 'number', description: 'type=port 时检查的 TCP 端口' },
+          timeout: { type: 'number', description: '超时毫秒，默认 10000' },
+          passed: { type: 'boolean', description: 'type=manual 时，用户或外部证据是否确认通过' },
+          evidence: { type: 'string', description: '人工/外部验证证据或补充说明' },
+        },
+        required: ['type'],
+      },
+    },
+    {
       name: 'read_file',
       description:
         '读取 1Shell 产物文件（data/skills/ / data/programs/ 内）。' +
@@ -96,8 +403,9 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     {
       name: 'list_artifacts',
       description:
-        '列出已有的 Skill / Program 产物。' +
-        '\n返回每个产物的 id / name / kind / description。',
+        '列出已有的 Skill / 自动化任务产物。' +
+        '\n返回每个产物的 id / name / kind / description。' +
+        '\n不要把它当成创作台第一步；只有需要查找或修改已有产物时才调用。',
       input_schema: {
         type: 'object',
         properties: {
@@ -110,16 +418,16 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
       name: 'list_skills',
       description:
         '列出当前 1Shell 装载的所有 Skill 的 id 与 description。' +
-        '\nSkill 是给当前 AI 的"行为指令包"——写在 markdown 里，决定该如何完成某类任务。' +
-        '\n本工具不返回 SKILL.md body，只返回元信息；判断 description 是否匹配当前任务后，用 load_skill 加载具体 body 再按其指示执行。',
+        '\n仅当用户明确要求查看/使用 Skill，或当前任务确实需要额外专业指令包时才调用。' +
+        '\n不要因为用户说“创建自动化任务”就调用本工具；任务创作默认走 AgentRun verified -> package_agent_run 的内部打包路径。',
       input_schema: { type: 'object', properties: {}, required: [] },
     },
     {
       name: 'load_skill',
       description:
         '加载指定 Skill 的 SKILL.md body 到当前对话上下文。' +
-        '\n返回 markdown 全文。把它当成"当前任务该怎么做"的权威指令——按里面写的步骤、约束、风格执行。' +
-        '\n常见用法：用户说"创建一个 program" → list_skills 看哪个匹配 → load_skill 读 body → 按 body 推进。',
+        '\n仅在已经确定需要某个具体 Skill 时调用；不要开局为了“看看有什么”而加载。' +
+        '\n注意：自动化任务创作不再依赖旧 program-authoring、program-frontend、program-runtime Skill；不要因为用户说“创建任务”就 list_skills/load_skill。',
       input_schema: {
         type: 'object',
         properties: {
@@ -131,14 +439,14 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     {
       name: 'write_program',
       description:
-        '原子写入或更新一个 1Shell Program 的所有文件到 data/programs/<programId>/，写完自动 reload registry。' +
+        '原子写入或更新一个 1Shell 自动化任务的所有文件到 data/programs/<programId>/，写完自动 reload registry。' +
         '\n用于完成创作意图后一次性落盘——避免逐个 write_file 反复弹审批。' +
         '\nfiles 里 path 可写完整 data/programs/<id>/...，也可写 program.yaml / ui/App.jsx 这种相对路径，工具按 programId 自动归一化。' +
-        '\n安全模式下只弹一次审批，列出所有要写的文件路径。',
+        '\nAgent 审批时只弹一次确认，列出所有要写的文件路径。',
       input_schema: {
         type: 'object',
         properties: {
-          programId: { type: 'string', description: 'Program ID（kebab-case）' },
+          programId: { type: 'string', description: '任务 ID（kebab-case）' },
           files: {
             type: 'array',
             items: {
@@ -152,6 +460,52 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
           },
         },
         required: ['programId', 'files'],
+      },
+    },
+    {
+      name: 'create_task',
+      description:
+        'Create a 1Shell automation task from structured fields. Prefer this over hand-writing program.yaml when the user asks to create a new task. ' +
+        'Use template=deploy_github_project for a task that selects VPS, port, Docker mode, GitHub URL, then lets AI deploy and verify the project.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'string', description: 'Task ID in kebab-case.' },
+          name: { type: 'string', description: 'Human-readable task name.' },
+          description: { type: 'string', description: 'Short task description.' },
+          template: { type: 'string', enum: ['deploy_github_project', 'custom'], description: 'Task template. Use deploy_github_project for GitHub deployment tasks.' },
+          enabled: { type: 'boolean', description: 'Whether task scheduling is enabled. Defaults to false for drafts.' },
+          inputs: { type: 'array', description: 'Custom task inputs. Omit for deploy_github_project.', items: { type: 'object' } },
+          phases: { type: 'array', description: 'Runtime phases. Omit for deploy_github_project.', items: { type: 'object' } },
+          goal: { type: 'string', description: 'Runtime AI goal/contract for the task.' },
+          overwrite: { type: 'boolean', description: 'Whether to overwrite existing task files. Default false.' },
+        },
+        required: ['taskId', 'name', 'template'],
+      },
+    },
+    {
+      name: 'write_task',
+      description:
+        'Atomically create or update a 1Shell automation task under data/programs/<taskId>/ and reload the task registry. ' +
+        'Use this task-named tool instead of legacy write_program. ' +
+        'For deployment tasks include inputs hostId, port, dockerDeploy, githubUrl and phases env_check, repo_fetch, project_analysis, dependency_install, deploy, verify, result.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'string', description: 'Task ID in kebab-case. Internally stored under data/programs/<taskId>.' },
+          files: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'Path relative to data/programs/<taskId>/, or a full data/programs/<taskId>/... path.' },
+                content: { type: 'string' },
+              },
+              required: ['path', 'content'],
+            },
+          },
+        },
+        required: ['taskId', 'files'],
       },
     },
     {
@@ -173,23 +527,39 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     {
       name: 'trigger_program',
       description:
-        '手动触发一个 Program 的一次执行。' +
-        '\n返回 runId 列表。用于测试刚创建的 Program。',
+        '手动触发一个自动化任务的一次执行。' +
+        '\n返回 runId 列表。用于测试刚创建的任务。',
       input_schema: {
         type: 'object',
         properties: {
-          programId:  { type: 'string', description: 'Program ID' },
+          programId:  { type: 'string', description: '任务 ID' },
           hostId:     { type: 'string', description: '目标主机 ID（或 "all"）' },
           actionName: { type: 'string', description: '要触发的 action 名（可选，默认取第一个）' },
+          inputs: { type: 'object', description: '任务输入参数键值对（可选）' },
         },
         required: ['programId'],
+      },
+    },
+    {
+      name: 'trigger_task',
+      description: 'Trigger one execution of a registered 1Shell automation task. This is the task-named replacement for legacy trigger_program.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'string', description: 'Task ID.' },
+          hostId: { type: 'string', description: 'Target host ID, or "all".' },
+          actionName: { type: 'string', description: 'Optional action name; default is the first/manual action.' },
+          inputs: { type: 'object', description: 'Task input values.' },
+        },
+        required: ['taskId'],
       },
     },
     {
       name: 'query_format',
       description:
         '查询 1Shell 产物的文件格式规范。按需调用——只在你不确定格式时才查。' +
-        '\n返回对应类型的完整 schema 文档。',
+        '\n返回对应类型的完整 schema 文档。' +
+        '\n不要在创作台开局调用；只有已经决定要落盘低可信草稿或精准修改具体产物，且无法确定 schema 时才查。',
       input_schema: {
         type: 'object',
         properties: {
@@ -200,7 +570,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     },
     {
       name: 'reload_registry',
-      description: '重新加载 Skill / Program 注册表，使刚写入的产物立即可被系统识别。写完产物文件后应调用。',
+      description: '重新加载 Skill / 任务注册表，使刚写入的产物立即可被系统识别。写完产物文件后应调用。',
       input_schema: { type: 'object', properties: {}, required: [] },
     },
     {
@@ -348,7 +718,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
 
   const WRITE_PATTERNS = /\b(rm|mv|cp|mkdir|touch|chmod|chown|dd|mkfs|tee|install|npm|npx|pip|apt|yum|dnf|brew|git\s+clone|git\s+pull|git\s+checkout|wget|curl\s+-[^\s]*[oO]|docker\s+(run|pull|build|exec)|>\s|>>)\b/i;
 
-  // 安全模式：已批准的命令（sessionId → Set<commandHash>）
+  // Agent approval: approved commands (sessionId -> Set<commandHash>)
   const approvedCommands = new Map();
 
   function approveCommand(sessionId, command) {
@@ -558,7 +928,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
   }
 
   function labelForDraftArtifact(artifact) {
-    return artifact?.type === 'skill_draft' ? 'Skill' : 'Program';
+    return artifact?.type === 'skill_draft' ? 'Skill' : '任务';
   }
 
   function idForDraftArtifact(artifact) {
@@ -805,13 +1175,13 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     const yamlPath = path.resolve(ROOT_DIR, 'data', 'programs', programId, 'program.yaml');
     try {
       if (!fs.existsSync(yamlPath)) {
-        validation.errors.push(`Program YAML 不存在: data/programs/${programId}/program.yaml`);
+        validation.errors.push(`任务 YAML 不存在: data/programs/${programId}/program.yaml`);
       } else {
         const parsed = yaml.load(fs.readFileSync(yamlPath, 'utf8'));
         normalizeProgram(parsed, programId, yamlPath);
       }
     } catch (e) {
-      validation.errors.push(`Program YAML 校验失败: ${e.message}`);
+      validation.errors.push(`任务 YAML 校验失败: ${e.message}`);
     }
     validation.ok = validation.errors.length === 0;
     return validation;
@@ -881,7 +1251,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     try {
       normalizeProgram(parsed, programId, relPath);
     } catch (e) {
-      const message = String(e.message || 'Program schema 校验失败');
+      const message = String(e.message || '任务 schema 校验失败');
       if (!validation.errors.includes(message)) validation.errors.push(message);
     }
   }
@@ -896,20 +1266,20 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     for (const file of files) {
       const relPath = String(file?.path || '').trim().replace(/\\/g, '/');
       const content = String(file?.content || '');
-      if (!relPath.startsWith('data/programs/')) validation.errors.push(`Program 路径必须位于 data/programs/: ${relPath}`);
+      if (!relPath.startsWith('data/programs/')) validation.errors.push(`任务路径必须位于 data/programs/: ${relPath}`);
       if (relPath.endsWith('.yaml') || relPath.endsWith('.yml')) {
-        if (programYaml) validation.errors.push(`${relPath}: Program draft 只能包含一个 program.yaml`);
+        if (programYaml) validation.errors.push(`${relPath}: 任务草稿只能包含一个 program.yaml`);
         try {
           const parsed = yaml.load(content);
           if (!parsed || typeof parsed !== 'object') {
             validation.errors.push(`${relPath}: YAML 顶层必须是对象`);
           } else {
             const programId = programIdFromPath(relPath) || String(parsed.id || '').trim();
-            if (path.basename(relPath) !== 'program.yaml') validation.errors.push(`${relPath}: Program YAML 必须命名为 program.yaml`);
-            if (!programId) validation.errors.push(`${relPath}: 无法从路径或 id 推断 Program ID`);
+            if (path.basename(relPath) !== 'program.yaml') validation.errors.push(`${relPath}: 任务 YAML 必须命名为 program.yaml`);
+            if (!programId) validation.errors.push(`${relPath}: 无法从路径或 id 推断任务 ID`);
             if (parsed.id && String(parsed.id).trim() !== programId) validation.errors.push(`${relPath}: id 必须与目录名一致: ${programId}`);
             if (!parsed.name) validation.errors.push(`${relPath}: 缺少 name 字段`);
-            if (parsed.enabled !== false) validation.errors.push(`${relPath}: 新建 Program 必须 enabled: false`);
+            if (parsed.enabled !== false) validation.errors.push(`${relPath}: 新建任务必须 enabled: false`);
             pushProgramSchemaErrors(validation, parsed, relPath, programId);
             programYaml = { path: relPath, content };
             parsedProgram = parsed;
@@ -920,7 +1290,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
         }
       }
     }
-    if (!programYaml) validation.errors.push('Program draft 必须包含 data/programs/<id>/program.yaml');
+    if (!programYaml) validation.errors.push('任务草稿必须包含 data/programs/<id>/program.yaml');
     if (programYaml && parsedProgram && draftProgramId) validateDraftUiArtifact(validation, files, parsedProgram, programYaml.path, draftProgramId);
     validation.ok = validation.errors.length === 0;
     return validation;
@@ -963,12 +1333,300 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     return validation;
   }
 
-  async function handle(name, input, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta }) {
+  function truncateVerifierText(value, max = 4000) {
+    const text = String(value || '');
+    return text.length > max ? `${text.slice(0, max)}...` : text;
+  }
+
+  function shellQuote(value) {
+    return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
+  }
+
+  function verifierTimeout(input) {
+    const timeout = Number(input?.timeout);
+    if (!Number.isFinite(timeout) || timeout <= 0) return 10000;
+    return Math.max(1000, Math.min(timeout, 240000));
+  }
+
+  function normalizeVerifierType(value) {
+    return String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  }
+
+  function verificationToolResult(verification) {
+    const normalized = {
+      type: verification.type || 'unknown',
+      ok: verification.ok === true,
+      status: verification.status || (verification.ok ? 'passed' : 'failed'),
+      taskStatus: verification.taskStatus || (verification.ok ? 'verified' : (verification.status === 'unsupported' ? 'unverified' : 'failed')),
+      target: verification.target || '',
+      reason: verification.reason || '',
+      evidence: truncateVerifierText(verification.evidence || '', 4000),
+      reasons: Array.isArray(verification.reasons) ? verification.reasons.map(String).filter(Boolean) : [],
+      checkedAt: new Date().toISOString(),
+      data: verification.data && typeof verification.data === 'object' ? verification.data : {},
+    };
+    const lines = [
+      `[verification:${normalized.type}] ${normalized.status}`,
+      `taskStatus: ${normalized.taskStatus}`,
+      normalized.target ? `target: ${normalized.target}` : '',
+      normalized.reason ? `reason: ${normalized.reason}` : '',
+      normalized.reasons.length ? `reasons: ${normalized.reasons.join('; ')}` : '',
+      normalized.evidence ? `evidence:\n${normalized.evidence}` : '',
+    ].filter(Boolean);
+    return { content: lines.join('\n'), is_error: !normalized.ok, verification: normalized };
+  }
+
+  async function runVerifierCommand(hostId, command, timeout, signal) {
+    const targetHost = String(hostId || 'local').trim() || 'local';
+    if (targetHost === 'local') {
+      const { exec: childExec } = require('child_process');
+      return await new Promise((resolve, reject) => {
+        if (signal?.aborted) return reject(makeVerifierAbortError());
+        let settled = false;
+        const child = childExec(command, { timeout, maxBuffer: 8 * 1024 * 1024, cwd: ROOT_DIR }, (e, stdout, stderr) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener?.('abort', onAbort);
+          resolve({ stdout: stdout || '', stderr: (e && !stderr) ? e.message : (stderr || ''), exitCode: e ? (e.code || 1) : 0, durationMs: 0 });
+        });
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          try { child.kill(); } catch { /* ignore */ }
+          reject(makeVerifierAbortError());
+        };
+        signal?.addEventListener?.('abort', onAbort, { once: true });
+      });
+    }
+    return await bridgeService.execOnHost(targetHost, command, timeout, { source: 'ide-verifier' });
+  }
+
+  function makeVerifierAbortError() {
+    const e = new Error('Cancelled');
+    e.name = 'AbortError';
+    e.code = 'CANCELLED';
+    return e;
+  }
+
+  function commandEvidence(result) {
+    return [
+      `exitCode=${result.exitCode}`,
+      result.stdout ? `stdout:\n${truncateVerifierText(result.stdout, 1800)}` : '',
+      result.stderr ? `stderr:\n${truncateVerifierText(result.stderr, 1800)}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  async function verifyCommandOutcome(input, signal) {
+    const command = String(input.command || '').trim();
+    const hostId = String(input.hostId || 'local').trim() || 'local';
+    const contains = String(input.contains || '').trim();
+    if (!command) return verificationToolResult({ type: 'command', ok: false, status: 'failed', target: hostId, reason: input.reason, reasons: ['command_required'], evidence: 'command 为空' });
+    const result = await runVerifierCommand(hostId, command, verifierTimeout(input), signal);
+    const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
+    const reasons = [];
+    if (Number(result.exitCode) !== 0) reasons.push(`exit_code_${result.exitCode}`);
+    if (contains && !combined.includes(contains)) reasons.push('expected_text_missing');
+    return verificationToolResult({
+      type: 'command',
+      ok: reasons.length === 0,
+      status: reasons.length === 0 ? 'passed' : 'failed',
+      target: `${hostId}: ${truncateVerifierText(command, 300)}`,
+      reason: input.reason,
+      reasons,
+      evidence: commandEvidence(result),
+      data: { hostId, command: truncateVerifierText(command, 1000), exitCode: result.exitCode, contains },
+    });
+  }
+
+  async function verifyHttpOutcome(input, signal) {
+    const url = String(input.url || '').trim();
+    if (!url) return verificationToolResult({ type: 'http', ok: false, status: 'failed', reason: input.reason, reasons: ['url_required'], evidence: 'url 为空' });
+    const timeout = verifierTimeout(input);
+    const method = String(input.method || 'GET').trim().toUpperCase() || 'GET';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    const onAbort = () => controller.abort();
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    try {
+      const res = await fetch(url, { method, signal: controller.signal });
+      const body = await res.text();
+      const expectedStatus = Number(input.expectedStatus);
+      const contains = String(input.contains || '').trim();
+      const statusOk = Number.isFinite(expectedStatus) && expectedStatus > 0
+        ? res.status === expectedStatus
+        : (res.status >= 200 && res.status < 400);
+      const containsOk = !contains || body.includes(contains);
+      const reasons = [];
+      if (!statusOk) reasons.push(`status_${res.status}`);
+      if (!containsOk) reasons.push('expected_text_missing');
+      return verificationToolResult({
+        type: 'http',
+        ok: statusOk && containsOk,
+        status: statusOk && containsOk ? 'passed' : 'failed',
+        target: `${method} ${url}`,
+        reason: input.reason,
+        reasons,
+        evidence: [`HTTP ${res.status} ${res.statusText}`, contains ? `contains=${containsOk}` : '', `body:\n${truncateVerifierText(body, 2500)}`].filter(Boolean).join('\n'),
+        data: { url, method, status: res.status, expectedStatus: Number.isFinite(expectedStatus) ? expectedStatus : null, contains },
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError' && signal?.aborted) throw makeVerifierAbortError();
+      return verificationToolResult({ type: 'http', ok: false, status: 'failed', target: `${method} ${url}`, reason: input.reason, reasons: ['request_failed'], evidence: e.message });
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
+    }
+  }
+
+  async function verifyFileExistsOutcome(input, signal) {
+    const targetPath = String(input.path || '').trim();
+    const hostId = String(input.hostId || 'local').trim() || 'local';
+    if (!targetPath) return verificationToolResult({ type: 'file_exists', ok: false, status: 'failed', reason: input.reason, reasons: ['path_required'], evidence: 'path 为空' });
+    if (hostId === 'local') {
+      const abs = path.isAbsolute(targetPath) ? targetPath : path.resolve(ROOT_DIR, targetPath);
+      const exists = fs.existsSync(abs);
+      let detail = exists ? 'exists' : 'missing';
+      if (exists) {
+        try {
+          const stat = fs.statSync(abs);
+          detail = `${stat.isDirectory() ? 'directory' : 'file'} size=${stat.size}`;
+        } catch (e) {
+          detail = `exists but stat failed: ${e.message}`;
+        }
+      }
+      return verificationToolResult({
+        type: 'file_exists',
+        ok: exists,
+        status: exists ? 'passed' : 'failed',
+        target: `${hostId}:${targetPath}`,
+        reason: input.reason,
+        reasons: exists ? [] : ['path_missing'],
+        evidence: detail,
+        data: { hostId, path: targetPath, exists },
+      });
+    }
+    const quoted = shellQuote(targetPath);
+    const command = `[ -e ${quoted} ] && { if [ -d ${quoted} ]; then echo directory; else echo file; fi; } || { echo missing; exit 1; }`;
+    const result = await runVerifierCommand(hostId, command, verifierTimeout(input), signal);
+    const okStatus = Number(result.exitCode) === 0;
+    return verificationToolResult({
+      type: 'file_exists',
+      ok: okStatus,
+      status: okStatus ? 'passed' : 'failed',
+      target: `${hostId}:${targetPath}`,
+      reason: input.reason,
+      reasons: okStatus ? [] : ['path_missing'],
+      evidence: commandEvidence(result),
+      data: { hostId, path: targetPath, exists: okStatus },
+    });
+  }
+
+  function checkTcpPort(host, port, timeout, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(makeVerifierAbortError());
+      const socket = net.createConnection({ host, port });
+      let settled = false;
+      const finish = (okStatus, evidence) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener?.('abort', onAbort);
+        try { socket.destroy(); } catch { /* ignore */ }
+        resolve({ ok: okStatus, evidence });
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { socket.destroy(); } catch { /* ignore */ }
+        reject(makeVerifierAbortError());
+      };
+      const timer = setTimeout(() => finish(false, `connect timeout after ${timeout}ms`), timeout);
+      socket.once('connect', () => finish(true, 'tcp connect ok'));
+      socket.once('error', (e) => finish(false, e.message));
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+    });
+  }
+
+  async function verifyPortOutcome(input, signal) {
+    const port = Number(input.port);
+    const hostId = String(input.hostId || 'local').trim() || 'local';
+    const host = String(input.host || '').trim() || '127.0.0.1';
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return verificationToolResult({ type: 'port', ok: false, status: 'failed', reason: input.reason, reasons: ['invalid_port'], evidence: `port=${input.port}` });
+    }
+    const timeout = verifierTimeout(input);
+    if (hostId === 'local') {
+      const result = await checkTcpPort(host, port, timeout, signal);
+      return verificationToolResult({
+        type: 'port',
+        ok: result.ok,
+        status: result.ok ? 'passed' : 'failed',
+        target: `${host}:${port}`,
+        reason: input.reason,
+        reasons: result.ok ? [] : ['port_unreachable'],
+        evidence: result.evidence,
+        data: { hostId, host, port },
+      });
+    }
+    const py = `import socket,sys\nhost=${JSON.stringify(host)}\nport=${JSON.stringify(port)}\ntimeout=${JSON.stringify(Math.ceil(timeout / 1000))}\ns=socket.socket()\ns.settimeout(timeout)\ntry:\n    s.connect((host, port))\n    print('tcp connect ok')\n    sys.exit(0)\nexcept Exception as e:\n    print(str(e))\n    sys.exit(1)\nfinally:\n    s.close()\n`;
+    const command = `(python3 -c ${shellQuote(py)} || python -c ${shellQuote(py)})`;
+    const result = await runVerifierCommand(hostId, command, timeout, signal);
+    const okStatus = Number(result.exitCode) === 0;
+    return verificationToolResult({
+      type: 'port',
+      ok: okStatus,
+      status: okStatus ? 'passed' : 'failed',
+      target: `${hostId}:${host}:${port}`,
+      reason: input.reason,
+      reasons: okStatus ? [] : ['port_unreachable'],
+      evidence: commandEvidence(result),
+      data: { hostId, host, port },
+    });
+  }
+
+  function verifyManualOutcome(input) {
+    const evidence = String(input.evidence || '').trim();
+    if (!evidence) {
+      return verificationToolResult({
+        type: 'manual',
+        ok: false,
+        status: 'unsupported',
+        taskStatus: 'unverified',
+        reason: input.reason,
+        reasons: ['manual_evidence_required'],
+        evidence: 'manual 验证需要用户确认或外部系统证据；不能只由 AI 自己宣布成功。',
+      });
+    }
+    return verificationToolResult({
+      type: 'manual',
+      ok: false,
+      status: 'unsupported',
+      taskStatus: 'unverified',
+      target: 'manual',
+      reason: input.reason,
+      reasons: ['manual_verification_recorded_without_runtime_confirmation'],
+      evidence: `manual evidence recorded, but v0 cannot promote it to verified automatically:\n${evidence}`,
+      data: { passed: input.passed === true },
+    });
+  }
+
+  async function handleVerifyOutcome(input = {}, { signal } = {}) {
+    const type = normalizeVerifierType(input.type);
+    if (type === 'command') return await verifyCommandOutcome(input, signal);
+    if (type === 'http') return await verifyHttpOutcome(input, signal);
+    if (type === 'file_exists') return await verifyFileExistsOutcome(input, signal);
+    if (type === 'port') return await verifyPortOutcome(input, signal);
+    if (type === 'manual') return verifyManualOutcome(input);
+    return verificationToolResult({ type: type || 'unknown', ok: false, status: 'unsupported', taskStatus: 'unverified', reason: input.reason, reasons: ['unsupported_verifier_type'], evidence: `unsupported type: ${input.type || ''}` });
+  }
+
+  async function handle(name, input, { socket, sessionId, runId, safeMode, session, signal, requestApproval, approvalGranted, onToolDelta }) {
     const authoringBlocked = null;
     if (authoringBlocked) return authoringBlocked;
 
     if (CORE_DELEGATED_TOOL_NAMES.has(name)) {
-      return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta, source: 'ide' });
+      return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, approvalGranted, onToolDelta, source: 'ide' });
     }
 
     switch (name) {
@@ -1002,6 +1660,56 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
       case 'list_hosts': {
         const hosts = (hostService.listHosts?.() || []).map(h => `id=${h.id}  name=${h.name}  ${h.host || '127.0.0.1'}:${h.port || '-'}  type=${h.type || 'ssh'}`);
         return ok(hosts.length > 0 ? hosts.join('\n') : '（无已托管主机）');
+      }
+
+      case 'list_tasks': {
+        return handle('list_programs', input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
+      }
+
+      case 'package_agent_run': {
+        if (!taskPackagerService?.createDraftFromAgentRun) return err('Task Packager 未初始化');
+        const effectiveRunId = String(input.runId || runId || session?.agentRunId || '').trim();
+        if (!effectiveRunId) return err('runId 为空：无法定位要打包的 AgentRun');
+        try {
+          const result = taskPackagerService.createDraftFromAgentRun({
+            runId: effectiveRunId,
+            programId: input.taskId || input.programId,
+            write: input.write === true,
+            overwrite: input.overwrite === true,
+            allowUnverifiedDraft: input.allowUnverifiedDraft === true,
+          });
+          emitTool(socket, sessionId, name, { ...input, runId: effectiveRunId }, {
+            programId: result.programId,
+            trustLevel: result.trustLevel,
+            sourceTrustLevel: result.sourceTrustLevel,
+            written: result.written,
+            path: result.path,
+            warnings: result.warnings,
+          });
+          auditService?.log?.({ action: 'ide_package_agent_run', runId: effectiveRunId, programId: result.programId, written: result.written });
+          return ok(formatPackageAgentRunResultClean(result));
+        } catch (e) {
+          return err(`打包失败: ${e.message}`);
+        }
+      }
+
+      case 'verify_outcome': {
+        try {
+          const result = await handleVerifyOutcome(input || {}, { signal });
+          emitTool(socket, sessionId, name, input || {}, result.verification || result.content);
+          return result;
+        } catch (e) {
+          if (e?.name === 'AbortError' || e?.code === 'CANCELLED') throw e;
+          return verificationToolResult({
+            type: normalizeVerifierType(input?.type) || 'unknown',
+            ok: false,
+            status: 'failed',
+            taskStatus: 'failed',
+            reason: input?.reason,
+            reasons: ['verifier_exception'],
+            evidence: e.message,
+          });
+        }
       }
 
       case 'read_file': {
@@ -1063,7 +1771,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
                 const m = raw.match(/^name:\s*(.+)$/m);
                 if (m) pName = m[1].trim();
               } catch { /* ignore */ }
-              items.push(`[program] ${d.name}  name="${pName}"`);
+              items.push(`[task] ${d.name}  name="${pName}"`);
             }
           }
         }
@@ -1112,7 +1820,30 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
       case 'request_commit_approval':
       case 'commit_authoring_artifact':
       case 'verify_authoring_artifact':
-        return err(`工具 "${name}" 已废弃。请改用 list_skills + load_skill 加载相关 skill，再用 write_program / write_file 写入文件。`);
+        return err(`工具 "${name}" 已废弃。请改用 list_skills + load_skill 加载相关 skill，再用 write_task / write_file 写入文件。`);
+
+      case 'create_task': {
+        try {
+          const generated = createTaskYamlFromStructuredInput(input || {}, { agentRunId: runId });
+          const programPath = path.join(ROOT_DIR, 'data', 'programs', generated.taskId, 'program.yaml');
+          if (fs.existsSync(programPath) && input.overwrite !== true) {
+            return err(`任务已存在: ${generated.taskId}`);
+          }
+          return handle('write_program', {
+            programId: generated.taskId,
+            files: [{ path: 'program.yaml', content: generated.yaml }],
+          }, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
+        } catch (e) {
+          return err(`创建任务失败: ${e.message}`);
+        }
+      }
+
+      case 'write_task': {
+        return handle('write_program', {
+          programId: input.taskId || input.programId,
+          files: input.files,
+        }, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
+      }
 
       case 'write_program': {
         const programId = String(input.programId || '').trim();
@@ -1187,14 +1918,24 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
         }
       }
 
+      case 'trigger_task': {
+        return handle('trigger_program', {
+          programId: input.taskId || input.programId,
+          hostId: input.hostId,
+          actionName: input.actionName,
+          inputs: input.inputs,
+        }, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta });
+      }
+
       case 'trigger_program': {
         const programId = String(input.programId || '').trim();
         const hostId = input.hostId ? String(input.hostId).trim() : undefined;
         const actionName = input.actionName ? String(input.actionName).trim() : undefined;
+        const inputs = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? input.inputs : undefined;
         if (!programId) return err('programId 为空');
         try {
-          const runIds = await programEngine.triggerManual({ programId, hostId, actionName });
-          return ok(`Program "${programId}" 已触发。runId: ${runIds.join(', ')}\n结果将在前端"程序"页面展示。`);
+          const runIds = await programEngine.triggerManual({ programId, hostId, actionName, inputs });
+          return ok(`任务 "${programId}" 已触发。runId: ${runIds.join(', ')}\n结果将在前端"任务"页面展示。`);
         } catch (e) {
           return err(`触发失败: ${e.message}`);
         }
@@ -1224,10 +1965,10 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
           if (typeof programEngine.reload === 'function') {
             const result = programEngine.reload();
             if (result?.errors?.length) {
-              programMsg = `\n⚠ Program 加载失败（${result.errors.length} 个）：\n` + result.errors.map(e => `  - ${e}`).join('\n');
+              programMsg = `\n⚠ 任务加载失败（${result.errors.length} 个）：\n` + result.errors.map(e => `  - ${e}`).join('\n');
             }
           }
-          return ok('Skill / Program 注册表已重新加载。' + programMsg);
+          return ok('Skill / 任务注册表已重新加载。' + programMsg);
         } catch (e) {
           return err(`重载失败: ${e.message}`);
         }
@@ -1421,7 +2162,7 @@ function createIdeTools({ bridgeService, hostService, skillRegistry, programEngi
     description:
       '将复杂创作任务委托给 Claude Code（专业 AI 编程助手）执行。' +
       '\nClaude Code 会通过 MCP 访问 1Shell 的所有主机，自主探测环境并完成任务。' +
-      '\n适用于：编写 Program / Skill、多步骤调试、复杂脚本生成、架构分析。' +
+      '\n适用于：编写任务 / Skill、多步骤调试、复杂脚本生成、架构分析。' +
       '\nAuthoring Session 中必须先生成 draft/approval，再用 commit_authoring_artifact 和 verify_authoring_artifact 完成落盘验证。' +
       '\n注意：每次调用耗时较长（1-5 分钟），简单任务请自行处理。',
     input_schema: {

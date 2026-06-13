@@ -100,7 +100,7 @@ function createSkillStudioRouter({ hostService, libraryService, mcpRegistry, pro
       const programId = artifactIdFromPath(relPath, 'program');
       const skillId = artifactIdFromPath(relPath, 'skill');
       if (programId && blockedProgramIds.has(programId)) {
-        rejected.push({ path: relPath, reason: `Program 已被 registry 加载，跳过: ${programId}` });
+        rejected.push({ path: relPath, reason: `任务已被 registry 加载，跳过: ${programId}` });
         continue;
       }
       if (skillId && blockedSkillIds.has(skillId)) {
@@ -141,7 +141,7 @@ function createSkillStudioRouter({ hostService, libraryService, mcpRegistry, pro
     const ALLOWED_MODES = [
       'classify', 'create-skill', 'create-program', 'create-bundle',
       'refine',
-      'edit-program', // 精准修改已有 Program
+      'edit-program', // 精准修改已有任务
       'generate', // legacy alias
     ];
     const rawMode = ALLOWED_MODES.includes(body.mode) ? body.mode : 'classify';
@@ -261,20 +261,20 @@ function createSkillStudioRouter({ hostService, libraryService, mcpRegistry, pro
       lines.push('**约束**：严格按 `data/skills/skill-authoring/workflows/generate-skill.md` 执行。');
 
     } else if (mode === 'create-program') {
-      lines.push('**模式**：创建 Program（AI 提示词模板）');
-      lines.push('**产物位置**：`data/programs/<program-id>/program.yaml`');
-      lines.push('**约束**：严格按 `data/skills/program-authoring/workflows/create.md` 执行。');
-      lines.push('**硬规则**：`data/skills/program-authoring/rules/constraints.md`（只抽取必要输入，不预问 AI 可探索细节）。');
+      lines.push('**模式**：创建自动化任务草稿');
+      lines.push('**产物位置**：`data/programs/<task-id>/program.yaml`（内部兼容路径）');
+      lines.push('**约束**：优先通过 1Shell AI 真实 AgentRun 验证流程，再从运行记录打包为 draft_from_trace；不要依赖旧任务创作 Skill 猜流程。');
+      lines.push('**硬规则**：缺少 verified AgentRun 时只能生成低可信草稿；涉及密钥必须使用 Secret Manager 引用，不能在聊天或 YAML 中保存明文。');
       lines.push('');
-      // Program-specific extras
+      // Task-specific extras
       const cronSchedule = String(body.cronSchedule || '').trim();
       if (cronSchedule) {
         lines.push(`**Cron 表达式（用户指定）**：\`${cronSchedule}\``);
         lines.push('');
       }
     } else if (mode === 'create-bundle') {
-      lines.push('**模式**：Bundle 组合创作（Skill + Program）');
-      lines.push('**产物位置**：`data/skills/<skill-id>/` 和 `data/programs/<program-id>/program.yaml`');
+      lines.push('**模式**：Bundle 组合创作（Skill + 任务）');
+      lines.push('**产物位置**：`data/skills/<skill-id>/` 和 `data/programs/<task-id>/program.yaml`');
       lines.push('**约束**：严格按 `data/skills/skill-authoring/workflows/generate-bundle.md` 执行。');
 
     } else if (mode === 'refine') {
@@ -292,7 +292,7 @@ function createSkillStudioRouter({ hostService, libraryService, mcpRegistry, pro
       lines.push(`**模式**：改进以下 ${items.length} 个项目`);
       for (const { id, item } of items) {
         const subdir = item.kind === 'program' ? 'programs' : 'skills';
-        const typeLabel = item.kind === 'program' ? 'Program' : 'Skill';
+        const typeLabel = item.kind === 'program' ? '任务' : 'Skill';
         lines.push(`- \`${id}\`（${typeLabel}）→ \`data/${subdir}/${id}/\``);
         lines.push(`  先用 execute_command 读取 data/${subdir}/${id}/ 下所有文件，再按用户意图做最小必要修改。`);
       }
@@ -310,12 +310,12 @@ function createSkillStudioRouter({ hostService, libraryService, mcpRegistry, pro
         return res.status(404).json({ ok: false, error: `program.yaml 不存在: ${programId}` });
       }
 
-      lines.push('**模式**：精准修改已有 Program');
-      lines.push(`**Program ID**：\`${programId}\``);
+      lines.push('**模式**：精准修改已有任务');
+      lines.push(`**任务 ID**：\`${programId}\``);
       lines.push(`**产物路径**：\`data/programs/${programId}/program.yaml\``);
-      lines.push('**约束**：严格按 `data/skills/program-authoring/workflows/edit.md` 执行。');
-      lines.push('**硬规则**：`data/skills/program-authoring/rules/constraints.md`（只做最小修改，保持提示词模板模型）。');
-      lines.push('**示例参考**：`data/skills/program-authoring/references/simple-model.md`');
+      lines.push('**约束**：直接读取并最小修改当前 program.yaml；不要依赖旧任务创作 Skill。');
+      lines.push('**硬规则**：保持现有任务 schema、输入、触发器和安全边界；除非用户明确要求，不要扩大权限或改写无关字段。');
+      lines.push('**可信度**：修改后仍需通过任务 schema 校验；涉及运行路径变化时，需要重新执行或 replay 验证。');
       lines.push('');
       lines.push('## 当前 program.yaml');
       lines.push('```yaml');

@@ -15,9 +15,7 @@ export const useIdeStore = defineStore('ide', () => {
   const sessionId = ref<string | null>(null);
   const messages = ref<IdeMessage[]>([]);
   const thinking = ref(false);
-  const safeMode = ref(false);
   const claudeCodeEnabled = ref(false);
-  const unlimitedTurns = ref(false);
 
   function reset(): void {
     sessionId.value = null;
@@ -42,9 +40,7 @@ export const useIdeStore = defineStore('ide', () => {
     sessionId,
     messages,
     thinking,
-    safeMode,
     claudeCodeEnabled,
-    unlimitedTurns,
     reset,
     push,
     appendText,

@@ -56,6 +56,10 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
   }
 
   return async function dispatch(toolName, input = {}, context = {}) {
+    context = {
+      ...context,
+      auditCommand: context.auditCommand || redactText(String(input.command || summarize(toolName, input)), context.secrets).slice(0, 2000),
+    };
     const traceId = trace.start({ toolName, input, context });
 
     // ── 1. 确定性护栏（fail-closed）────────────────────────────
@@ -83,8 +87,8 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
     }
 
     // ── 2. 人审 gate（仅人在场的上下文）────────────────────────
-    let approvalGranted = false;
-    if (verdict.needApproval && context.allowApproval && typeof context.requestApproval === 'function') {
+    let approvalGranted = context.approvalGranted === true || context.preApproved === true;
+    if (!approvalGranted && verdict.needApproval && context.allowApproval && typeof context.requestApproval === 'function') {
       try {
         approvalGranted = await context.requestApproval(toolName, input, verdict.summary, verdict.riskReason);
       } catch (err) {

@@ -27,6 +27,7 @@ function createSecretService({ db }) {
      ORDER BY type, name
   `);
   const stmtGet = db.prepare('SELECT * FROM secrets WHERE id = ?');
+  const stmtGetMeta = db.prepare('SELECT id, name, type, created_at, updated_at FROM secrets WHERE id = ?');
   const stmtUpsert = db.prepare(`
     INSERT INTO secrets (id, name, type, encrypted_value, created_at, updated_at)
     VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
@@ -63,12 +64,18 @@ function createSecretService({ db }) {
     return decryptText(encrypted);
   }
 
+  function get(id) {
+    const secretId = String(id || '').trim();
+    if (!secretId) return null;
+    return stmtGetMeta.get(secretId) || null;
+  }
+
   function remove(id) {
     const info = stmtDelete.run(String(id || '').trim());
     return info.changes > 0;
   }
 
-  return { list, save, resolve, remove };
+  return { list, save, get, resolve, remove };
 }
 
 function normalizeName(name) {
@@ -88,6 +95,7 @@ function normalizeType(type, allowNull = false) {
 function createNoopSecretService() {
   return {
     list: () => [],
+    get: () => null,
     save: () => { throw new Error('数据库不可用，无法保存凭据'); },
     resolve: () => { throw new Error('数据库不可用，无法读取凭据'); },
     remove: () => false,

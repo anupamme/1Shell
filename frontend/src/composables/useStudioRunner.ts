@@ -1,24 +1,24 @@
 // useStudioRunner.ts — IDE 工作台核心 composable
-// 与 useProgramsRunner 同套路：集中 state + socket on/emit + cleanup
+// 与任务运行器同套路：集中 state + socket on/emit + cleanup
 // 迭代 1 范围：7 socket on + 5 emit + 全部 state + API + deploy_mcp/refine 入口
 // 迭代 2：补 ide:mcp-status / ide:approve-request 监听 + ide:mcp-start/stop / ide:approve-response emit + ApproveBar
 
 import { ref, shallowRef, computed, onMounted, onBeforeUnmount, watch } from 'vue';
-import { useSocket, type SocketHandler } from '@/composables/useSocket';
+import { useSocket } from '@/composables/useSocket';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
 import { useNotifyStore } from '@/stores/notify';
 import { readStorageState, writeStorageState } from '@/composables/usePageState';
-import { bindIdeStreamHandlers } from '@/utils/ideStreamEvents';
+import { bindAiAgentStreamHandlers, createAiAgentStreamController } from '@/composables/useAiAgentStream';
 import { createStreamDeltaBuffer } from '@/utils/streaming';
-import { appendAiToolLog, summarizeToolValue, type AiAssistantTurn, type AiToolCallState } from '@/utils/aiMessages';
+import { appendAiToolLog, appendAiToolNote, finishAiToolCall, startAiToolCall, type AiAssistantTurn, type AiToolCallState } from '@/utils/aiMessages';
 import {
   type HostInfo, type SelectedPath, type SelectedContainer,
   type SkillInfo, type McpInfo, type LocalMcpStatus,
   type ToolFilter, type ToolItem,
   type ContainerScanResult, type ContainerScanItem,
   type FpItem,
-  type ChatSession, type SessionMessage, type AiLineKind,
+  type ChatSession, type SessionMessage, type AiMessage, type AiLineKind,
   type SendContext,
   type AuthoringArtifact, type AuthoringInteraction, type AuthoringStage, type AuthoringSessionSnapshot,
   type ApprovePayload, type ApproveAction,
@@ -43,8 +43,6 @@ interface StudioPrefs {
   toolFilter: ToolFilter;
   currentSessionId: string | null;
   taskInput: string;
-  safeMode: boolean;
-  unlimitedTurns: boolean;
   ccCollab: boolean;
   historyDrawerOpen: boolean;
 }
@@ -65,8 +63,6 @@ export function useStudioRunner() {
     toolFilter: 'all',
     currentSessionId: null,
     taskInput: '',
-    safeMode: true,
-    unlimitedTurns: false,
     ccCollab: false,
     historyDrawerOpen: false,
   });
@@ -107,49 +103,25 @@ export function useStudioRunner() {
 
   // 输入区
   const taskInput = ref(savedPrefs.taskInput);
-  const safeMode = ref(savedPrefs.safeMode);
-  const unlimitedTurns = ref(savedPrefs.unlimitedTurns);
   const ccCollab = ref(savedPrefs.ccCollab);
 
   // 历史抽屉
   const historyDrawerOpen = ref(savedPrefs.historyDrawerOpen);
 
-  // 安全模式审批条（迭代 2）
+  // Agent 审批条（迭代 2）
   const pendingApprove = ref<ApprovePayload | null>(null);
   const approveCountdown = ref<number>(APPROVE_TIMEOUT_SEC);
   let approveTickHandle: ReturnType<typeof setInterval> | null = null;
-  let currentTextHadDelta = false;
+  let approveDeadlineMs = 0;
   let stopFallbackHandle: ReturnType<typeof setTimeout> | null = null;
   let sendAckHandle: ReturnType<typeof setTimeout> | null = null;
   let sendConnectHandle: ReturnType<typeof setTimeout> | null = null;
   let pendingConnectSend: (() => void) | null = null;
-  let activeRunId: string | null = null;
-  let stopRequested = false;
-  const stoppedRunIds = new Set<string>();
+  const streamController = createAiAgentStreamController(() => currentSessionId.value);
 
   interface IdeSocketMessage {
     sessionId?: string;
     runId?: string;
-  }
-
-  function matchesCurrentRun(msg: IdeSocketMessage | null | undefined, options: { allowStopped?: boolean; allowAfterStop?: boolean } = {}): boolean {
-    if (!msg || msg.sessionId !== currentSessionId.value) return false;
-    if (msg.runId) {
-      if (stoppedRunIds.has(msg.runId) && !options.allowStopped) return false;
-      if (activeRunId && msg.runId !== activeRunId) return false;
-      activeRunId = msg.runId;
-    }
-    if (stopRequested && !options.allowAfterStop) return false;
-    return true;
-  }
-
-  function rememberStoppedRun(runId = activeRunId): void {
-    if (!runId) return;
-    stoppedRunIds.add(runId);
-    if (stoppedRunIds.size > 20) {
-      const firstStopped = stoppedRunIds.values().next().value;
-      if (firstStopped) stoppedRunIds.delete(firstStopped);
-    }
   }
 
   /* ─── computed ────────────────────────────────────── */
@@ -212,7 +184,7 @@ export function useStudioRunner() {
   };
   const programAuthoringStageDefs: AuthoringStageDisplay[] = [
     { stage: 'program-type', label: '类型判断', stages: ['discovery'] },
-    { stage: 'program-definition', label: 'Program 定义', stages: ['options', 'spec', 'plan'] },
+    { stage: 'program-definition', label: '任务定义', stages: ['options', 'spec', 'plan'] },
     { stage: 'program-draft', label: 'Draft', stages: ['draft'] },
     { stage: 'program-review', label: 'Review', stages: ['review'] },
     { stage: 'program-commit', label: 'Commit', stages: ['commit'] },
@@ -272,8 +244,6 @@ export function useStudioRunner() {
       toolFilter: toolFilter.value,
       currentSessionId: currentSessionId.value,
       taskInput: taskInput.value,
-      safeMode: safeMode.value,
-      unlimitedTurns: unlimitedTurns.value,
       ccCollab: ccCollab.value,
       historyDrawerOpen: historyDrawerOpen.value,
     });
@@ -351,6 +321,48 @@ export function useStudioRunner() {
     saveSessionsToStorage();
   }
 
+  function touchCurrentSession(): void {
+    const s = getSession(currentSessionId.value);
+    if (!s) return;
+    s.messages = [...s.messages];
+    sessions.value = [...sessions.value];
+  }
+
+  function findToolHostMessage(toolUseId?: string): AiMessage | null {
+    const s = getSession(currentSessionId.value);
+    if (!s) return null;
+    for (let i = s.messages.length - 1; i >= 0; i -= 1) {
+      const msg = s.messages[i];
+      if (msg.role !== 'ai') continue;
+      if (!toolUseId || msg.toolCalls?.some((call) => call.toolUseId === toolUseId)) return msg;
+    }
+    return null;
+  }
+
+  function ensureToolHostMessage(toolUseId?: string): AiMessage | null {
+    const existing = findToolHostMessage(toolUseId);
+    if (existing) {
+      existing.toolCalls = existing.toolCalls || [];
+      return existing;
+    }
+    const s = getSession(currentSessionId.value);
+    if (!s) return null;
+    const last = s.messages[s.messages.length - 1];
+    if (last?.role === 'ai' && !last.content.trim()) {
+      last.toolCalls = last.toolCalls || [];
+      return last;
+    }
+    const msg: AiMessage = { role: 'ai', kind: 'stream', content: '', toolCalls: [] };
+    s.messages.push(msg);
+    return msg;
+  }
+
+  function updateToolCallsFromTurn(msg: AiMessage, turn: AiAssistantTurn): void {
+    msg.toolCalls = [...turn.toolCalls];
+    currentToolCalls.value = [...turn.toolCalls];
+    touchCurrentSession();
+  }
+
   function appendUserMessage(text: string): void {
     if (!currentSessionId.value) newSession(text.slice(0, 40));
     saveMessageToCurrent({ role: 'user', content: text });
@@ -369,6 +381,7 @@ export function useStudioRunner() {
   });
 
   function appendAiLine(kind: AiLineKind, text: string): void {
+    if (kind === 'info' && /^AgentRun\s+已启动/.test(text)) return;
     deltaBuffer.flushNow();
     saveMessageToCurrent({ role: 'ai', kind, content: text });
   }
@@ -378,9 +391,20 @@ export function useStudioRunner() {
   }
 
   function appendToolLog(toolUseId: string, stream: string | undefined, text: string): void {
-    const turn: AiAssistantTurn = { role: 'assistant', status: 'tool_running', lines: [], toolCalls: currentToolCalls.value };
+    const msg = ensureToolHostMessage(toolUseId);
+    if (!msg) return;
+    const turn: AiAssistantTurn = { role: 'assistant', status: 'tool_running', lines: [], toolCalls: msg.toolCalls || [] };
     if (appendAiToolLog(turn, toolUseId, stream === 'stderr' ? 'stderr' : 'stdout', text)) {
-      currentToolCalls.value = [...currentToolCalls.value];
+      updateToolCallsFromTurn(msg, turn);
+    }
+  }
+
+  function appendToolNote(toolUseId: string, kind: AiLineKind, text: string): void {
+    const msg = findToolHostMessage(toolUseId);
+    if (!msg) return;
+    const turn: AiAssistantTurn = { role: 'assistant', status: 'tool_running', lines: [], toolCalls: msg.toolCalls || [] };
+    if (appendAiToolNote(turn, toolUseId, kind, text)) {
+      updateToolCallsFromTurn(msg, turn);
     }
   }
 
@@ -429,15 +453,17 @@ export function useStudioRunner() {
   }
 
   function switchSession(id: string): void {
-    if (getSession(id)) currentSessionId.value = id;
+    if (getSession(id)) {
+      currentSessionId.value = id;
+      if (!isRunning.value) currentToolCalls.value = [];
+    }
   }
 
   function startNewChat(): void {
     deltaBuffer.clear();
-    activeRunId = null;
-    stopRequested = false;
-    stoppedRunIds.clear();
+    streamController.resetForNewSession();
     authoringSession.value = null;
+    currentToolCalls.value = [];
     currentSessionId.value = null;
   }
 
@@ -447,6 +473,7 @@ export function useStudioRunner() {
     const ok = await confirm({ title: '清空对话', message: '清空当前对话的消息？', okText: '清空' });
     if (!ok) return;
     deltaBuffer.clear();
+    currentToolCalls.value = [];
     s.messages = [];
     sessions.value = [...sessions.value];
     saveSessionsToStorage();
@@ -523,9 +550,21 @@ export function useStudioRunner() {
     runStatusText.value = text;
   }
 
+  function completionKind(taskStatus?: string): RunStatusKind {
+    return ['blocked', 'failed'].includes(String(taskStatus || '')) ? 'error' : 'done';
+  }
+
+  function completionText(taskStatus?: string, round?: number): string {
+    const suffix = `(${round ?? 0} 轮)`;
+    if (taskStatus === 'blocked') return `已阻塞 ${suffix}`;
+    if (taskStatus === 'failed') return `失败 ${suffix}`;
+    if (taskStatus === 'unverified' || taskStatus === 'partial') return `未验证 ${suffix}`;
+    return `完成 ${suffix}`;
+  }
+
   /* ─── socket on (迭代 1: 7 个) ────────────────────── */
 
-  const handlers: SocketHandler[] = [
+  const handlers: [string, (...args: unknown[]) => void][] = [
     ['connect', () => {
       if (currentSessionId.value && isRunning.value) {
         socket.emit('ide:reattach', { sessionId: currentSessionId.value });
@@ -538,96 +577,24 @@ export function useStudioRunner() {
     ['connect_error', () => {
       if (isRunning.value) setStatus('starting', 'Socket 连接异常，等待重连...');
     }],
-    ['ide:thinking', (msg: unknown) => {
-      const m = msg as IdeSocketMessage;
-      if (!matchesCurrentRun(m)) return;
-      currentTextHadDelta = false;
-      setStatus('running', '思考中...');
-    }],
     ['ide:authoring-session', (msg: unknown) => {
       const m = msg as IdeSocketMessage & { session?: AuthoringSessionSnapshot };
       if (!m || m.sessionId !== currentSessionId.value || !m.session) return;
+      deltaBuffer.flushNow();
       authoringSession.value = m.session;
       setStatus('running', `创作流程：${labelForAuthoringStage(m.session.stage, m.session)}`);
     }],
     ['ide:authoring-interaction', (msg: unknown) => {
       const m = msg as IdeSocketMessage & { interaction?: AuthoringInteraction };
       if (!m || m.sessionId !== currentSessionId.value || !m.interaction) return;
+      deltaBuffer.flushNow();
       appendAuthoringInteraction(m.interaction);
     }],
     ['ide:authoring-artifact', (msg: unknown) => {
       const m = msg as IdeSocketMessage & { artifact?: AuthoringArtifact };
       if (!m || m.sessionId !== currentSessionId.value || !m.artifact) return;
+      deltaBuffer.flushNow();
       appendAuthoringArtifact(m.artifact);
-    }],
-    ['ide:text', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { text?: string };
-      if (!matchesCurrentRun(m) || !m.text || currentTextHadDelta) return;
-      appendAiLine('stdout', m.text);
-    }],
-    ['ide:text-delta', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { delta?: string };
-      if (!matchesCurrentRun(m) || !m.delta) return;
-      currentTextHadDelta = true;
-      setStatus('running', '生成中...');
-      appendAiDelta(m.delta);
-    }],
-    ['ide:tool-start', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { name?: string; toolUseId?: string; input?: unknown };
-      if (!matchesCurrentRun(m)) return;
-      currentToolCalls.value.push({
-        toolUseId: m.toolUseId || `tool-${Date.now()}`,
-        name: m.name || 'unknown',
-        status: 'running',
-        startedAt: Date.now(),
-        input: m.input,
-      });
-      setStatus('running', m.name ? `调用工具：${m.name}` : '调用工具...');
-    }],
-    ['ide:tool-delta', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { toolUseId?: string; stream?: string; text?: string };
-      if (!matchesCurrentRun(m) || !m.toolUseId || !m.text) return;
-      appendToolLog(m.toolUseId, m.stream, m.text);
-      setStatus('running', '工具执行中...');
-    }],
-    ['ide:tool-end', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { is_error?: boolean; toolUseId?: string; result?: unknown };
-      if (!matchesCurrentRun(m)) return;
-      if (m.toolUseId) {
-        const call = currentToolCalls.value.find((c) => c.toolUseId === m.toolUseId);
-        if (call) {
-          call.status = m.is_error ? 'error' : 'done';
-          call.durationMs = Date.now() - call.startedAt;
-          call.result = m.result;
-          call.error = m.is_error ? summarizeToolValue(m.result) || '工具返回错误' : undefined;
-          currentToolCalls.value = [...currentToolCalls.value];
-        }
-      }
-      setStatus('running', m.is_error ? '工具返回错误，继续分析...' : '思考中...');
-    }],
-    ['ide:done', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { round?: number };
-      if (!matchesCurrentRun(m)) return;
-      finalizeStreamPersist();
-      setStatus('done', `完成 (${m.round ?? 0} 轮)`);
-      finalize();
-    }],
-    ['ide:error', (msg: unknown) => {
-      const m = msg as IdeSocketMessage & { error?: string };
-      if (!matchesCurrentRun(m)) return;
-      finalizeStreamPersist();
-      setStatus('error', '出错');
-      appendAiLine('error', `✘ ${m.error || '未知错误'}`);
-      finalize();
-    }],
-    ['ide:cancelled', (msg: unknown) => {
-      const m = msg as IdeSocketMessage;
-      if (!matchesCurrentRun(m, { allowStopped: true, allowAfterStop: true })) return;
-      finalizeStreamPersist();
-      rememberStoppedRun(m.runId);
-      setStatus('cancelled', '已取消');
-      appendAiLine('error', '已取消');
-      finalize();
     }],
     ['ide:mcp-status', (msg: unknown) => {
       const m = msg as { mcpId?: string; status?: string; tools?: unknown[] };
@@ -638,27 +605,6 @@ export function useStudioRunner() {
         toolCount: Array.isArray(m.tools) ? m.tools.length : 0,
       });
       localMcpStatus.value = next;
-    }],
-    ['ide:approve-request', (msg: unknown) => {
-      const m = msg as Partial<ApprovePayload> & IdeSocketMessage;
-      if (!matchesCurrentRun(m) || !m.requestId || !m.sessionId) return;
-      // 新 request 来时若已有旧倒计时，清理旧的（防多 tick 累加）
-      clearApproveCountdown();
-      pendingApprove.value = {
-        requestId: m.requestId,
-        sessionId: m.sessionId,
-        title: m.title,
-        toolName: m.toolName,
-        detail: m.detail,
-      };
-      approveCountdown.value = APPROVE_TIMEOUT_SEC;
-      approveTickHandle = setInterval(() => {
-        approveCountdown.value -= 1;
-        if (approveCountdown.value <= 0) {
-          // 120s 超时自动 deny
-          respondApprove('deny');
-        }
-      }, 1000);
     }],
   ];
 
@@ -803,13 +749,33 @@ export function useStudioRunner() {
     socket.emit('ide:mcp-stop', { mcpId });
   }
 
-  /* ─── 安全模式审批条 emit（迭代 2） ────────────────── */
+  /* ─── Agent 审批条 emit（迭代 2） ────────────────── */
 
   function clearApproveCountdown(): void {
     if (approveTickHandle !== null) {
       clearInterval(approveTickHandle);
       approveTickHandle = null;
     }
+    approveDeadlineMs = 0;
+  }
+
+  function startApproveCountdown(): void {
+    clearApproveCountdown();
+    approveDeadlineMs = Date.now() + APPROVE_TIMEOUT_SEC * 1000;
+    approveCountdown.value = APPROVE_TIMEOUT_SEC;
+    approveTickHandle = setInterval(() => {
+      if (!pendingApprove.value || approveDeadlineMs <= 0) {
+        clearApproveCountdown();
+        return;
+      }
+      const remaining = Math.max(0, Math.ceil((approveDeadlineMs - Date.now()) / 1000));
+      approveCountdown.value = remaining;
+      if (remaining <= 0) {
+        clearApproveCountdown();
+        pendingApprove.value = null;
+        notify.error('审批已超时，请重新发起操作');
+      }
+    }, 1000);
   }
 
   function respondApprove(action: ApproveAction, text: string = ''): void {
@@ -824,7 +790,7 @@ export function useStudioRunner() {
       text = t;
     }
     clearApproveCountdown();
-    socket.emit('ide:approve-response', {
+    socket.emit(p.responseEvent || 'ide:approve-response', {
       requestId: p.requestId,
       sessionId: p.sessionId,
       action,
@@ -833,21 +799,7 @@ export function useStudioRunner() {
     pendingApprove.value = null;
   }
 
-  /* ─── 3 个 checkbox 同步 ──────────────────────────── */
-
-  function setSafeMode(enabled: boolean): void {
-    safeMode.value = enabled;
-    if (currentSessionId.value) {
-      socket.emit('ide:safe-mode', { sessionId: currentSessionId.value, enabled });
-    }
-  }
-
-  function setUnlimitedTurns(enabled: boolean): void {
-    unlimitedTurns.value = enabled;
-    if (currentSessionId.value) {
-      socket.emit('ide:unlimited-turns', { sessionId: currentSessionId.value, enabled });
-    }
-  }
+  /* ─── Agent options sync ──────────────────────────── */
 
   function setCcCollab(enabled: boolean): void {
     ccCollab.value = enabled;
@@ -884,8 +836,6 @@ export function useStudioRunner() {
       sessionId: currentSessionId.value,
       message: task,
       context: buildSendContext(),
-      safeMode: safeMode.value,
-      unlimitedTurns: unlimitedTurns.value,
       claudeCodeEnabled: ccCollab.value,
       entry: 'studio',
     }, (ack: AckResponse) => {
@@ -901,8 +851,6 @@ export function useStudioRunner() {
       }
       const sid = currentSessionId.value;
       if (sid) {
-        socket.emit('ide:safe-mode', { sessionId: sid, enabled: safeMode.value });
-        socket.emit('ide:unlimited-turns', { sessionId: sid, enabled: unlimitedTurns.value });
         socket.emit('ide:claude-code-collab', { sessionId: sid, enabled: ccCollab.value });
       }
     });
@@ -935,11 +883,9 @@ export function useStudioRunner() {
 
   async function sendTask(task: string): Promise<void> {
     deltaBuffer.clear();
-    activeRunId = null;
-    stopRequested = false;
+    streamController.resetForNewRun();
     currentToolCalls.value = [];
     appendUserMessage(task);
-
     isRunning.value = true;
     setStatus('starting', '启动中...');
 
@@ -989,8 +935,8 @@ export function useStudioRunner() {
   function onStop(): void {
     if (!currentSessionId.value) return;
     const stoppedSessionId = currentSessionId.value;
-    stopRequested = true;
-    rememberStoppedRun();
+    streamController.markStopRequested();
+    streamController.rememberStoppedRun();
     socket.emit('ide:stop', { sessionId: stoppedSessionId }, (ack: AckResponse) => {
       if (!ack?.ok && isRunning.value) {
         setStatus('cancelled', '停止请求失败');
@@ -1011,7 +957,7 @@ export function useStudioRunner() {
   function finalize(): void {
     deltaBuffer.flushNow();
     isRunning.value = false;
-    stopRequested = false;
+    streamController.clearStopRequested();
     pendingApprove.value = null;
     clearApproveCountdown();
     if (stopFallbackHandle !== null) {
@@ -1064,7 +1010,7 @@ export function useStudioRunner() {
         const lines: string[] = [`请帮我改进产物「${artifactName}」（id: ${target}）。`];
         if (errorCtx) {
           lines.push('', '上一次运行的错误信息：', '```', errorCtx, '```', '');
-          lines.push('请分析以上错误的根因，定位是 Program L1/action、Skill 约束还是执行命令本身的问题，并给出具体修改方案。');
+          lines.push('请分析以上错误的根因，定位是任务 L1/action、Skill 约束还是执行命令本身的问题，并给出具体修改方案。');
         } else {
           lines.push('', '请分析这个产物当前的不足，并给出改进方案。');
         }
@@ -1077,7 +1023,92 @@ export function useStudioRunner() {
 
   /* ─── 生命周期 ────────────────────────────────────── */
 
-  const cleanup = bindIdeStreamHandlers(socket, handlers);
+  const cleanup = bindAiAgentStreamHandlers(socket, streamController, {
+    setStatus: (text) => setStatus('running', text),
+    finalize,
+    appendLine: appendAiLine,
+    appendDelta: appendAiDelta,
+      flushDelta: () => deltaBuffer.flushNow(),
+      onToolStart: (m) => {
+        deltaBuffer.flushNow();
+        const msg = ensureToolHostMessage(m.toolUseId);
+        if (!msg) return;
+        const turn: AiAssistantTurn = { role: 'assistant', status: 'tool_running', lines: [], toolCalls: msg.toolCalls || [] };
+        startAiToolCall(turn, m.toolUseId || `tool-${Date.now()}`, m.name || 'unknown', m.input);
+        updateToolCallsFromTurn(msg, turn);
+        setStatus('running', m.name ? `调用工具：${m.name}` : '调用工具...');
+      },
+      onToolDelta: (m) => {
+      if (!m.toolUseId || !m.text) return;
+      appendToolLog(m.toolUseId, m.stream, m.text);
+      setStatus('running', '工具执行中...');
+      },
+      onToolEnd: (m) => {
+        if (m.toolUseId) {
+          const msg = findToolHostMessage(m.toolUseId);
+          if (msg) {
+            const turn: AiAssistantTurn = { role: 'assistant', status: 'tool_running', lines: [], toolCalls: msg.toolCalls || [] };
+            if (finishAiToolCall(turn, m.toolUseId, Boolean(m.is_error), m.result)) {
+              updateToolCallsFromTurn(msg, turn);
+            }
+          }
+        }
+        setStatus('running', m.is_error ? '工具返回错误，继续分析...' : '思考中...');
+    },
+    onNarration: (m) => {
+      if (m.toolUseId && m.message) appendToolNote(m.toolUseId, m.kind || 'thought', m.message);
+      else if (m.message) appendAiLine(m.kind || 'thought', m.message);
+    },
+    onDone: (m) => {
+      finalizeStreamPersist();
+      setStatus(completionKind(m.taskStatus), completionText(m.taskStatus, m.round));
+      finalize();
+    },
+    onError: (m) => {
+      finalizeStreamPersist();
+      setStatus('error', '出错');
+      appendAiLine('error', `✘ ${m.error || '未知错误'}`);
+      finalize();
+    },
+    onCancelled: (m) => {
+      finalizeStreamPersist();
+      streamController.rememberStoppedRun(m.runId);
+      setStatus('cancelled', '已取消');
+      appendAiLine('error', '已取消');
+      finalize();
+    },
+    onApproveRequest: (m) => {
+      if (!m.requestId || !m.sessionId) return;
+      clearApproveCountdown();
+      pendingApprove.value = {
+        requestId: m.requestId,
+        sessionId: m.sessionId,
+        title: m.title,
+        toolName: m.toolName,
+        detail: m.detail,
+        mode: 'approval',
+        responseEvent: 'ide:approve-response',
+      };
+      startApproveCountdown();
+    },
+    onUserInputRequest: (m) => {
+      if (!m.requestId || !m.sessionId) return;
+      clearApproveCountdown();
+      pendingApprove.value = {
+        requestId: m.requestId,
+        sessionId: m.sessionId,
+        title: m.title || (m.kind === 'request_secret' ? '需要 Secret 引用' : '需要补充信息'),
+        toolName: m.toolName || (m.kind === 'request_secret' ? 'request_secret' : 'ask_user'),
+        detail: m.detail || m.question || m.reason || '',
+        mode: m.kind,
+        responseEvent: m.responseEvent,
+        secretName: m.secretName || '',
+        label: m.label || '',
+        provider: m.provider || '',
+      };
+      startApproveCountdown();
+    },
+  }, handlers);
 
   watch([
     selectedHosts,
@@ -1088,8 +1119,6 @@ export function useStudioRunner() {
     toolFilter,
     currentSessionId,
     taskInput,
-    safeMode,
-    unlimitedTurns,
     ccCollab,
     historyDrawerOpen,
   ], saveStudioPrefs, { deep: true });
@@ -1121,7 +1150,7 @@ export function useStudioRunner() {
     isRunning, runStatusKind, runStatusText,
     currentToolCalls,
     authoringSession, authoringStages, authoringStageText,
-    taskInput, safeMode, unlimitedTurns, ccCollab,
+    taskInput, ccCollab,
     historyDrawerOpen,
     pendingApprove, approveCountdown,
     summaryText,
@@ -1132,7 +1161,7 @@ export function useStudioRunner() {
     toggleHost, addPath, addPickedPath, removePath,
     toggleContainer, unpinContainer,
     toggleTool,
-    setSafeMode, setUnlimitedTurns, setCcCollab,
+    setCcCollab,
     onSend, onStop, respondAuthoring,
     switchSession, startNewChat, clearCurrentChat, deleteSession,
     cleanupSessionResiduals, residualCountForSession,

@@ -43,6 +43,29 @@ function formatRiskReason(verdict) {
   return [reasons.join('、'), level, mode].filter(Boolean).join('；');
 }
 
+function checkHostScope(input = {}, context = {}) {
+  const hostScope = context.hostScope;
+  if (hostScope === undefined) return { allow: true };
+
+  const requestedHostId = String(input.hostId || context.hostId || 'local').trim() || 'local';
+  const currentHostId = String(context.hostId || 'local').trim() || 'local';
+  if (hostScope === 'current') {
+    return requestedHostId === currentHostId
+      ? { allow: true }
+      : { allow: false, reason: `目标主机 ${requestedHostId} 超出当前主机范围 ${currentHostId}` };
+  }
+
+  if (Array.isArray(hostScope)) {
+    const allowed = hostScope.map((item) => String(item).trim()).filter(Boolean);
+    if (allowed.length === 0) return { allow: false, reason: `目标主机 ${requestedHostId} 未被授权` };
+    return allowed.includes(requestedHostId)
+      ? { allow: true }
+      : { allow: false, reason: `目标主机 ${requestedHostId} 不在授权范围 [${allowed.join(', ')}] 内` };
+  }
+
+  return { allow: false, reason: `hostScope 配置非法：${String(hostScope)}` };
+}
+
 /**
  * @param {string} toolName
  * @param {object} input
@@ -51,6 +74,12 @@ function formatRiskReason(verdict) {
  */
 function check(toolName, input, context = {}) {
   const command = String(input?.command || '');
+
+  // ── 0. 主机范围准入：防止 input.hostId 覆盖 context.hostId 越权 ───────
+  const hostVerdict = checkHostScope(input || {}, context);
+  if (!hostVerdict.allow) {
+    return { allow: false, reason: hostVerdict.reason };
+  }
 
   // ── 1. capability 准入（最小授权）──────────────────────────────
   const capVerdict = checkCapabilities(toolName, input || {}, context.capabilities);

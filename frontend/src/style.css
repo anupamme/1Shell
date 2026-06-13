@@ -773,7 +773,7 @@
 }
 .dark .stat-card { background: transparent; border-color: rgba(30, 41, 59, 0.6); }
 
-/* Program 列表项 */
+/* 任务列表项 */
 .program-card {
   border-radius: 12px; padding: 14px;
   border: 1px solid #e2e8f0;
@@ -911,7 +911,7 @@
 .dark .history-item .hi-title { color: #e2e8f0; }
 .history-item .hi-meta { color: #94a3b8; font-size: 10px; }
 
-/* 安全模式审批条（迭代 2 · 底部浮出动画，与老 skill-studio.html inline 1:1） */
+/* Agent 审批条（迭代 2 · 底部浮出动画，与老 skill-studio.html inline 1:1） */
 @keyframes slideUp {
   from { transform: translate(-50%, 100%); opacity: 0; }
   to   { transform: translate(-50%, 0);    opacity: 1; }
@@ -2616,7 +2616,7 @@
 }
 .ide-panel-stop-btn:hover { background: #dc2626; }
 
-/* ─── 刀 5a · 安全模式审批条（fixed bottom-4 全局浮层） ─── */
+/* ─── 刀 5a · Agent 审批条（fixed bottom-4 全局浮层） ─── */
 .approve-bar {
   position: fixed;
   bottom: 16px;

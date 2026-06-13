@@ -13,6 +13,11 @@ export interface AiToolLogEntry {
   text: string;
 }
 
+export interface AiToolNoteEntry {
+  kind: AiLineKind;
+  text: string;
+}
+
 export interface AiToolCallState {
   toolUseId: string;
   name: string;
@@ -23,6 +28,7 @@ export interface AiToolCallState {
   result?: unknown;
   error?: string;
   logs?: AiToolLogEntry[];
+  notes?: AiToolNoteEntry[];
 }
 
 export interface AiUserTurn {
@@ -114,6 +120,18 @@ export function appendAiToolLog(turn: AiAssistantTurn, toolUseId: string, stream
   return call;
 }
 
+export function appendAiToolNote(turn: AiAssistantTurn, toolUseId: string, kind: AiLineKind, text: string): AiToolCallState | null {
+  const call = turn.toolCalls.find((item) => item.toolUseId === toolUseId);
+  if (!call || !text) return null;
+  const notes = call.notes || (call.notes = []);
+  const last = notes[notes.length - 1];
+  if (last && last.kind === kind && last.text === text) return call;
+  notes.push({ kind, text });
+  while (notes.length > 12) notes.shift();
+  turn.toolCalls = [...turn.toolCalls];
+  return call;
+}
+
 export function summarizeToolValue(value: unknown, maxLength = 1200): string {
   if (value === undefined || value === null) return '';
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -175,8 +193,17 @@ export function toolDisplayName(name: string): string {
     remove_mcp_server: '删除 MCP',
     deploy_local_mcp: '部署 MCP',
     query_audit: '查询审计',
-    list_programs: '列出 Program',
-    trigger_program: '触发 Program',
+    list_tasks: '列出任务',
+    create_task: '创建任务',
+    write_task: '写入任务',
+    trigger_task: '触发任务',
+    package_agent_run: '打包 AgentRun',
+    ask_user: '询问信息',
+    request_secret: '请求凭据引用',
+    verify_outcome: '验证结果',
+    list_programs: '列出任务',
+    write_program: '写入任务',
+    trigger_program: '触发任务',
     query_probe: '查询探针',
     list_probes: '列出探针',
     get_probe: '读取探针',
@@ -226,8 +253,22 @@ export function summarizeToolInput(call: AiToolCallState): string {
       return textField(input, 'id') || genericInputSummary(call.input);
     case 'deploy_local_mcp':
       return [textField(input, 'name'), textField(input, 'repoUrl')].filter(Boolean).join(' · ');
+    case 'create_task':
+      return [textField(input, 'taskId'), textField(input, 'name'), textField(input, 'template')].filter(Boolean).join(' · ') || genericInputSummary(call.input);
+    case 'write_task':
+      return [textField(input, 'taskId'), countLabel(input.files)].filter(Boolean).join(' · ') || genericInputSummary(call.input);
+    case 'package_agent_run':
+      return [textField(input, 'runId') || '当前 AgentRun', textField(input, 'taskId') || textField(input, 'programId'), input.write ? '写入' : '预览'].filter(Boolean).join(' · ');
+    case 'ask_user':
+      return shortText(textField(input, 'question') || textField(input, 'reason'), 120) || genericInputSummary(call.input);
+    case 'request_secret':
+      return [textField(input, 'label') || textField(input, 'name'), textField(input, 'provider')].filter(Boolean).join(' · ') || genericInputSummary(call.input);
+    case 'verify_outcome':
+      return [textField(input, 'type'), textField(input, 'hostId'), textField(input, 'url') || textField(input, 'path') || textField(input, 'port')].filter(Boolean).join(' · ') || genericInputSummary(call.input);
     case 'query_audit':
       return [textField(input, 'action'), textField(input, 'source'), textField(input, 'hostId'), textField(input, 'keyword')].filter(Boolean).join(' · ') || '最近审计';
+    case 'trigger_task':
+      return [textField(input, 'taskId'), textField(input, 'hostId'), textField(input, 'actionName')].filter(Boolean).join(' · ');
     case 'trigger_program':
       return [textField(input, 'programId'), textField(input, 'hostId'), textField(input, 'actionName')].filter(Boolean).join(' · ');
     case 'get_probe':
@@ -246,6 +287,7 @@ export function summarizeToolInput(call: AiToolCallState): string {
       return [hostId, textField(input, 'name')].filter(Boolean).join(' · ');
     case 'list_hosts':
     case 'list_mcp_servers':
+    case 'list_tasks':
     case 'list_programs':
     case 'list_probes':
       return '无参数';

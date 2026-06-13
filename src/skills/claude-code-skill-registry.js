@@ -6,7 +6,6 @@ const { execFile } = require('child_process');
 const { parseFrontmatter } = require('./registry');
 
 const BUILTIN_CLAUDE_CODE_SKILL_IDS = new Set([
-  'program-authoring',
   'oneshell-skill-authoring',
 ]);
 

@@ -446,7 +446,321 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     return [];
   }
 
+  async function requestAgentTurn(body = {}) {
+    const { base, key, model } = resolveConfig(body);
+    const workflowModel = body.model || activeSkillsModel() || model;
+    const systemPrompt = buildAgentSystemPrompt(body);
+    const userPayload = buildAgentTurnPayload(body);
+
+    if (skillsProxyUrl) {
+      const data = await requestAnthropicMessage({
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPayload }],
+        maxTokens: Number(body.maxTokens || body.max_tokens) > 0 ? Number(body.maxTokens || body.max_tokens) : 4096,
+        model: workflowModel,
+        temperature: Number.isFinite(Number(body.temperature)) ? Number(body.temperature) : 0.2,
+        tools: AGENT_TURN_TOOLS,
+        retryCount: Number.isFinite(Number(body.retryCount)) ? Number(body.retryCount) : 1,
+        timeoutMs: Number(body.timeoutMs || body.timeout_ms) > 0 ? Number(body.timeoutMs || body.timeout_ms) : PROGRAM_WORKFLOW_FINAL_PROVIDER_TIMEOUT_MS,
+      });
+      return parseAnthropicAgentTurn(data);
+    }
+
+    const text = await requestChatCompletionText({
+      base,
+      key,
+      model: workflowModel,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPayload },
+      ],
+      maxTokens: Number(body.maxTokens || body.max_tokens) > 0 ? Number(body.maxTokens || body.max_tokens) : 2000,
+      temperature: Number.isFinite(Number(body.temperature)) ? Number(body.temperature) : 0.2,
+      retryCount: 2,
+    });
+
+    if (!text) throw new Error('AI Agent 未返回有效内容，请检查 Provider 配置或上游状态');
+    return parseAgentTurnText(text);
+  }
+
+  const AGENT_TURN_TOOLS = [{
+    name: 'execute_command',
+    description: '在 1Shell 当前授权主机上执行 shell 命令。只用于低风险探测、诊断、验证或已获批准的操作。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: '要执行的 shell 命令' },
+        timeout: { type: 'number', description: '超时时间，毫秒' },
+        hostId: { type: 'string', description: '目标主机 ID；未提供时使用 AgentRun context.hostId' },
+      },
+      required: ['command'],
+    },
+  }, {
+    name: 'ask_user',
+    description: '当缺少必要信息或需要用户选择方案时，创建结构化用户提问 interrupt。不要猜测关键输入。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: '为什么必须询问用户' },
+        message: { type: 'string', description: '给用户看的简短说明' },
+        questions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              prompt: { type: 'string' },
+              type: { type: 'string' },
+              required: { type: 'boolean' },
+              options: { type: 'array', items: { type: 'object' } },
+            },
+          },
+        },
+      },
+      required: ['questions'],
+    },
+  }, {
+    name: 'request_secret',
+    description: '当任务需要 token、password、API key 等敏感信息时，创建密钥引用 interrupt。不要要求用户把明文密钥写进普通回答。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: '为什么需要该密钥' },
+        message: { type: 'string', description: '给用户看的简短说明' },
+        secrets: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              label: { type: 'string' },
+              required: { type: 'boolean' },
+              description: { type: 'string' },
+            },
+          },
+        },
+      },
+      required: ['secrets'],
+    },
+  }, {
+    name: 'request_approval',
+    description: '当操作可能修改系统、重启服务、写入文件、安装软件或有安全风险时，创建审批 interrupt，等待用户授权。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: '为什么需要审批' },
+        message: { type: 'string', description: '给用户看的审批说明' },
+        action: { type: 'string', description: '计划执行的动作' },
+        riskLevel: { type: 'string', description: 'safe|caution|danger' },
+        riskReason: { type: 'string', description: '风险说明' },
+        toolName: { type: 'string', description: '获批后可能使用的工具名' },
+        args: { type: 'object', description: '获批后可能执行的工具参数摘要' },
+      },
+      required: ['reason', 'action'],
+    },
+  }];
+
+  function buildAgentSystemPrompt(body = {}) {
+    const callerSystemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '';
+    const skillPrompt = typeof body.skillPrompt === 'string' ? body.skillPrompt.trim() : '';
+    return [
+      callerSystemPrompt || [
+        '你是 1Shell AI Agent Runtime 的执行智能体，目标是像真实 agent 一样通过 observe/act/verify 循环解决 VPS 运维与自动化问题。',
+        '必须遵守：',
+        '- 不猜测关键输入；缺少项目地址、主机、端口、账号、token、第三方权限或验收条件时，调用 ask_user 或 request_secret。',
+        '- 所有外部操作都必须通过工具；不要声称已经执行了未执行的命令。',
+        '- 可能修改系统、安装软件、重启/停止服务、删除数据或暴露风险的操作，先调用 request_approval。',
+        '- 命令输出只提炼关键证据；不要把大段日志原样复制到最终结论。',
+        '- 你可以给出结论和下一步建议，但最终成功由 1Shell verifier/outcome 判定，不要把未验证结果标成 success。',
+        '- 如果 Provider 不支持工具调用，请只返回 JSON：{"text":"说明","toolCalls":[{"toolName":"execute_command","args":{"command":"..."}}],"interrupt":{"type":"ask_user","questions":[...]},"final":false}。',
+      ].join('\n'),
+      skillPrompt ? `\n## 已加载 Skill\n${skillPrompt}` : '',
+    ].filter(Boolean).join('\n\n');
+  }
+
+  function buildAgentTurnPayload(body = {}) {
+    const state = normalizeAgentObject(body.state);
+    const spec = normalizeAgentObject(body.spec || state.spec);
+    const commandProtocol = normalizeAgentObject(body.commandProtocol || body.command_protocol);
+    const runtimeStateSnapshot = body.runtimeStateSnapshot || body.runtime_state_snapshot || null;
+    const runtimeContext = String(body.runtimeContext || body.runtime_context || '').trim();
+    return safeJsonStringify({
+      goal: body.goal || state.goal || spec.goal || '',
+      source: state.source || spec.source || 'console',
+      context: spec.context || body.context || {},
+      policy: spec.policy || body.policy || {},
+      outputContract: spec.outputContract || spec.output_contract || {},
+      agentRuntime: {
+        controller: commandProtocol.owner || state.runtimeState?.controller || 'AgentRunController',
+        commandProtocol: Object.keys(commandProtocol).length > 0 ? commandProtocol : null,
+        stateDeltaContract: {
+          field: 'stateDelta',
+          purpose: 'Optional working-state delta for the AgentRun controller. Use it to report operational facts, unknowns, assumptions, successCriteria, risks, constraints, evidenceNeeded, blockers, and decisionBasis. Do not include hidden chain-of-thought.',
+          mergeTarget: 'runtimeState.cognition',
+        },
+        stateSnapshot: runtimeStateSnapshot,
+        decisionContext: runtimeContext,
+      },
+      run: {
+        runId: body.runId || body.run_id || state.runId || '',
+        turn: body.turn,
+        maxTurns: body.maxTurns || body.max_turns,
+        currentPhase: state.currentPhase || '',
+        taskStatus: state.taskStatus || '',
+        runnerStatus: state.runnerStatus || '',
+      },
+      resume: body.resume || null,
+      previousTurns: compactAgentArray(body.previousTurns || body.previous_turns, 8),
+      observations: compactAgentArray(body.observations, 8),
+      existingArtifacts: compactAgentArray(state.artifacts, 4),
+      pendingInterrupts: compactAgentArray((state.interrupts || []).filter((item) => item?.status === 'pending'), 4),
+    });
+  }
+
+  function parseAnthropicAgentTurn(data = {}) {
+    const content = Array.isArray(data?.content) ? data.content : [];
+    const text = extractTextContent(content);
+    const toolUses = content.filter((item) => item?.type === 'tool_use');
+    const interruptUse = toolUses.find((item) => ['ask_user', 'request_secret', 'request_approval'].includes(item.name));
+    if (interruptUse) {
+      return normalizeAgentTurnResult({
+        text,
+        interrupt: createAgentInterruptFromToolUse(interruptUse),
+        final: false,
+      });
+    }
+    const toolCalls = toolUses
+      .filter((item) => ['execute_command', 'host_exec'].includes(item.name))
+      .map((item) => ({
+        id: item.id,
+        toolName: item.name,
+        args: normalizeAgentObject(item.input),
+        options: buildAgentToolOptions(item.input),
+      }));
+    if (toolCalls.length > 0) {
+      return normalizeAgentTurnResult({ text, toolCalls, final: false });
+    }
+    return parseAgentTurnText(text || safeJsonStringify(data));
+  }
+
+  function createAgentInterruptFromToolUse(toolUse = {}) {
+    const input = normalizeAgentObject(toolUse.input);
+    return {
+      type: toolUse.name,
+      reason: input.reason || input.message || toolUse.name,
+      message: input.message || input.reason || '',
+      questions: input.questions,
+      secrets: input.secrets,
+      payload: input,
+    };
+  }
+
+  function parseAgentTurnText(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return { text: '', final: true, status: 'unverified' };
+    const jsonText = text.replace(/^```(?:json)?\s*/u, '').replace(/\s*```$/u, '').trim();
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return normalizeAgentTurnResult(parsed, text);
+    } catch { /* keep plain text fallback */ }
+    return normalizeAgentTurnResult({
+      command: 'recover',
+      text: '[MODEL_PROTOCOL_VIOLATION] The provider returned plain text instead of an explicit AgentRun command. Return structured JSON with command/type and any actions, interrupt, verification, finalization, or block reason.',
+      final: false,
+      status: 'unverified',
+      data: {
+        protocol: {
+          fallback: true,
+          rawTextExcerpt: text.slice(0, 1000),
+        },
+      },
+    }, text);
+  }
+
+  function normalizeAgentTurnResult(result = {}, fallbackText = '') {
+    const text = String(result.text || result.report || result.content || fallbackText || '').trim();
+    const toolCalls = Array.isArray(result.toolCalls || result.tool_calls)
+      ? (result.toolCalls || result.tool_calls).map(normalizeAgentToolCall).filter(Boolean)
+      : [];
+    const interrupt = normalizeAgentObject(result.interrupt || result.interruptRequest || result.interrupt_request);
+    const status = normalizeAgentReportedStatus(result.status);
+    return {
+      ...result,
+      text,
+      status,
+      toolCalls,
+      stateDelta: normalizeAgentObject(result.stateDelta || result.state_delta || result.agentStateDelta || result.agent_state_delta || result.cognition || result.mind),
+      ...(Object.keys(interrupt).length > 0 ? { interrupt } : {}),
+      final: result.final === true || result.done === true || (toolCalls.length === 0 && Object.keys(interrupt).length === 0),
+    };
+  }
+
+  function normalizeAgentToolCall(value = {}) {
+    const source = normalizeAgentObject(value);
+    const toolName = String(source.toolName || source.tool_name || source.name || source.tool || '').trim();
+    if (!toolName) return null;
+    const args = normalizeAgentObject(source.args || source.arguments || source.input || source.parameters);
+    return {
+      id: source.id || source.callId || source.call_id,
+      toolName,
+      args,
+      options: {
+        ...normalizeAgentObject(source.options),
+        ...buildAgentToolOptions(args),
+      },
+    };
+  }
+
+  function buildAgentToolOptions(input = {}) {
+    const source = normalizeAgentObject(input);
+    const hostId = String(source.hostId || source.host_id || '').trim();
+    return hostId ? { scope: { hostId } } : {};
+  }
+
+  function normalizeAgentReportedStatus(status) {
+    const value = String(status || '').trim().toLowerCase();
+    if (['failed', 'failure', 'error'].includes(value)) return 'failed';
+    if (['blocked', 'waiting_approval', 'interrupted'].includes(value)) return 'blocked';
+    if (['partial', 'warning', 'warn'].includes(value)) return 'partial';
+    return 'unverified';
+  }
+
+  function normalizeAgentObject(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+  }
+
+  function compactAgentArray(value, limit) {
+    return Array.isArray(value) ? value.slice(-limit).map(compactAgentValue) : [];
+  }
+
+  function compactAgentValue(value) {
+    if (typeof value === 'string') return value.slice(0, 4000);
+    if (!value || typeof value !== 'object') return value;
+    const result = {};
+    for (const [key, item] of Object.entries(value).slice(0, 40)) {
+      if (typeof item === 'string') result[key] = item.slice(0, 4000);
+      else if (Array.isArray(item)) result[key] = item.slice(0, 20).map(compactAgentValue);
+      else if (item && typeof item === 'object') result[key] = compactAgentValue(item);
+      else result[key] = item;
+    }
+    return result;
+  }
+
+  function safeJsonStringify(value, maxLength = 12000) {
+    const seen = new WeakSet();
+    const text = JSON.stringify(value, (_key, item) => {
+      if (typeof item === 'string') return item.length > maxLength ? `${item.slice(0, maxLength)}...[truncated]` : item;
+      if (item && typeof item === 'object') {
+        if (seen.has(item)) return '[Circular]';
+        seen.add(item);
+      }
+      return item;
+    }, 2);
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...[truncated]` : text;
+  }
+
   async function requestProgramWorkflowStep(body = {}) {
+    throw new Error('requestProgramWorkflowStep is disabled. Use AgentRunController via requestAgentTurn/runAgentTask so observe/decide/act/verify/recover state is owned by AgentRun.');
     const { base, key, model } = resolveConfig(body);
     const program = body.program && typeof body.program === 'object' ? body.program : {};
     const step = body.step && typeof body.step === 'object' ? body.step : {};
@@ -455,7 +769,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     const previousResults = Array.isArray(body.previousResults) ? body.previousResults : [];
 
     const userPayload = JSON.stringify({
-      program: {
+      task: {
         id: program.id,
         name: program.name,
         description: program.description,
@@ -475,7 +789,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
       previousResults,
     }, null, 2);
 
-    const FALLBACK_SYSTEM_PROMPT = '你是 1Shell AI 工作流 Program 的运行时 AI。你正在像真正 agent 一样连续完成当前步骤。进入重要阶段时先调用 report_phase 上报抽象进度；需要查看或修改目标主机时，使用 execute_command 工具。对于诊断、巡检、审计、报告类任务，必须在每个关键阶段后调用 update_result 更新右侧报告草稿；命令输出只保留关键证据，不要把大段原始日志交给最后一次调用总结。最终调用 publish_result 或 update_result(final=true) 完成报告。';
+    const FALLBACK_SYSTEM_PROMPT = '你是 1Shell 自动化任务的运行时 Agent。你正在像真正 agent 一样连续完成当前任务步骤。进入重要阶段时先调用 report_phase 上报抽象进度；需要查看或修改目标主机时，使用 execute_command 工具。对于诊断、巡检、审计、报告类任务，必须在每个关键阶段后调用 update_result 更新右侧报告草稿；命令输出只保留关键证据，不要把大段原始日志交给最后一次调用总结。最终调用 publish_result 或 update_result(final=true) 完成报告。';
     const callerSystemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '';
     const systemPrompt = callerSystemPrompt || FALLBACK_SYSTEM_PROMPT;
     const executeCommand = typeof body.executeCommand === 'function' ? body.executeCommand : null;
@@ -489,13 +803,13 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
       let commandResultCount = 0;
       const tools = [{
         name: 'execute_command',
-        description: '在当前 Program 目标主机上执行 shell 命令，用于完成当前抽象 AI 工作流步骤。',
+        description: '在当前任务目标主机上执行 shell 命令，用于完成当前抽象 AI 工作流步骤。',
         input_schema: {
           type: 'object',
           properties: {
             command: { type: 'string', description: '要执行的 shell 命令' },
             timeout: { type: 'number', description: '超时时间，毫秒' },
-            final_result: { type: 'boolean', description: '如果该命令 stdout 已经是最终用户报告，设为 true；1Shell 会直接把 stdout 作为 Program 结果，不再请求 AI 二次总结' },
+            final_result: { type: 'boolean', description: '如果该命令 stdout 已经是最终用户报告，设为 true；1Shell 会直接把 stdout 作为任务结果，不再请求 AI 二次总结' },
           },
           required: ['command'],
         },
@@ -513,7 +827,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
         },
       }, {
         name: 'update_result',
-        description: '增量更新 Program 页面右侧结果草稿。诊断、巡检、审计、报告类任务必须在每个关键阶段后调用，避免最后一次性总结导致超时。',
+        description: '增量更新任务页面右侧结果草稿。诊断、巡检、审计、报告类任务必须在每个关键阶段后调用，避免最后一次性总结导致超时。',
         input_schema: {
           type: 'object',
           properties: {
@@ -526,7 +840,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
         },
       }, {
         name: 'publish_result',
-        description: '提交当前 Program 步骤的最终用户可读结果。拿到足够证据后调用它，或用 update_result(final=true) 完成报告。',
+        description: '提交当前任务步骤的最终用户可读结果。拿到足够证据后调用它，或用 update_result(final=true) 完成报告。',
         input_schema: {
           type: 'object',
           properties: {
@@ -703,7 +1017,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
   }
 
   async function requestProgramAuthoring() {
-    throw new Error('requestProgramAuthoring 已移除：program 创作直接用 Studio 链路');
+    throw new Error('requestProgramAuthoring 已移除：任务创作直接用 Studio 链路');
   }
 
   async function requestSkillAdaptation(body = {}) {
@@ -803,6 +1117,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     createChatUpstream,
     fetchModelList,
     generateScript,
+    requestAgentTurn,
     requestProgramWorkflowStep,
     requestProgramAuthoring,
     requestSkillAdaptation,

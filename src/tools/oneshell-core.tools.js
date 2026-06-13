@@ -39,7 +39,7 @@ const TOOL_DEFS = [
   {
     name: 'ask_1shell_ai',
     targets: ['mcp'],
-    description: '把复杂运维、监控、脚本、Program、审计或诊断任务委托给 1Shell AI，由它在内部选择合适工具并返回结果摘要。',
+    description: '把复杂运维、监控、脚本、自动化任务、审计或诊断委托给 1Shell AI，由它在内部选择合适工具并返回结果摘要。',
     schema: {
       type: 'object',
       properties: {
@@ -271,22 +271,43 @@ const TOOL_DEFS = [
   {
     name: 'list_programs',
     targets: ['mcp', 'ide'],
-    description: '列出 1Shell 中所有已登记的 Program（自动化程序）。返回 id / name / description / 可用 action 列表 / 触发器。Program 是把运维流程（脚本步骤或 AI 工作流步骤）打包成的可复用程序。',
+    description: '列出 1Shell 中所有已登记的自动化任务。返回 id / name / description / 可用 action 列表 / 触发器。任务是把运维流程（脚本步骤或 AI 工作流步骤）打包成的可复用执行单元。',
+    schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'list_tasks',
+    targets: ['mcp', 'ide'],
+    description: '列出 1Shell 中所有已登记的自动化任务。task 命名版本，替代兼容用的 list_programs。',
     schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'trigger_program',
     targets: ['mcp', 'ide'],
-    description: '触发执行一个 1Shell Program。Program 内部可包含确定性脚本步骤（exec）与 AI 工作流步骤（ai）。不指定 hostId 时用 Program 默认主机；hostId=all 在全部目标主机上执行。返回 runId，执行进度与结果可通过前端"程序"页或审计/轨迹查询。',
+    description: '触发执行一个 1Shell 自动化任务。任务内部可包含确定性脚本步骤（exec）与 AI 工作流步骤（ai）。不指定 hostId 时用任务默认主机；hostId=all 在全部目标主机上执行。返回 runId，执行进度与结果可通过前端"任务"页或审计/轨迹查询。',
     schema: {
       type: 'object',
       properties: {
-        programId: { type: 'string', description: 'Program ID（用 list_programs 获取）' },
+        programId: { type: 'string', description: '任务 ID（用 list_programs 获取）' },
         hostId: { type: 'string', description: '目标主机 ID；all 表示全部目标主机；省略则用默认主机' },
         actionName: { type: 'string', description: '要触发的 action 名（可选，省略则用默认 manual 触发器）' },
-        inputs: { type: 'object', description: 'Program 输入参数键值对（可选）' },
+        inputs: { type: 'object', description: '任务输入参数键值对（可选）' },
       },
       required: ['programId'],
+    },
+  },
+  {
+    name: 'trigger_task',
+    targets: ['mcp', 'ide'],
+    description: '触发执行一个 1Shell 自动化任务。task 命名版本，替代兼容用的 trigger_program。',
+    schema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '任务 ID（用 list_tasks 获取）' },
+        hostId: { type: 'string', description: '目标主机 ID；all 表示全部目标主机；省略则用默认主机' },
+        actionName: { type: 'string', description: '要触发的 action 名（可选，省略则用默认 manual 触发器）' },
+        inputs: { type: 'object', description: '任务输入参数键值对（可选）' },
+      },
+      required: ['taskId'],
     },
   },
   {
@@ -544,8 +565,10 @@ function createOneShellCoreTools(deps = {}) {
       case 'query_audit':
         return handleQueryAudit(input);
       case 'list_programs':
+      case 'list_tasks':
         return handleListPrograms();
       case 'trigger_program':
+      case 'trigger_task':
         return handleTriggerProgram(input, context);
       case 'query_probe':
       case 'list_probes':
@@ -594,6 +617,7 @@ function createOneShellCoreTools(deps = {}) {
         const ctx = deps.harness.buildContext(context.source === 'mcp' ? 'mcp' : (context.source || 'core'), {
           hostId,
           allowApproval: canRequestApproval,
+          approvalGranted: context.approvalGranted === true || context.preApproved === true,
           requestApproval: canRequestApproval ? context.requestApproval : undefined,
           runId: context.runId,
           sessionId: context.sessionId,
@@ -676,7 +700,7 @@ function createOneShellCoreTools(deps = {}) {
       `mode=${mode}`,
       hostId ? `hostId=${hostId}` : '',
       'External MCP clients directly see only these tools: list_hosts, host_exec, list_remote_dir, read_remote_file, write_remote_file, create_directory, delete_path, rename_path, upload_file, download_file, ask_1shell_ai.',
-      'Scripts, Programs, probes, audit, diagnostics, and MCP registry operations are delegated capabilities behind ask_1shell_ai; do not describe them as directly visible external MCP tools.',
+      'Scripts, automation tasks, probes, audit, diagnostics, and MCP registry operations are delegated capabilities behind ask_1shell_ai; do not describe them as directly visible external MCP tools.',
       requireConfirmation ? 'mutating actions require confirmation; if confirmation is unavailable, explain what would be done instead of forcing the action.' : 'the caller explicitly allowed execution without interactive confirmation.',
       mode === 'answer' ? 'Answer the request. Prefer read-only inspection and do not make changes.' : '',
       mode === 'plan' ? 'Produce a concrete plan. Do not make changes.' : '',
@@ -698,7 +722,6 @@ function createOneShellCoreTools(deps = {}) {
             gatewayMode: mode,
           },
         },
-        safeMode: requireConfirmation,
         entry: 'core',
         timeoutMs,
         approvalAction: requireConfirmation ? 'deny' : 'allow',
@@ -1038,7 +1061,7 @@ function createOneShellCoreTools(deps = {}) {
     if (!registry?.list) return err('programRegistry 未初始化');
     try {
       const programs = registry.list() || [];
-      if (programs.length === 0) return ok('（无已登记的 Program）');
+      if (programs.length === 0) return ok('（无已登记的自动化任务）');
       const lines = programs.map((p) => {
         const actions = p.actions ? Object.keys(p.actions) : [];
         const triggers = Array.isArray(p.triggers) ? p.triggers.map((t) => `${t.type}:${t.id}`) : [];
@@ -1061,20 +1084,20 @@ function createOneShellCoreTools(deps = {}) {
   async function handleTriggerProgram(input, context) {
     const engine = deps.programEngine;
     if (!engine?.triggerManual) return err('programEngine 未初始化');
-    const programId = String(input.programId || '').trim();
-    if (!programId) return err('programId 为必填');
+    const programId = String(input.taskId || input.programId || '').trim();
+    if (!programId) return err('taskId 为必填');
     const hostId = input.hostId ? String(input.hostId).trim() : undefined;
     const actionName = input.actionName ? String(input.actionName).trim() : undefined;
     const inputs = input.inputs && typeof input.inputs === 'object' ? input.inputs : undefined;
     try {
       const runIds = await engine.triggerManual({ programId, hostId, actionName, inputs });
       const ids = Array.isArray(runIds) ? runIds : [runIds].filter(Boolean);
-      return structured(true, `Program "${programId}" 已触发`, {
+      return structured(true, `任务 "${programId}" 已触发`, {
         programId,
         hostId: hostId || 'default',
         actionName: actionName || '(default)',
         runIds: ids,
-        note: '执行进度与结果可在前端"程序"页查看，或用 query_audit / harness 轨迹回溯。',
+        note: '执行进度与结果可在前端"任务"页查看，或用 query_audit / harness 轨迹回溯。',
       });
     } catch (e) {
       return err(`触发失败: ${e.message}`);

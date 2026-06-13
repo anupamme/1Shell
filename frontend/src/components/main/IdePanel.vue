@@ -63,18 +63,6 @@ function lineClass(kind: string): string {
       </div>
       <div class="ide-panel-toggles">
         <label
-          class="ide-toggle ide-toggle-safe"
-          :class="{ 'ide-toggle--active': ide.safeMode.value }"
-          title="安全模式：写操作需审批"
-        >
-          <input
-            type="checkbox"
-            :checked="ide.safeMode.value"
-            @change="(e) => ide.setSafeMode((e.target as HTMLInputElement).checked)"
-          />
-          <span>🛡 安全</span>
-        </label>
-        <label
           class="ide-toggle ide-toggle-cc"
           :class="{ 'ide-toggle--active': ide.claudeCodeEnabled.value }"
           title="Claude Code 协作：允许调用 Claude Code 处理复杂创作任务"
@@ -86,18 +74,13 @@ function lineClass(kind: string): string {
           />
           <span>✦ CC</span>
         </label>
-        <label
-          class="ide-toggle ide-toggle-unlimited"
-          :class="{ 'ide-toggle--active': ide.unlimitedTurns.value }"
-          title="不限轮次：取消 AI 工具调用 30 轮上限"
-        >
-          <input
-            type="checkbox"
-            :checked="ide.unlimitedTurns.value"
-            @change="(e) => ide.setUnlimitedTurns((e.target as HTMLInputElement).checked)"
-          />
-          <span>∞ 轮次</span>
-        </label>
+        <button
+          type="button"
+          class="ide-panel-clear-btn"
+          :disabled="!ide.canPackageLastRun.value || ide.packageDraft.value.loading || ide.packageDraft.value.saving"
+          title="从最近完成的 AgentRun 生成自动化任务草稿"
+          @click="ide.packageLastRun"
+        >打包任务</button>
         <button
           type="button"
           class="ide-panel-clear-btn"
@@ -121,16 +104,73 @@ function lineClass(kind: string): string {
         <div v-else class="ide-turn ide-turn-assistant">
           <div class="ide-turn-meta"><span>🤖</span><span>1Shell AI</span></div>
           <div class="ide-bubble-assistant">
-            <ToolProgressBar v-if="turn.toolCalls?.length" :calls="turn.toolCalls" class="mb-2" />
             <div
               v-for="(line, j) in turn.lines || []"
               :key="j"
               :class="['ide-line', 'markdown-body', lineClass(line.kind)]"
               v-html="renderMarkdown(line.text)"
             ></div>
+            <ToolProgressBar v-if="turn.toolCalls?.length" :calls="turn.toolCalls" class="mt-2" />
           </div>
         </div>
       </template>
+    </div>
+
+    <div v-if="ide.packageDraft.value.visible" class="ide-package-draft-panel">
+      <div class="ide-package-draft-header">
+        <div>
+          <strong>自动化任务草稿</strong>
+          <span v-if="ide.packageDraft.value.result" class="ide-package-draft-badge">
+            {{ ide.packageDraft.value.result.trustLevel || 'draft' }}
+          </span>
+        </div>
+        <button type="button" class="ide-package-draft-close" @click="ide.closePackageDraft">×</button>
+      </div>
+      <div class="ide-package-draft-body">
+        <label class="ide-package-draft-label">
+          任务 ID
+          <input
+            v-model="ide.packageDraft.value.programId"
+            class="ide-package-draft-input"
+            placeholder="留空则自动生成"
+            :disabled="ide.packageDraft.value.loading || ide.packageDraft.value.saving"
+          />
+        </label>
+        <div v-if="ide.packageDraft.value.error" class="ide-package-draft-error">
+          {{ ide.packageDraft.value.error }}
+        </div>
+        <div v-if="ide.packageDraft.value.result" class="ide-package-draft-meta">
+          <span>source: {{ ide.packageDraft.value.result.sourceTrustLevel || '-' }}</span>
+          <span>written: {{ ide.packageDraft.value.result.written ? 'true' : 'false' }}</span>
+          <span>path: {{ ide.packageDraft.value.result.path || '-' }}</span>
+        </div>
+        <ul v-if="ide.packageDraft.value.result?.warnings?.length" class="ide-package-draft-warnings">
+          <li v-for="(warning, idx) in ide.packageDraft.value.result.warnings" :key="idx">{{ warning }}</li>
+        </ul>
+        <textarea
+          v-if="ide.packageDraft.value.result?.yaml"
+          class="ide-package-draft-yaml"
+          readonly
+          :value="ide.packageDraft.value.result.yaml"
+        ></textarea>
+        <div class="ide-package-draft-actions">
+          <button
+            type="button"
+            class="ide-panel-clear-btn"
+            :disabled="ide.packageDraft.value.loading || ide.packageDraft.value.saving"
+            @click="ide.packageLastRun"
+          >重新预览</button>
+          <button
+            type="button"
+            class="ide-panel-send-btn"
+            :disabled="!ide.packageDraft.value.result || ide.packageDraft.value.loading || ide.packageDraft.value.saving"
+            @click="ide.savePackageDraft"
+          >{{ ide.packageDraft.value.saving ? '保存中...' : '保存草稿' }}</button>
+        </div>
+        <p class="ide-package-draft-note">
+          注意：当前只是 draft_from_trace 草稿，不是 proven；后续需要 replay 验证后才能升级可信等级。
+        </p>
+      </div>
     </div>
 
     <!-- input -->
@@ -162,3 +202,102 @@ function lineClass(kind: string): string {
     </div>
   </div>
 </template>
+
+<style scoped>
+.ide-package-draft-panel {
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.92);
+  padding: 10px 12px;
+}
+
+.ide-package-draft-header,
+.ide-package-draft-actions,
+.ide-package-draft-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ide-package-draft-header {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ide-package-draft-badge {
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+  font-size: 11px;
+}
+
+.ide-package-draft-close {
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.ide-package-draft-body {
+  display: grid;
+  gap: 8px;
+}
+
+.ide-package-draft-label {
+  display: grid;
+  gap: 4px;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.ide-package-draft-input,
+.ide-package-draft-yaml {
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.7);
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.ide-package-draft-input {
+  padding: 7px 9px;
+}
+
+.ide-package-draft-yaml {
+  min-height: 180px;
+  max-height: 280px;
+  padding: 10px;
+  resize: vertical;
+  font-size: 12px;
+}
+
+.ide-package-draft-meta {
+  flex-wrap: wrap;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.ide-package-draft-error,
+.ide-package-draft-warnings {
+  color: #fca5a5;
+  font-size: 12px;
+}
+
+.ide-package-draft-warnings {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ide-package-draft-actions {
+  justify-content: flex-end;
+}
+
+.ide-package-draft-note {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 11px;
+}
+</style>

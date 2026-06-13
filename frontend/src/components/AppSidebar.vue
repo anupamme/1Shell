@@ -14,7 +14,7 @@ const navItems: NavItem[] = [
   { to: '/',             label: '主页', icon: 'globe',      title: '世界地图主页' },
   { to: '/console',      label: '主控', icon: 'console',    title: '主控台' },
   { to: '/hosts',        label: '主机', icon: 'server',     title: 'VPS 仓库' },
-  { to: '/programs',     label: '程序', icon: 'play-square', title: '程序' },
+  { to: '/tasks',        label: '任务', icon: 'play-square', title: '任务' },
   { to: '/scripts',      label: '脚本', icon: 'terminal',   title: '脚本库' },
   { to: '/skills',       label: '仓库', icon: 'package',    title: '技能仓库' },
   { to: '/mcp-hub',      label: 'MCP',  icon: 'plug',       title: 'MCP Hub' },

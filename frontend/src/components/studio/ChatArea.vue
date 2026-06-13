@@ -21,9 +21,14 @@ const emit = defineEmits<{
 }>();
 
 interface UserTurn { type: 'user'; text: string }
-interface AiTurn   { type: 'ai'; lines: Array<{ kind: AiLineKind; content: string }> }
+type AiBlock =
+  | { type: 'line'; kind: AiLineKind; content: string }
+  | { type: 'tools'; calls: ToolCallItem[] };
+interface AiTurn { type: 'ai'; blocks: AiBlock[] }
 interface AuthoringTurn { type: 'authoring'; interaction?: AuthoringInteraction; artifact?: AuthoringArtifact }
 type Turn = UserTurn | AiTurn | AuthoringTurn;
+
+const hasMessageToolCalls = computed(() => props.messages.some((m) => m.role === 'ai' && !!m.toolCalls?.length));
 
 // 把 messages 按"连续 ai 消息块"分组成 turns
 const turns = computed<Turn[]>(() => {
@@ -51,10 +56,11 @@ const turns = computed<Turn[]>(() => {
       }
       suppressNextToolResult = false;
       if (!cur) {
-        cur = { type: 'ai', lines: [] };
+        cur = { type: 'ai', blocks: [] };
         out.push(cur);
       }
-      cur.lines.push({ kind: m.kind, content: m.content });
+      if (content) cur.blocks.push({ type: 'line', kind: m.kind, content: m.content });
+      if (m.toolCalls?.length) cur.blocks.push({ type: 'tools', calls: m.toolCalls });
     }
   }
   return out;
@@ -87,10 +93,10 @@ function formatBytes(bytes: number | undefined): string {
 }
 
 function artifactTypeLabel(type: string): string {
-  if (type === 'program_spec') return 'Program Spec';
+  if (type === 'program_spec') return '任务规格';
   if (type === 'skill_spec') return 'Skill Spec';
   if (type === 'authoring_plan') return 'Authoring Plan';
-  if (type === 'program_draft') return 'Program Draft';
+  if (type === 'program_draft') return '任务草稿';
   if (type === 'skill_draft') return 'Skill Draft';
   if (type === 'authoring_verification') return 'Verification';
   return type;
@@ -165,7 +171,7 @@ watch(() => props.toolCalls, () => { void scrollToBottom(); }, { deep: true });
     <div ref="scrollRef" class="flex-1 overflow-auto p-4 flex flex-col gap-3" @scroll="onScroll">
       <div v-if="isEmpty" class="text-[11px] text-slate-400 text-center py-10 flex flex-col items-center gap-2">
         <AppIcon name="terminal" :size="36" class="opacity-50" />
-        <span>选好主机和上下文后，在下方输入你的需求<br/>AI 会自由探索、创建、测试、迭代，支持多轮对话</span>
+        <span>输入你的需求<br/>AI 会开始思考，并在需要时使用工具</span>
       </div>
       <template v-for="(t, i) in turns" :key="i">
         <div v-if="t.type === 'user'" class="chat-bubble-user">{{ t.text }}</div>
@@ -322,7 +328,7 @@ watch(() => props.toolCalls, () => { void scrollToBottom(); }, { deep: true });
             <div class="grid gap-2">
               <div class="rounded-xl border p-2" :class="t.artifact.validation?.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200' : 'border-red-200 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200'">
                 <div class="font-semibold">验证结果：{{ t.artifact.validation?.ok ? '通过' : '失败' }}</div>
-                <div v-if="artifactData(t.artifact).programId" class="mt-1">Program：{{ artifactData(t.artifact).programId }}</div>
+                <div v-if="artifactData(t.artifact).programId" class="mt-1">任务：{{ artifactData(t.artifact).programId }}</div>
                 <div v-if="artifactData(t.artifact).skillId" class="mt-1">Skill：{{ artifactData(t.artifact).skillId }}</div>
                 <ul v-if="t.artifact.validation?.errors?.length" class="mt-1 list-disc pl-4"><li v-for="item in t.artifact.validation.errors" :key="item">{{ item }}</li></ul>
                 <ul v-if="t.artifact.validation?.warnings?.length" class="mt-1 list-disc pl-4"><li v-for="item in t.artifact.validation.warnings" :key="item">{{ item }}</li></ul>
@@ -348,17 +354,26 @@ watch(() => props.toolCalls, () => { void scrollToBottom(); }, { deep: true });
             <AppIcon name="robot" :size="13" /><span>AI</span>
           </div>
           <div class="turn-body">
-            <ToolProgressBar v-if="i === turns.length - 1 && props.toolCalls?.length" :calls="props.toolCalls" class="mb-2" />
-            <div
-              v-for="(line, j) in t.lines"
-              :key="j"
-              class="run-line markdown-body"
-              :class="line.kind"
-              v-html="renderMarkdown(line.content)"
-            ></div>
+            <template v-for="(block, j) in t.blocks" :key="j">
+              <div
+                v-if="block.type === 'line'"
+                class="run-line markdown-body"
+                :class="block.kind"
+                v-html="renderMarkdown(block.content)"
+              ></div>
+              <ToolProgressBar v-else :calls="block.calls" class="mt-2" />
+            </template>
           </div>
         </div>
       </template>
+      <div v-if="props.toolCalls?.length && !hasMessageToolCalls" class="chat-turn-ai">
+        <div class="turn-header">
+          <AppIcon name="terminal" :size="13" /><span>工具执行</span>
+        </div>
+        <div class="turn-body">
+          <ToolProgressBar :calls="props.toolCalls" />
+        </div>
+      </div>
     </div>
   </div>
 </template>

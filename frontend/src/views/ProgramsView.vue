@@ -121,6 +121,8 @@ const inputDefs = computed<InputDef[]>(() => {
   const actionInputs = Array.isArray(action?.inputs) ? action.inputs : [];
   return [...root, ...actionInputs];
 });
+const hasHostInput = computed<boolean>(() => inputDefs.value.some((def) => def.name === 'hostId'));
+const visibleInputDefs = computed<InputDef[]>(() => inputDefs.value.filter((def) => def.name !== 'hostId'));
 const firstActionName = computed<string>(() => {
   const p = activeProgram.value;
   if (!p) return '';
@@ -150,11 +152,11 @@ const currentPhases = computed<PhaseEvent[]>(() => {
 
 async function loadPrograms(): Promise<void> {
   try {
-    const data = await requestJson<{ programs: ProgramInfo[] }>('/api/programs');
+    const data = await requestJson<{ programs: ProgramInfo[] }>('/api/tasks');
     programs.value = data.programs || [];
     if (!activeId.value && programs.value.length > 0) selectProgram(programs.value[0].id);
   } catch (err) {
-    notify.error((err as Error).message || '加载 program 列表失败');
+    notify.error((err as Error).message || '加载任务列表失败');
   }
 }
 
@@ -178,9 +180,9 @@ async function loadSecrets(): Promise<void> {
 
 async function reload(): Promise<void> {
   try {
-    await requestJson('/api/programs/reload', { method: 'POST' });
+    await requestJson('/api/tasks/reload', { method: 'POST' });
     await loadPrograms();
-    notify.success('已重扫 data/programs/');
+    notify.success('已重扫任务目录');
   } catch (err) {
     notify.error((err as Error).message || '重扫失败');
   }
@@ -196,8 +198,13 @@ function selectProgram(id: string): void {
     else inputValues.value[def.name] = '';
   }
   const allow = allowedHosts.value;
-  selectedHostId.value = allow[0]?.id || '';
+  setSelectedHost(allow[0]?.id || '');
   void loadRuns(id);
+}
+
+function setSelectedHost(hostId: string): void {
+  selectedHostId.value = hostId;
+  if (hasHostInput.value) inputValues.value.hostId = hostId;
 }
 
 function isEffectivelyRequired(def: InputDef): boolean {
@@ -212,6 +219,7 @@ function isSecretRefValue(value: unknown): value is SecretInputRef {
 }
 
 function isMissingInput(def: InputDef): boolean {
+  if (def.name === 'hostId') return !selectedHostId.value;
   const value = inputValues.value[def.name];
   if (!isEffectivelyRequired(def)) return false;
   if (isSecretRefValue(value)) return !value.secretRef;
@@ -261,7 +269,7 @@ async function savePasswordSecret(def: InputDef): Promise<void> {
 
 async function loadRuns(programId: string): Promise<void> {
   try {
-    const data = await requestJson<{ runs?: RunRecord[] }>(`/api/programs/${encodeURIComponent(programId)}/runs?limit=10`);
+    const data = await requestJson<{ runs?: RunRecord[] }>(`/api/tasks/${encodeURIComponent(programId)}/runs?limit=10`);
     recentRuns.value = data.runs || [];
   } catch {
     recentRuns.value = [];
@@ -291,9 +299,11 @@ async function trigger(): Promise<void> {
   currentRunId.value = null;
   resetRunOutput(p.id);
   try {
-    const resp = await requestJson<{ runIds?: number[] }>(`/api/programs/${encodeURIComponent(p.id)}/actions/${encodeURIComponent(action)}/run`, {
+    const inputs = { ...inputValues.value };
+    if (hasHostInput.value) inputs.hostId = selectedHostId.value;
+    const resp = await requestJson<{ runIds?: number[] }>(`/api/tasks/${encodeURIComponent(p.id)}/actions/${encodeURIComponent(action)}/run`, {
       method: 'POST',
-      body: JSON.stringify({ hostId: selectedHostId.value, inputs: inputValues.value }),
+      body: JSON.stringify({ hostId: selectedHostId.value, inputs }),
     });
     currentRunId.value = resp.runIds?.[0] ?? currentRunId.value;
     notify.success('已触发');
@@ -306,10 +316,10 @@ async function trigger(): Promise<void> {
 }
 
 async function deleteProgram(id: string, name: string): Promise<void> {
-  const ok = await confirm({ title: '删除 Program', message: `确认删除「${name}」？\n会删除 data/programs/${id}/ 目录。`, okText: '删除' });
+  const ok = await confirm({ title: '删除任务', message: `确认删除「${name}」？\n会删除 data/programs/${id}/ 目录。`, okText: '删除' });
   if (!ok) return;
   try {
-    await requestJson(`/api/programs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await requestJson(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
     notify.success('已删除');
     if (activeId.value === id) activeId.value = null;
     await loadPrograms();
@@ -400,7 +410,7 @@ onBeforeUnmount(() => {
         </span>
         <div>
           <div class="text-base font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-            程序
+            任务
             <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300 font-semibold">BETA</span>
           </div>
           <div class="text-[11px] text-slate-400">把对智能体的指令打包成可复用模板</div>
@@ -418,16 +428,16 @@ onBeforeUnmount(() => {
 
     <!-- Three-column body -->
     <div class="flex-1 min-h-0 flex gap-2">
-      <!-- Left: Program list 20% -->
+      <!-- Left: task list 20% -->
       <aside class="w-1/5 min-w-[14rem] shrink-0 flex flex-col bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm overflow-hidden">
         <div class="shrink-0 px-4 py-3 border-b border-slate-100 dark:border-[#1e293b] flex items-center justify-between">
-          <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Programs</span>
+          <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Tasks</span>
           <span class="text-[10px] text-slate-400">{{ programs.length }}</span>
         </div>
         <div class="flex-1 overflow-y-auto p-2 flex flex-col gap-1.5">
           <div v-if="programs.length === 0" class="flex flex-col items-center justify-center py-12 text-slate-400 text-xs gap-2">
             <AppIcon name="play-square" :size="32" class="opacity-40" />
-            <div>还没有程序</div>
+            <div>还没有任务</div>
             <div class="text-[10px] opacity-70 text-center px-2">放到 <code class="text-blue-500">data/programs/&lt;id&gt;</code> 后点重扫</div>
           </div>
           <div
@@ -451,7 +461,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="shrink-0 px-3 py-2 border-t border-slate-100 dark:border-[#1e293b] text-[10px] text-slate-400">
-          共 <b class="text-slate-600 dark:text-slate-300">{{ programs.length }}</b> 个程序
+          共 <b class="text-slate-600 dark:text-slate-300">{{ programs.length }}</b> 个任务
         </div>
       </aside>
 
@@ -459,7 +469,7 @@ onBeforeUnmount(() => {
       <main class="w-2/5 shrink-0 flex flex-col min-w-0 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm overflow-hidden">
         <div v-if="!activeProgram" class="flex-1 flex flex-col items-center justify-center text-sm text-slate-400 gap-3">
           <AppIcon name="play-square" :size="40" class="opacity-30" />
-          <div>从左侧选择一个程序</div>
+          <div>从左侧选择一个任务</div>
         </div>
         <template v-else>
           <div class="shrink-0 px-5 py-4 border-b border-slate-100 dark:border-[#1e293b]">
@@ -475,7 +485,7 @@ onBeforeUnmount(() => {
               <select
                 :value="selectedHostId"
                 class="mt-2 w-full rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#111827] px-3 py-2 text-sm text-slate-700 dark:text-slate-200 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
-                @change="selectedHostId = ($event.target as HTMLSelectElement).value"
+                @change="setSelectedHost(($event.target as HTMLSelectElement).value)"
               >
                 <option v-if="allowedHosts.length === 0" value="">无可选主机</option>
                 <option v-for="h in allowedHosts" :key="h.id" :value="h.id">{{ h.name || h.id }}</option>
@@ -483,10 +493,10 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- Input cards -->
-            <div v-if="inputDefs.length > 0" class="flex flex-col gap-3">
+            <div v-if="visibleInputDefs.length > 0" class="flex flex-col gap-3">
               <div class="text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">输入</div>
               <div
-                v-for="def in inputDefs"
+                v-for="def in visibleInputDefs"
                 :key="def.name"
                 class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#0b1324] p-3"
               >
@@ -598,7 +608,7 @@ onBeforeUnmount(() => {
         <div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
           <div v-if="!activeProgram" class="flex-1 flex flex-col items-center justify-center text-sm text-slate-400 gap-3">
             <AppIcon name="terminal" :size="40" class="opacity-30" />
-            <div>先选一个程序</div>
+            <div>先选一个任务</div>
           </div>
 
           <template v-else>

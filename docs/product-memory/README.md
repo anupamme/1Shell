@@ -639,43 +639,54 @@ RDP 更偏 Windows 图形桌面连接，会把产品带向全协议远程连接�
 
 ## 版本路线
 
-### 4.2：补强开箱体验
+### 4.2：开箱体验与安全补强
 
-4.2 不是大方向版本，而是围绕 4.1 的闭环补强。
+4.2 到此为止，作为围绕 4.1 产品闭环的小版本补强。
 
-当前计划包括：
+4.2 已经足够承担一个小版本，核心完成内容包括：
 
 - 登录 2FA。
-- Claude Code / Codex / OpenCode 接入扫描和一键配置。
-- 默认 AI 工作流程序。
+- 文件管理器写操作补齐。
+- Docker 部署下的容器视角与只读挂载写入提示。
 - 初次部署默认浅色模式。
-- 地图返回空白问题修复。
-- 沙箱输出残影和重复渲染修复。
-- GitHub、文档、Release、反馈入口。
-- Docker 部署主机目录写入优化。
-- 自动更新能力预研。
+- 设置由弹窗改为独立页面。
+- Claude Code / Codex / OpenCode 接入扫描、一键安装和配置向导。
+- MCP standard profile 收敛，外部 MCP 默认工具面更克制。
 
 宣传主题：
 
 ```text
-安全登录、Agent 接入向导、默认 AI 运维程序。
+安全登录、文件管理补强、Agent 接入向导。
 ```
 
-### 4.3：Agent 生态接入增强
+### 4.3：1Shell AI 智能体底座
 
-4.3 可以在 Claude Code、Codex、OpenCode 的基础上加入：
+4.3 不再沿用“继续补默认 AI 工作流程序 / Agent 生态接入增强”的旧路线。
 
-- Hermes。
-- OpenClaw。
-- 更多 MCP Client 配置模板。
-- Agent 接入状态检测。
-- Hermes + 微信 + 1Shell MCP 示例。
-- OpenClaw 调用 1Shell 管理 VPS 示例。
+新的判断是：1Shell AI 不只是 Program Runtime，也同时存在于主控界面、创作界面、MCP `ask_1shell_ai` 和未来 CLI。继续只堆默认 Program，会让 Program、主控台 AI、Studio AI、MCP Gateway 各自长出不兼容的 AI 执行逻辑。
+
+4.3 的新主线是：
+
+```text
+1Shell AI Agent Runtime 起步：让 AI 从“多个分散入口”走向“统一受控智能体”。
+```
+
+4.3 应先建立最小 Agent Runtime Kernel，并让 AI 工作流 Program 作为第一个落地场景。
+
+核心方向：
+
+- 定义 AgentRunSpec / AgentState / AgentEvent / AgentPolicy / AgentToolCall 等中立对象。
+- 借鉴 LangChain / LangGraph，但不在 4.3 早期深度绑定第三方框架。
+- LangChain 未来作为 Model / Tool / Parser / Memory adapter。
+- LangGraph 未来作为 Graph Executor / Checkpoint / Interrupt / Resume adapter。
+- Harness 继续作为所有副作用操作的安全屏障。
+- Program Runtime v2 增加 phase / budget / verify / taskStatus / success guard。
+- 优先打造少量黄金 Program，而不是一次堆很多默认程序。
 
 宣传主题：
 
 ```text
-Agent 生态接入增强，让更多 MCP Agent 通过 1Shell 管理 VPS。
+1Shell AI 智能体底座，让 AI 工作流从“能跑”走向“可控、可验证”。
 ```
 
 ### 4.x 后续：持续小步补强
@@ -692,11 +703,13 @@ Agent 生态接入增强，让更多 MCP Agent 通过 1Shell 管理 VPS。
 - 程序市场雏形。
 - 告警触发 AI 工作流。
 - 更多默认程序。
+- Hermes / OpenClaw 等更多 MCP Agent 接入模板。
+- 更多 MCP Client 配置模板与生态案例。
 
 原则：
 
 ```text
-4.x 做能力补强，不做大转向。
+4.x 做能力补强；4.3 是 1Shell AI 智能体底座的起步版本，之后围绕该底座小步补强。
 ```
 
 ### 5.0：CLI 与命令式主控台

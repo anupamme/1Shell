@@ -6,12 +6,13 @@ const { Router } = require('express');
 const { ROOT_DIR } = require('../config/env');
 
 /**
- * Program Routes
+ * Task routes (legacy /api/programs compatibility path)
  *
  *   GET    /api/programs                        列表（含每个实例最新状态）
  *   POST   /api/programs/reload                 重扫 data/programs/
+ *   POST   /api/program-drafts/from-agent-run   从 verified AgentRun 生成任务草稿
  *   GET    /api/programs/:id                    详情
- *   GET    /api/programs/:id/instances          该 Program 的所有实例状态
+ *   GET    /api/programs/:id/instances          该任务的所有实例状态
  *   POST   /api/programs/:id/trigger            手动触发
  *     Body: { hostId?: string|'all', triggerId?: string, actionName?: string, inputs?: object }
  *   POST   /api/programs/:id/instances/:hostId/enable   启用实例
@@ -22,7 +23,7 @@ const { ROOT_DIR } = require('../config/env');
  *   POST   /api/program-runs/:runId/cancel      取消运行
  *   GET    /api/program-runs/active             当前活跃 run 列表
  */
-function createProgramRouter({ registry, stateService, engine, hostService, secretService }) {
+function createProgramRouter({ registry, stateService, engine, hostService, secretService, taskPackagerService }) {
   const router = Router();
 
   const stripDir = ({ dir, ...rest }) => rest;
@@ -55,7 +56,7 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     if (allowAll && target === 'all') return;
     if (!target || target === 'all') throw new Error('hostId 不能为空');
     const allowed = programHostIds(program);
-    if (!allowed.includes(target)) throw new Error(`目标主机不在 Program 范围内: ${target}`);
+    if (!allowed.includes(target)) throw new Error(`目标主机不在任务范围内: ${target}`);
   }
 
   function actionConfirmText(program, actionName) {
@@ -101,7 +102,7 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     };
   }
 
-  router.get('/programs', (_req, res) => {
+  router.get(['/programs', '/tasks'], (_req, res) => {
     const allHosts = hostService?.listHosts?.() || [];
     const programs = registry.list().map(stripDir);
     for (const p of programs) {
@@ -112,11 +113,27 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     res.json({ ok: true, programs, residuals: registry.getLastErrors?.() || [] });
   });
 
-  router.get('/programs/residuals', (_req, res) => {
+  router.get(['/programs/residuals', '/tasks/residuals'], (_req, res) => {
     res.json({ ok: true, residuals: registry.getLastErrors?.() || [] });
   });
 
-  router.post('/programs/reload', (_req, res) => {
+  router.post(['/program-drafts/from-agent-run', '/task-drafts/from-agent-run'], (req, res) => {
+    if (!taskPackagerService?.createDraftFromAgentRun) {
+      return res.status(501).json({ ok: false, error: 'Task packager service is not available' });
+    }
+    try {
+      const result = taskPackagerService.createDraftFromAgentRun(req.body || {});
+      res.json(result);
+    } catch (err) {
+      const message = err.message || String(err);
+      const status = /not found/i.test(message)
+        ? 404
+        : (/verified|pending|active|interrupt/i.test(message) ? 409 : 400);
+      res.status(status).json({ ok: false, error: message });
+    }
+  });
+
+  router.post(['/programs/reload', '/tasks/reload'], (_req, res) => {
     try {
       const result = engine.reload();
       res.json({ ok: true, count: registry.list().length, residuals: result?.errors || registry.getLastErrors?.() || [] });
@@ -125,25 +142,25 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     }
   });
 
-  router.get('/programs/:id', (req, res) => {
+  router.get(['/programs/:id', '/tasks/:id'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     const allHosts = hostService?.listHosts?.() || [];
     const db = stateService.listInstances(program.id);
     const instances = mergeInstances(program, db, allHosts);
     res.json({ ok: true, program: stripDir(program), instances });
   });
 
-  router.get('/programs/:id/runs', (req, res) => {
+  router.get(['/programs/:id/runs', '/tasks/:id/runs'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     const runs = stateService.listRuns({ programId: program.id, limit: Number(req.query?.limit) || 50 });
     res.json({ ok: true, runs });
   });
 
-  router.get('/programs/:id/results', (req, res) => {
+  router.get(['/programs/:id/results', '/tasks/:id/results'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     const results = [];
     for (const hostId of programHostIds(program)) {
       for (const item of stateService.getLastRenders(program.id, hostId) || []) {
@@ -153,15 +170,15 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     res.json({ ok: true, results });
   });
 
-  router.get('/programs/:id/events', (req, res) => {
+  router.get(['/programs/:id/events', '/tasks/:id/events'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     res.json({ ok: true, events: [] });
   });
 
-  router.post('/programs/:id/actions/:action/run', async (req, res) => {
+  router.post(['/programs/:id/actions/:action/run', '/tasks/:id/actions/:action/run'], async (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
 
     const actionName = String(req.params.action || '').trim();
     const body = req.body || {};
@@ -185,33 +202,33 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     }
   });
 
-  router.get('/programs/:id/instances', (req, res) => {
+  router.get(['/programs/:id/instances', '/tasks/:id/instances'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     const allHosts = hostService?.listHosts?.() || [];
     const db = stateService.listInstances(program.id);
     res.json({ ok: true, instances: mergeInstances(program, db, allHosts) });
   });
 
   // GET /api/programs/:id/instances/:hostId/renders — 最近一次 run 的 render 输出
-  router.get('/programs/:id/instances/:hostId/renders', (req, res) => {
+  router.get(['/programs/:id/instances/:hostId/renders', '/tasks/:id/instances/:hostId/renders'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     const renders = stateService.getLastRenders(program.id, req.params.hostId);
     res.json({ ok: true, renders });
   });
 
-  router.delete('/program-residuals/:id', async (req, res) => {
+  router.delete(['/program-residuals/:id', '/task-residuals/:id'], async (req, res) => {
     const id = String(req.params.id || '').trim();
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return res.status(400).json({ ok: false, error: 'Program id 不合法' });
-    if (registry.get(id)) return res.status(409).json({ ok: false, error: 'Program 已成功加载，请使用正常删除入口' });
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return res.status(400).json({ ok: false, error: '任务 id 不合法' });
+    if (registry.get(id)) return res.status(409).json({ ok: false, error: '任务已成功加载，请使用正常删除入口' });
 
     try {
       const programDir = path.join(ROOT_DIR, 'data', 'programs', id);
       const programsRoot = path.join(ROOT_DIR, 'data', 'programs');
       const rel = path.relative(programsRoot, programDir);
-      if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ ok: false, error: 'Program 路径不合法' });
-      if (!fs.existsSync(programDir)) return res.status(404).json({ ok: false, error: '残留 Program 目录不存在' });
+      if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ ok: false, error: '任务路径不合法' });
+      if (!fs.existsSync(programDir)) return res.status(404).json({ ok: false, error: '残留任务目录不存在' });
       fs.rmSync(programDir, { recursive: true, force: true });
       const result = engine.reload();
       res.json({ ok: true, deleted: id, residuals: result?.errors || registry.getLastErrors?.() || [] });
@@ -220,9 +237,9 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     }
   });
 
-  router.post('/programs/:id/trigger', async (req, res) => {
+  router.post(['/programs/:id/trigger', '/tasks/:id/trigger'], async (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
 
     const body = req.body || {};
     try {
@@ -241,10 +258,10 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     }
   });
 
-  // DELETE /api/programs/:id — 删除 Program（停止调度 + 删除文件）
-  router.delete('/programs/:id', async (req, res) => {
+  // DELETE /api/programs/:id — 删除任务（停止调度 + 删除文件）
+  router.delete(['/programs/:id', '/tasks/:id'], async (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
 
     try {
       const programDir = path.join(ROOT_DIR, 'data', 'programs', program.id);
@@ -259,9 +276,9 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     }
   });
 
-  router.post('/programs/:id/instances/:hostId/enable', (req, res) => {
+  router.post(['/programs/:id/instances/:hostId/enable', '/tasks/:id/instances/:hostId/enable'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     try {
       assertHostAllowed(program, req.params.hostId);
       engine.setInstanceEnabled(program.id, req.params.hostId, true);
@@ -271,9 +288,9 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     }
   });
 
-  router.post('/programs/:id/instances/:hostId/disable', (req, res) => {
+  router.post(['/programs/:id/instances/:hostId/disable', '/tasks/:id/instances/:hostId/disable'], (req, res) => {
     const program = registry.get(req.params.id);
-    if (!program) return res.status(404).json({ ok: false, error: 'Program 不存在' });
+    if (!program) return res.status(404).json({ ok: false, error: '任务不存在' });
     try {
       assertHostAllowed(program, req.params.hostId);
       engine.setInstanceEnabled(program.id, req.params.hostId, false);
@@ -283,11 +300,11 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     }
   });
 
-  router.get('/program-runs/active', (_req, res) => {
+  router.get(['/program-runs/active', '/task-runs/active'], (_req, res) => {
     res.json({ ok: true, runs: engine.listActive() });
   });
 
-  router.get('/program-runs', (req, res) => {
+  router.get(['/program-runs', '/task-runs'], (req, res) => {
     const { programId, hostId, limit } = req.query || {};
     const runs = stateService.listRuns({
       programId: programId || null,
@@ -297,13 +314,13 @@ function createProgramRouter({ registry, stateService, engine, hostService, secr
     res.json({ ok: true, runs });
   });
 
-  router.get('/program-runs/:runId', (req, res) => {
+  router.get(['/program-runs/:runId', '/task-runs/:runId'], (req, res) => {
     const run = stateService.getRun(Number(req.params.runId));
     if (!run) return res.status(404).json({ ok: false, error: '运行记录不存在' });
     res.json({ ok: true, run });
   });
 
-  router.post('/program-runs/:runId/cancel', (req, res) => {
+  router.post(['/program-runs/:runId/cancel', '/task-runs/:runId/cancel'], (req, res) => {
     engine.cancelRun(Number(req.params.runId));
     res.json({ ok: true });
   });

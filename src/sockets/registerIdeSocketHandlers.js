@@ -17,7 +17,7 @@ const { emitIdeEvent } = require('../ide/ide.events');
 function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, mcpRegistry }) {
   io.on('connection', (socket) => {
     socket.on('disconnect', () => {
-      setTimeout(() => ideService.cancelSessionsForSocket?.(socket.id), 30000);
+      ideService.detachSessionsForSocket?.(socket.id, 'socket_disconnect');
     });
 
     socket.on('ide:reattach', (payload = {}, reply) => {
@@ -61,18 +61,12 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
 
     socket.on('ide:safe-mode', (payload = {}, reply) => {
       if (typeof reply !== 'function') reply = () => {};
-      const sessionId = String(payload.sessionId || '').trim();
-      const enabled = payload.enabled !== false;
-      if (sessionId) ideService.setSafeMode(sessionId, enabled);
-      reply({ ok: true, safeMode: enabled });
+      reply({ ok: true, safeMode: false, deprecated: true, ignored: true });
     });
 
     socket.on('ide:unlimited-turns', (payload = {}, reply) => {
       if (typeof reply !== 'function') reply = () => {};
-      const sessionId = String(payload.sessionId || '').trim();
-      const enabled = payload.enabled !== false;
-      if (sessionId) ideService.setUnlimitedTurns(sessionId, enabled);
-      reply({ ok: true, unlimitedTurns: enabled });
+      reply({ ok: true, unlimitedTurns: false, deprecated: true, ignored: true });
     });
 
     socket.on('ide:claude-code-collab', (payload = {}, reply) => {
@@ -99,7 +93,7 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
       reply(result);
     });
 
-    // ─── 安全模式审批响应 ────────────────────────────────────
+    // ─── Agent approval / user-input responses ────────────────────────────────────
     socket.on('ide:approve-response', (payload = {}, reply) => {
       if (typeof reply !== 'function') reply = () => {};
       if (!ideTools) return reply({ ok: false });

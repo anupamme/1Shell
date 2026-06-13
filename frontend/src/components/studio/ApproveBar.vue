@@ -1,8 +1,9 @@
 <script setup lang="ts">
-// 安全模式审批条 — 底部浮出（120s 倒计时 + deny/allow/custom）
+// Agent 审批条 — 底部浮出（120s 倒计时 + deny/allow/custom）
 // 与老 [public/skill-studio.html#L472-L490](public/skill-studio.html) + [public/skill-studio.js#L228-L279](public/skill-studio.js) 1:1
 import { ref, watch, nextTick } from 'vue';
 import AppIcon from '@/components/AppIcon.vue';
+import SecretRefPicker from '@/components/SecretRefPicker.vue';
 import type { ApprovePayload, ApproveAction } from '@/utils/studio';
 
 interface Props {
@@ -29,6 +30,7 @@ watch(() => props.payload?.requestId, async (id) => {
 function onAllow(): void { emit('respond', 'allow', ''); }
 function onDeny():  void { emit('respond', 'deny', ''); }
 function onCustom(): void { emit('respond', 'custom', customText.value); }
+function onSecretRefSubmit(secretRef: string): void { emit('respond', 'custom', secretRef); }
 
 function onCustomKeydown(e: KeyboardEvent): void {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -47,15 +49,24 @@ function onCustomKeydown(e: KeyboardEvent): void {
       <div class="px-4 py-2 flex items-center gap-2 border-b border-amber-100 dark:border-amber-500/20">
         <AppIcon name="shield" :size="12" class="text-amber-600 dark:text-amber-400" />
         <span class="text-[11px] font-semibold text-amber-700 dark:text-amber-300 flex-1">
-          {{ payload.title || '安全模式' }}
+          {{ payload.title || 'Agent 审批' }}
         </span>
         <span class="text-[10px] text-slate-400">{{ countdown }}s</span>
       </div>
       <div class="px-4 py-3">
         <div class="text-[11px] text-slate-500 dark:text-slate-400 mb-1.5">
-          AI 要执行 {{ payload.toolName || '操作' }}：
+          <template v-if="!payload.mode || payload.mode === 'approval'">AI 要执行 {{ payload.toolName || '操作' }}：</template>
+          <template v-else-if="payload.mode === 'request_secret'">AI 需要 Secret 引用：</template>
+          <template v-else>AI 需要你补充信息：</template>
         </div>
         <pre class="w-full text-[11px] p-2 rounded-lg bg-slate-900 text-emerald-400 font-mono whitespace-pre-wrap break-all max-h-[120px] overflow-auto border border-slate-700">{{ payload.detail || '' }}</pre>
+        <SecretRefPicker
+          v-if="payload.mode === 'request_secret'"
+          :secret-name="payload.secretName"
+          :label="payload.label"
+          :provider="payload.provider"
+          @submit="onSecretRefSubmit"
+        />
       </div>
       <div class="px-4 pb-3 flex items-center gap-2">
         <button
@@ -70,7 +81,7 @@ function onCustomKeydown(e: KeyboardEvent): void {
             ref="customInput"
             v-model="customText"
             class="flex-1 text-[11px] px-2 py-1 rounded-lg border border-slate-200 dark:border-[#334155] dark:bg-[#0f172a] dark:text-slate-200 focus:outline-none focus:border-blue-400"
-            placeholder="自定义回复..."
+            :placeholder="payload.mode === 'request_secret' ? '填写 secret ref/id...' : '自定义回复...'"
             @keydown="onCustomKeydown"
           />
           <button
@@ -79,6 +90,7 @@ function onCustomKeydown(e: KeyboardEvent): void {
           >回复</button>
         </div>
         <button
+          v-if="!payload.mode || payload.mode === 'approval'"
           class="px-4 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-semibold hover:bg-emerald-600 inline-flex items-center gap-1"
           @click="onAllow"
         >

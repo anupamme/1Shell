@@ -8,7 +8,7 @@
 
 给人和 AI Agent 共用的多主机运维平台，理论适配 Claude Code、Codex、OpenClaw、Hermes 以及所有支持 MCP 的 Agent 项目。
 
-1Shell 将多机终端、文件管理、脚本执行、探针监控、诊断审计、1Shell AI 网关、标准 MCP Server 和自动化 Program 集成到一个本地优先的控制台中。人可以把它当作 WebSSH / VPS 控制台使用；AI Agent 可以通过 MCP 调用它，让多台 VPS 成为可观察、可操作、可自动化、可被智能体协同管理的运维对象。
+1Shell 将多机终端、文件管理、脚本执行、探针监控、诊断审计、1Shell AI 网关、标准 MCP Server 和自动化任务 / Program 集成到一个本地优先的控制台中。人可以把它当作 WebSSH / VPS 控制台使用；AI Agent 可以通过 MCP 调用它，让多台 VPS 成为可观察、可操作、可自动化、可被智能体协同管理的运维对象。
 
 [![version](https://img.shields.io/badge/version-4.1.0-4f8cff?style=flat-square)](https://github.com/weidu12123/1Shell/releases)
 [![node](https://img.shields.io/badge/node-%3E%3D18-43a047?style=flat-square&logo=node.js)](https://nodejs.org)
@@ -37,7 +37,7 @@
         ↓
 主机发现 → 远程命令 / 文件 / 脚本 / 探针 / 诊断
         ↓
-验证结果 → 审计留痕 → 沉淀为 Program / Skill
+验证结果 → 审计留痕 → 沉淀为自动化任务 / Program / Skill
 ```
 
 在 1Shell 中，终端、文件、脚本、探针、诊断、审计、Program、Skill、MCP 和 Agent 并不是分散的功能页面，而是围绕 VPS 运维场景组织起来的一套统一能力层。
@@ -48,7 +48,9 @@
 - 也可以让 1Shell AI 在授权范围内调用这些能力完成复杂运维任务；
 - 外部 Agent 可以通过 MCP 调用 1Shell，理论适配 Claude Code、Codex、OpenClaw、Hermes 以及所有支持 MCP 的 Agent 项目；
 - 外部 Agent 不必感知 1Shell 内部所有工具，复杂能力可以委托给 1Shell AI 网关编排；
-- 最后，可以把常见运维流程沉淀成 Program / Skill，让经验变成可复用的自动化应用。
+- 最后，可以把常见运维流程沉淀成自动化任务 / Program / Skill，让经验变成可复用的自动化应用。
+
+在用户视角里，“自动化任务”是更清晰的主词；Program 是其中经过验证后可复用、可调度、可分发的封装形式。可靠 Program 优先来自已验证的 1Shell AI AgentRun，而不是从目标里直接猜流程。
 
 ---
 

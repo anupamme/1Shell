@@ -1,7 +1,7 @@
 // studio.ts — IDE 工作台 (skill-studio) 类型定义
 // 与老 skill-studio.js 字段 1:1 对应
 
-import type { AiLineKind as SharedAiLineKind } from '@/utils/aiMessages';
+import type { AiLineKind as SharedAiLineKind, AiToolCallState } from '@/utils/aiMessages';
 
 /* ───── 基础实体 ──────────────────────────────────── */
 
@@ -98,6 +98,7 @@ export interface AiMessage {
   role: 'ai';
   kind: AiLineKind;
   content: string;
+  toolCalls?: AiToolCallState[];
 }
 
 export interface AuthoringOption {
@@ -185,7 +186,7 @@ export interface SendContext {
   mcpServers: Array<{ id: string; name?: string; url?: string }>;
 }
 
-/* ───── 安全模式审批条 ─────────────────────────────── */
+/* ───── Agent 审批条 ─────────────────────────────── */
 
 export interface ApprovePayload {
   requestId: string;
@@ -193,6 +194,11 @@ export interface ApprovePayload {
   title?: string;
   toolName?: string;
   detail?: string;
+  mode?: 'approval' | 'ask_user' | 'request_secret';
+  responseEvent?: 'ide:approve-response' | 'ide:ask-user-response' | 'ide:secret-response';
+  secretName?: string;
+  label?: string;
+  provider?: string;
 }
 
 export type ApproveAction = 'allow' | 'deny' | 'custom';
