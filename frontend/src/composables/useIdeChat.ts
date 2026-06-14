@@ -41,17 +41,50 @@ export interface IdeToolTimelineItem {
   input?: unknown;
   result?: unknown;
   isError?: boolean;
+  workNote?: string;
   logs: IdeToolLogEntry[];
 }
 
 export type IdeTimelineItem = IdeChatMessage | IdeThinkingTimelineItem | IdeToolTimelineItem;
 
+export interface IdeApprovalFacts {
+  schemaVersion?: number;
+  source?: string;
+  toolName?: string;
+  title?: string;
+  reason?: string;
+  riskReason?: string;
+  riskLevel?: string;
+  required?: boolean;
+  recommended?: boolean;
+  actionKind?: string;
+  actionText?: string;
+  detail?: string;
+  hostId?: string;
+  input?: unknown;
+  summary?: {
+    title?: string;
+    detail?: string;
+  };
+  risk?: unknown;
+}
+
 export interface IdeApprovalRequest {
   requestId: string;
   sessionId: string;
+  toolUseId?: string;
   title: string;
   toolName: string;
   detail: string;
+  workNote?: string;
+  reason?: string;
+  riskReason?: string;
+  riskLevel?: string;
+  hostId?: string;
+  actionKind?: string;
+  actionText?: string;
+  input?: unknown;
+  approval?: IdeApprovalFacts;
   mode: 'approval' | 'ask_user' | 'request_secret';
   responseEvent: 'ide:approve-response' | 'ide:ask-user-response' | 'ide:secret-response';
   secretName?: string;
@@ -112,6 +145,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
   let currentAssistant: IdeChatMessage | null = null;
   let activeRunId: string | null = null;
   let stoppedRunId: string | null = null;
+  const completedRunIds = new Set<string>();
   let stopRequested = false;
   let currentTextHadDelta = false;
   let sendAckHandle: number | null = null;
@@ -184,21 +218,23 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     currentAssistant = null;
   }
 
-  function convertCurrentAssistantToThinking(): void {
+  function convertCurrentAssistantToThinking(): string {
     deltaBuffer.flushNow();
-    if (!currentAssistant) return;
+    if (!currentAssistant) return '';
     const assistant = currentAssistant;
     currentAssistant = null;
     if (!assistant.text.trim()) {
       timeline.value = timeline.value.filter((item) => item.id !== assistant.id);
-      return;
+      return '';
     }
+    const workNote = assistant.text.trim();
     const thinking: IdeThinkingTimelineItem = {
       id: assistant.id,
       kind: 'thinking',
       text: assistant.text,
     };
     timeline.value = timeline.value.map((item) => (item.id === assistant.id ? thinking : item));
+    return workNote;
   }
 
   function findTool(toolUseId: string): IdeToolTimelineItem | null {
@@ -226,10 +262,24 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     return tool;
   }
 
-  function startTool(msg: StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown }): void {
-    convertCurrentAssistantToThinking();
+  function latestToolWorkNote(toolUseId?: string, toolName?: string): string {
+    const id = String(toolUseId || '').trim();
+    const name = String(toolName || '').trim();
+    const tools = timeline.value.filter((item): item is IdeToolTimelineItem => item.kind === 'tool').slice().reverse();
+    const exact = id ? tools.find((tool) => tool.toolUseId === id && tool.workNote?.trim()) : null;
+    if (exact?.workNote) return exact.workNote.trim();
+    const matching = name ? tools.find((tool) => tool.name === name && tool.workNote?.trim()) : null;
+    if (matching?.workNote) return matching.workNote.trim();
+    const active = tools.find((tool) => ['preparing', 'running'].includes(tool.status) && tool.workNote?.trim());
+    return active?.workNote?.trim() || '';
+  }
+
+  function startTool(msg: StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown; workNote?: string; modelNote?: string }): void {
+    const visibleWorkNote = convertCurrentAssistantToThinking();
     const tool = ensureTool(msg.toolUseId, msg.name || 'unknown');
     if (!tool) return;
+    const workNote = messageText(msg.workNote || msg.modelNote) || visibleWorkNote;
+    if (workNote) tool.workNote = workNote;
     if (msg.phase === 'preparing_input' || msg.input === null) {
       if (tool.status !== 'running') tool.status = 'preparing';
     } else {
@@ -267,19 +317,33 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     touchTimeline();
   }
 
+  function rememberCompletedRun(runId = activeRunId): void {
+    const id = String(runId || '').trim();
+    if (!id) return;
+    completedRunIds.add(id);
+    if (completedRunIds.size > 30) {
+      const first = completedRunIds.values().next().value;
+      if (first) completedRunIds.delete(first);
+    }
+  }
+
   function matchesCurrentRun(msg: StreamMessage | null | undefined, allowAfterStop = false): boolean {
     if (!msg || msg.sessionId !== sessionId) return false;
     if (msg.runId) {
-      if (stoppedRunId && msg.runId === stoppedRunId && !allowAfterStop) return false;
-      if (activeRunId && msg.runId !== activeRunId) return false;
-      activeRunId = msg.runId;
+      const runId = String(msg.runId);
+      if (completedRunIds.has(runId)) return false;
+      if (stoppedRunId && runId === stoppedRunId && !allowAfterStop) return false;
+      if (activeRunId && runId !== activeRunId) return false;
+      activeRunId = runId;
     }
     if (stopRequested && !allowAfterStop) return false;
     return true;
   }
 
-  function finalize(status: IdeChatStatus = 'done'): void {
+  function finalize(status: IdeChatStatus = 'done', runId?: string): void {
+    rememberCompletedRun(runId || activeRunId);
     closeCurrentAssistant(status);
+    deltaBuffer.clear();
     isRunning.value = false;
     stopRequested = false;
     activeRunId = null;
@@ -384,7 +448,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         appendAssistantText(msg.text);
       }],
       ['ide:tool-start', (raw: unknown) => {
-        const msg = raw as StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown };
+        const msg = raw as StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown; workNote?: string; modelNote?: string };
         if (!matchesCurrentRun(msg)) return;
         startTool(msg);
         if (msg.phase === 'preparing_input' || msg.input === null) {
@@ -410,32 +474,59 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         if (!matchesCurrentRun(msg)) return;
         const status = ['blocked', 'failed'].includes(String(msg.taskStatus || '')) ? 'error' : 'done';
         setStatus(doneStatusText(msg.taskStatus));
-        finalize(status);
+        finalize(status, msg.runId);
       }],
       ['ide:error', (raw: unknown) => {
         const msg = raw as StreamMessage & { error?: string };
         if (!matchesCurrentRun(msg)) return;
         appendAssistantLine(`请求失败：${msg.error || '未知错误'}`, 'error');
         setStatus('出错');
-        finalize('error');
+        finalize('error', msg.runId);
       }],
       ['ide:cancelled', (raw: unknown) => {
         const msg = raw as StreamMessage;
         if (!matchesCurrentRun(msg, true)) return;
         if (msg.runId) stoppedRunId = msg.runId;
         setStatus('已停止');
-        finalize('cancelled');
+        finalize('cancelled', msg.runId);
       }],
       ['ide:approve-request', (raw: unknown) => {
-        const msg = raw as StreamMessage & { requestId?: string; title?: string; toolName?: string; detail?: string };
+        const msg = raw as StreamMessage & {
+          requestId?: string;
+          toolUseId?: string;
+          title?: string;
+          toolName?: string;
+          detail?: string;
+          workNote?: string;
+          modelNote?: string;
+          reason?: string;
+          riskReason?: string;
+          riskLevel?: string;
+          hostId?: string;
+          actionKind?: string;
+          actionText?: string;
+          input?: unknown;
+          approval?: IdeApprovalFacts;
+        };
         if (!matchesCurrentRun(msg) || !msg.requestId) return;
+        const approval = msg.approval && typeof msg.approval === 'object' ? msg.approval : undefined;
         approveCustomText.value = '';
         approveRequest.value = {
           requestId: msg.requestId,
           sessionId: msg.sessionId || sessionId,
-          title: msg.title || '操作需要确认',
-          toolName: msg.toolName || '操作',
-          detail: msg.detail || '',
+          toolUseId: msg.toolUseId || '',
+          title: msg.title || approval?.title || '操作需要确认',
+          toolName: msg.toolName || approval?.toolName || '操作',
+          detail: msg.detail || approval?.detail || '',
+          workNote: messageText(msg.workNote || msg.modelNote) || latestToolWorkNote(msg.toolUseId, msg.toolName || approval?.toolName),
+          reason: msg.reason || approval?.reason || '',
+          riskReason: msg.riskReason || approval?.riskReason || '',
+          riskLevel: msg.riskLevel || approval?.riskLevel || '',
+          hostId: msg.hostId || approval?.hostId || '',
+          actionKind: msg.actionKind || approval?.actionKind || '',
+          actionText: msg.actionText || approval?.actionText || '',
+          input: msg.input ?? approval?.input,
+          approval,
           mode: 'approval',
           responseEvent: 'ide:approve-response',
           countdown: 120,
@@ -452,6 +543,9 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
           title: msg.title || '需要补充信息',
           toolName: msg.toolName || 'ask_user',
           detail: msg.detail || msg.question || msg.reason || '',
+          reason: msg.reason || '',
+          actionKind: 'question',
+          actionText: msg.question || msg.detail || msg.reason || '',
           mode: 'ask_user',
           responseEvent: 'ide:ask-user-response',
           countdown: 120,
@@ -468,6 +562,9 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
           title: msg.title || '需要 Secret 引用',
           toolName: msg.toolName || 'request_secret',
           detail: msg.detail || msg.question || msg.reason || '',
+          reason: msg.reason || '',
+          actionKind: 'secret',
+          actionText: msg.question || msg.detail || msg.reason || '',
           mode: 'request_secret',
           responseEvent: 'ide:secret-response',
           secretName: msg.secretName || '',
@@ -552,6 +649,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     currentAssistant = null;
     activeRunId = null;
     stoppedRunId = null;
+    completedRunIds.clear();
     stopRequested = false;
     currentTextHadDelta = false;
     isRunning.value = true;

@@ -3,10 +3,21 @@
 const SIDE_EFFECT_TOOL_NAMES = new Set([
   'execute_command',
   'host_exec',
+  'write_remote_file',
+  'create_directory',
+  'delete_path',
+  'rename_path',
+  'upload_file',
+  'download_file',
+  'run_script',
   'reload_registry',
   'add_mcp_server',
   'remove_mcp_server',
   'deploy_local_mcp',
+  'ack_probe_alert',
+  'install_probe_agent',
+  'restart_probe_agent',
+  'uninstall_probe_agent',
 ]);
 
 function applyObservationToRuntimeState(state, observation = {}) {

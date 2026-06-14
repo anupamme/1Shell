@@ -9,6 +9,11 @@ const { ROOT_DIR } = require('../config/env');
 const { createOneShellCoreTools } = require('../tools/oneshell-core.tools');
 const { emitIdeEvent } = require('./ide.events');
 
+function commandHasTruncationMarker(command) {
+  const text = String(command || '');
+  return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
+}
+
 function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness }) {
   const coreTools = createOneShellCoreTools({
     bridgeService,
@@ -239,6 +244,14 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
   const CORE_DELEGATED_TOOL_NAMES = new Set([
     'execute_command',
     'list_hosts',
+    'list_remote_dir',
+    'read_remote_file',
+    'write_remote_file',
+    'create_directory',
+    'delete_path',
+    'rename_path',
+    'upload_file',
+    'download_file',
     'list_scripts',
     'run_script',
     'list_mcp_servers',
@@ -247,6 +260,19 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     'deploy_local_mcp',
     'query_audit',
     'query_probe',
+    'list_probes',
+    'get_probe',
+    'get_probe_samples',
+    'get_probe_timeseries',
+    'get_probe_traffic',
+    'list_probe_alerts',
+    'ack_probe_alert',
+    'install_probe_agent',
+    'restart_probe_agent',
+    'uninstall_probe_agent',
+    'probe_diag_ping',
+    'probe_diag_http',
+    'probe_diag_dns',
   ]);
 
   // ─── Handler 实现 ────────────────────────────────────────────────────
@@ -353,6 +379,17 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     const hostId = String(input.hostId || 'local').trim() || 'local';
     const contains = String(input.contains || '').trim();
     if (!command) return verificationToolResult({ type: 'command', ok: false, status: 'failed', target: hostId, reason: input.reason, reasons: ['command_required'], evidence: 'command 为空' });
+    if (commandHasTruncationMarker(command)) {
+      return verificationToolResult({
+        type: 'command',
+        ok: false,
+        status: 'failed',
+        target: hostId,
+        reason: input.reason,
+        reasons: ['command_truncated'],
+        evidence: '验证命令疑似被摘要截断（包含省略号或 [truncated] 标记），未执行。',
+      });
+    }
     const result = await runVerifierCommand(hostId, command, verifierTimeout(input), signal);
     const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
     const reasons = [];

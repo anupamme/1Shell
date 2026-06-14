@@ -35,6 +35,74 @@ function messageLabel(item: IdeChatMessage): string {
   return item.role === 'user' ? '你' : '1Shell AI';
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function readPath(record: Record<string, unknown> | null, path: string[]): unknown {
+  let current: unknown = record;
+  for (const key of path) {
+    const next = asRecord(current);
+    if (!next) return undefined;
+    current = next[key];
+  }
+  return current;
+}
+
+function pickString(record: Record<string, unknown> | null, paths: string[][]): string {
+  for (const path of paths) {
+    const value = readPath(record, path);
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  }
+  return '';
+}
+
+function shorten(text: string, maxLength = props.density === 'compact' ? 86 : 128): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function toolDisplayName(tool: IdeToolTimelineItem): string {
+  const name = tool.name.toLowerCase();
+  if (name.includes('execute') || name.includes('command') || name === 'shell') return '执行命令';
+  if (name.includes('probe') || name.includes('metric') || name.includes('monitor')) return '读取探针数据';
+  if (name.includes('host')) return '读取主机信息';
+  if (name.includes('download')) return '下载文件';
+  if (name.includes('upload')) return '上传文件';
+  if (name.includes('read') && name.includes('file')) return '读取文件';
+  if (name.includes('write') && name.includes('file')) return '写入文件';
+  if (name.includes('list') || name.includes('dir')) return '列出目录';
+  if (name.includes('approval')) return '请求确认';
+  if (name.includes('secret')) return '请求密钥引用';
+  if (name.includes('ask')) return '询问用户';
+  if (name.includes('verify')) return '验证结果';
+  if (name.includes('mcp')) return '调用 MCP 工具';
+  return tool.name;
+}
+
+function toolRawName(tool: IdeToolTimelineItem): string {
+  const display = toolDisplayName(tool);
+  return display === tool.name ? '' : tool.name;
+}
+
+function toolIcon(tool: IdeToolTimelineItem): string {
+  const name = tool.name.toLowerCase();
+  if (tool.status === 'error') return 'alert';
+  if (name.includes('execute') || name.includes('command') || name === 'shell') return 'terminal';
+  if (name.includes('probe') || name.includes('metric') || name.includes('monitor')) return 'radio';
+  if (name.includes('host') || name.includes('server')) return 'server';
+  if (name.includes('download')) return 'download';
+  if (name.includes('upload')) return 'cloud';
+  if (name.includes('file') || name.includes('dir') || name.includes('list')) return 'folder';
+  if (name.includes('approval') || name.includes('permission')) return 'shield';
+  if (name.includes('secret')) return 'lock';
+  if (name.includes('verify')) return 'check';
+  return tool.status === 'done' ? 'check' : 'wrench';
+}
+
 function toolStatusLabel(tool: IdeToolTimelineItem): string {
   if (tool.status === 'preparing') return '准备参数';
   if (tool.status === 'running') return '执行中';
@@ -42,16 +110,47 @@ function toolStatusLabel(tool: IdeToolTimelineItem): string {
   return '完成';
 }
 
-function toolStatusIcon(tool: IdeToolTimelineItem): string {
-  if (tool.status === 'error') return 'alert';
-  if (tool.status === 'done') return 'check';
-  return 'wrench';
-}
-
 function toolDuration(tool: IdeToolTimelineItem): string {
   if (tool.durationMs === undefined) return '';
   if (tool.durationMs < 1000) return `${tool.durationMs} ms`;
   return `${(tool.durationMs / 1000).toFixed(1)} s`;
+}
+
+function toolPurpose(tool: IdeToolTimelineItem): string {
+  if (tool.workNote?.trim()) return shorten(tool.workNote);
+  const input = asRecord(tool.input);
+  const direct = pickString(input, [
+    ['description'],
+    ['summary'],
+    ['reason'],
+    ['query'],
+    ['url'],
+    ['path'],
+    ['filePath'],
+    ['filename'],
+    ['hostId'],
+    ['host'],
+    ['command'],
+    ['cmd'],
+    ['args', 'description'],
+    ['args', 'query'],
+    ['args', 'path'],
+    ['args', 'filePath'],
+    ['args', 'hostId'],
+    ['args', 'command'],
+  ]);
+  if (direct) return shorten(direct);
+
+  const result = typeof tool.result === 'string' ? tool.result : '';
+  const firstLine = result.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  return firstLine ? shorten(firstLine, props.density === 'compact' ? 72 : 100) : '';
+}
+
+function toolMeta(tool: IdeToolTimelineItem): string[] {
+  return [
+    toolDuration(tool),
+    toolRawName(tool),
+  ].filter(Boolean);
 }
 
 function hasToolInput(tool: IdeToolTimelineItem): boolean {
@@ -71,6 +170,11 @@ function formatToolValue(value: unknown, maxLength = props.density === 'compact'
 
 function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
   return tool.status === 'preparing' || tool.status === 'running' || tool.status === 'error';
+}
+
+function toolAriaLabel(tool: IdeToolTimelineItem): string {
+  const meta = toolMeta(tool).join('，');
+  return `${toolDisplayName(tool)}，${toolStatusLabel(tool)}${meta ? `，${meta}` : ''}`;
 }
 </script>
 
@@ -92,7 +196,7 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
             class="markdown-body ide-agent-markdown"
             v-html="renderMarkdown(item.text)"
           ></div>
-          <div v-else class="ide-agent-pending">
+          <div v-else class="ide-agent-pending" role="status" aria-label="生成中">
             <span></span>
             <span></span>
             <span></span>
@@ -106,7 +210,10 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
             <span class="ide-agent-thinking-icon">
               <AppIcon name="spark" :size="14" />
             </span>
-            <span>工作笔记</span>
+            <span class="ide-agent-thinking-title">
+              <span>工作笔记</span>
+              <span>模型输出</span>
+            </span>
             <AppIcon name="arrow-right" :size="13" class="ide-agent-chevron" />
           </summary>
           <div
@@ -120,23 +227,32 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
         v-else-if="isToolItem(item)"
         class="ide-agent-tool"
         :class="`ide-agent-tool--${item.status}`"
+        :aria-busy="item.status === 'preparing' || item.status === 'running'"
       >
         <details class="ide-agent-tool-card" :open="toolDefaultOpen(item)">
-          <summary class="ide-agent-tool-summary">
+          <summary class="ide-agent-tool-summary" :aria-label="toolAriaLabel(item)">
             <span class="ide-agent-tool-icon">
-              <AppIcon :name="toolStatusIcon(item)" :size="15" />
+              <AppIcon :name="toolIcon(item)" :size="15" />
             </span>
             <span class="ide-agent-tool-main">
-              <span class="ide-agent-tool-name">{{ item.name }}</span>
+              <span class="ide-agent-tool-headline">
+                <span class="ide-agent-tool-name">{{ toolDisplayName(item) }}</span>
+                <span class="ide-agent-tool-status">{{ toolStatusLabel(item) }}</span>
+              </span>
               <span class="ide-agent-tool-subtitle">
-                <span>{{ toolStatusLabel(item) }}</span>
-                <span v-if="toolDuration(item)">{{ toolDuration(item) }}</span>
+                <span v-if="toolPurpose(item)">{{ toolPurpose(item) }}</span>
+                <span v-for="meta in toolMeta(item)" :key="meta">{{ meta }}</span>
               </span>
             </span>
             <AppIcon name="arrow-right" :size="14" class="ide-agent-chevron" />
           </summary>
 
           <div class="ide-agent-tool-body">
+            <div v-if="item.workNote" class="ide-agent-tool-section ide-agent-tool-section--note">
+              <div class="ide-agent-tool-section-title">1Shell AI 的工作笔记</div>
+              <p>{{ item.workNote }}</p>
+            </div>
+
             <details v-if="hasToolInput(item)" class="ide-agent-tool-section">
               <summary>参数</summary>
               <pre>{{ formatToolValue(item.input) }}</pre>
@@ -312,6 +428,30 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
   color: #94a3b8;
 }
 
+.ide-agent-thinking-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.ide-agent-thinking-title span:last-child {
+  min-width: 0;
+  border-radius: 999px;
+  padding: 2px 6px;
+  border: 1px solid rgba(14, 165, 233, 0.18);
+  color: #0369a1;
+  background: rgba(224, 242, 254, 0.58);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+:global(html.dark) .ide-agent-thinking-title span:last-child {
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.22);
+  background: rgba(14, 165, 233, 0.12);
+}
+
 .ide-agent-thinking-icon,
 .ide-agent-tool-icon {
   display: inline-flex;
@@ -441,7 +581,14 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
 .ide-agent-tool-main {
   min-width: 0;
   display: grid;
-  gap: 2px;
+  gap: 4px;
+}
+
+.ide-agent-tool-headline {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .ide-agent-tool-name {
@@ -458,6 +605,54 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
   font-size: 12px;
 }
 
+.ide-agent-tool-status {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  border: 1px solid rgba(14, 165, 233, 0.2);
+  color: #0369a1;
+  background: rgba(224, 242, 254, 0.68);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.ide-agent-tool--preparing .ide-agent-tool-status,
+.ide-agent-tool--running .ide-agent-tool-status {
+  color: #075985;
+  background: rgba(224, 242, 254, 0.82);
+}
+
+.ide-agent-tool--done .ide-agent-tool-status {
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.18);
+  background: rgba(209, 250, 229, 0.76);
+}
+
+.ide-agent-tool--error .ide-agent-tool-status {
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.18);
+  background: rgba(254, 226, 226, 0.8);
+}
+
+:global(html.dark) .ide-agent-tool-status {
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.2);
+  background: rgba(14, 165, 233, 0.12);
+}
+
+:global(html.dark) .ide-agent-tool--done .ide-agent-tool-status {
+  color: #6ee7b7;
+  border-color: rgba(52, 211, 153, 0.22);
+  background: rgba(16, 185, 129, 0.14);
+}
+
+:global(html.dark) .ide-agent-tool--error .ide-agent-tool-status {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.26);
+  background: rgba(127, 29, 29, 0.24);
+}
+
 .ide-agent-tool-subtitle {
   min-width: 0;
   display: flex;
@@ -466,6 +661,23 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
   flex-wrap: wrap;
   font-size: 11px;
   color: #64748b;
+}
+
+.ide-agent-tool-subtitle span {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.ide-agent-tool-subtitle span + span::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin: 0 8px 2px 0;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.45;
 }
 
 :global(html.dark) .ide-agent-tool-subtitle {
@@ -508,6 +720,25 @@ function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
 :global(html.dark) .ide-agent-tool-section summary,
 :global(html.dark) .ide-agent-tool-section-title {
   color: #cbd5e1;
+}
+
+.ide-agent-tool-section--note p {
+  margin: 0;
+  border: 1px solid rgba(14, 165, 233, 0.18);
+  border-radius: 8px;
+  background: rgba(224, 242, 254, 0.54);
+  color: #0f172a;
+  padding: 9px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+:global(html.dark) .ide-agent-tool-section--note p {
+  border-color: rgba(56, 189, 248, 0.2);
+  background: rgba(14, 165, 233, 0.1);
+  color: #dbeafe;
 }
 
 .ide-agent-tool-section pre,

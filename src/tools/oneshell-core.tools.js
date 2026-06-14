@@ -7,6 +7,11 @@ const { execLocalCommand } = require('../../lib/exec-local');
 const { emitIdeEvent } = require('../ide/ide.events');
 const { MCP_STANDARD_TOOL_SET } = require('./mcp-tool-profiles');
 
+function commandHasTruncationMarker(command) {
+  const text = String(command || '');
+  return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
+}
+
 const EXEC_SCHEMA = {
   type: 'object',
   properties: {
@@ -558,6 +563,7 @@ function createOneShellCoreTools(deps = {}) {
     const hostId = String(input.hostId || '').trim();
     const command = String(input.command || '').trim();
     const timeout = Number(input.timeout) > 0 ? Number(input.timeout) : 30000;
+    if (commandHasTruncationMarker(command)) return err('命令疑似被摘要截断（包含省略号或 [truncated] 标记），请重新生成完整命令后再执行。');
     if (!hostId || !command) return err('hostId 和 command 为必填');
     const onOutput = typeof context.onToolDelta === 'function' ? context.onToolDelta : context.onOutput;
 
@@ -858,11 +864,63 @@ function createOneShellCoreTools(deps = {}) {
     const targetPath = String(input.path || '').trim();
     if (!hostId || !targetPath) return err('hostId 和 path 为必填');
     try {
+      const host = deps.hostService?.findHost?.(hostId);
+      if (host && host.type !== 'local' && deps.bridgeService?.execOnHost) {
+        const timeout = Number(input.timeout) > 0 ? Number(input.timeout) : 120000;
+        const command = buildRemoteDeleteCommand(targetPath);
+        const result = await deps.bridgeService.execOnHost(hostId, command, timeout, {
+          source: context.source || 'core_tools',
+          signal: context.signal,
+          auditCommand: `delete_path ${targetPath}`,
+          onOutput: context.onToolDelta,
+        });
+        if (result.exitCode !== 0) {
+          return structured(false, `删除失败，exitCode=${result.exitCode}`, {
+            hostId,
+            path: targetPath,
+            stdout: result.stdout || '',
+            stderr: result.stderr || '',
+            exitCode: result.exitCode,
+            durationMs: result.durationMs || 0,
+          }, true);
+        }
+        const isDir = /type=dir/.test(result.stdout || '');
+        deps.auditService?.log?.({ action: 'mcp_file_delete', source: context.source || 'core_tools', hostId, command: targetPath, details: JSON.stringify({ isDir, via: 'bridge_exec', durationMs: result.durationMs || 0 }) });
+        return structured(true, '删除成功', { hostId, path: targetPath, isDir, stdout: result.stdout || '', durationMs: result.durationMs || 0 });
+      }
       const result = await deps.fileService.deletePath(hostId, targetPath);
       deps.auditService?.log?.({ action: 'mcp_file_delete', source: context.source || 'core_tools', hostId, command: targetPath, details: JSON.stringify({ isDir: result.isDir }) });
       return structured(true, '删除成功', { hostId, ...result });
     } catch (e) {
       return err(e.message);
+    }
+  }
+
+  function buildRemoteDeleteCommand(targetPath) {
+    assertSafeMutationTarget(targetPath, '删除');
+    const quoted = shellQuote(targetPath);
+    return [
+      'set -eu',
+      `target=${quoted}`,
+      'if [ ! -e "$target" ] && [ ! -L "$target" ]; then printf "path not found: %s\\n" "$target" >&2; exit 2; fi',
+      'if [ -d "$target" ] && [ ! -L "$target" ]; then type=dir; else type=file; fi',
+      'rm -rf -- "$target"',
+      'printf "deleted type=%s path=%s\\n" "$type" "$target"',
+    ].join('\n');
+  }
+
+  function shellQuote(value) {
+    return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
+  }
+
+  function assertSafeMutationTarget(targetPath, action) {
+    const value = String(targetPath || '');
+    if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(value)) {
+      throw new Error(`${action}被拒绝：路径包含 .. 穿越片段`);
+    }
+    const trimmed = value.trim().replace(/[\\/]+$/, '');
+    if (!trimmed || /^[A-Za-z]:$/.test(trimmed)) {
+      throw new Error(`${action}被拒绝：不允许操作根目录`);
     }
   }
 

@@ -23,7 +23,7 @@ const READ_ONLY_COMMAND_PREFIXES = [
   'journalctl',
   'ip', 'ifconfig', 'ss', 'netstat', 'route', 'ping', 'traceroute', 'dig', 'nslookup', 'host',
   'grep', 'egrep', 'fgrep', 'awk', 'sed', 'cut', 'sort', 'uniq', 'wc', 'tr', 'find', 'locate',
-  'echo', 'printf', 'true', 'false', 'test', 'which', 'whereis', 'type', 'command',
+  'echo', 'printf', 'true', 'false', 'test', '[', '[[', 'which', 'whereis', 'type', 'command',
   'git',
   'docker', // 仅放行 ps/images/inspect/logs/stats，见 isReadonlyDocker
   'curl', 'wget', // 仅放行 GET 类探测；写副作用由命令参数判断，这里只做最小限制
@@ -128,6 +128,25 @@ function pushSegment(out, segment) {
   if (normalized) out.push(normalized);
 }
 
+function normalizeStructuralShellSegment(segment) {
+  let text = String(segment || '').trim();
+  if (!text) return '';
+  while (text.startsWith('(')) text = text.slice(1).trim();
+  while (text.endsWith(')')) text = text.slice(0, -1).trim();
+  text = text.replace(/\s+(?:then|do)\s*$/i, '').trim();
+  text = text.replace(/^(?:if|while|until)\s+/i, '').trim();
+  text = text.replace(/^do\s+/i, '').trim();
+  return text;
+}
+
+function isReadonlyShellStructure(segment) {
+  const text = String(segment || '').trim();
+  if (!text) return true;
+  if (/^(?:then|else|fi|do|done)$/i.test(text)) return true;
+  if (/^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\b/i.test(text)) return true;
+  return false;
+}
+
 function isAssignmentOnly(command) {
   return /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)?$/.test(String(command || '').trim());
 }
@@ -174,15 +193,19 @@ function isReadonlyCommand(command) {
   if (segments.length === 0) return false;
 
   for (const seg of segments) {
-    if (isAssignmentOnly(seg)) continue;
-    const cmd = firstToken(seg);
+    if (isReadonlyShellStructure(seg)) continue;
+    const normalizedSeg = normalizeStructuralShellSegment(seg);
+    if (!normalizedSeg) continue;
+    if (isReadonlyShellStructure(normalizedSeg)) continue;
+    if (isAssignmentOnly(normalizedSeg)) continue;
+    const cmd = firstToken(normalizedSeg);
     if (!cmd) return false;
     if (!READ_ONLY_COMMAND_PREFIXES.includes(cmd)) return false;
-    if (cmd === 'systemctl' && !isReadonlySystemctl(seg)) return false;
-    if (cmd === 'docker' && !isReadonlyDocker(seg)) return false;
-    if (cmd === 'git' && !isReadonlyGit(seg)) return false;
-    if (cmd === 'sed' && !isReadonlySed(seg)) return false;
-    if (cmd === 'find' && !isReadonlyFind(seg)) return false;
+    if (cmd === 'systemctl' && !isReadonlySystemctl(normalizedSeg)) return false;
+    if (cmd === 'docker' && !isReadonlyDocker(normalizedSeg)) return false;
+    if (cmd === 'git' && !isReadonlyGit(normalizedSeg)) return false;
+    if (cmd === 'sed' && !isReadonlySed(normalizedSeg)) return false;
+    if (cmd === 'find' && !isReadonlyFind(normalizedSeg)) return false;
   }
   return true;
 }
@@ -193,7 +216,11 @@ const CAPABILITY_RULES = {
   read_only: {
     label: '只读',
     // 只读能力下允许的工具
-    allowedTools: new Set(['execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'list_hosts', 'query_probe', 'list_probes']),
+    allowedTools: new Set([
+      'execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'list_hosts',
+      'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
+      'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
+    ]),
     // 对 execute_command 的命令级判断
     commandCheck: isReadonlyCommand,
   },
@@ -204,7 +231,11 @@ const CAPABILITY_RULES = {
       'execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'list_hosts',
       'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
       'upload_file', 'download_file', 'run_script',
-      'query_probe', 'list_probes', 'query_audit',
+      'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
+      'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
+      'ack_probe_alert', 'install_probe_agent', 'restart_probe_agent',
+      'uninstall_probe_agent', 'probe_diag_ping', 'probe_diag_http',
+      'probe_diag_dns', 'query_audit',
     ]),
     commandCheck: null, // 不做命令级限制（灾难拦截由 guard 兜底）
   },

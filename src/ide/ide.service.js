@@ -26,6 +26,49 @@ function emitToSession(session, fallbackSocket, event, payload) {
   try { emitIdeEvent(target, event, payload); } catch { /* ignore */ }
 }
 
+function normalizeVisibleWorkNote(value, maxLength = 1600) {
+  const text = String(value || '').replace(/\r\n/g, '\n').trim();
+  if (!text) return '';
+  return text.length > maxLength ? `${text.slice(0, maxLength).trim()}\n...[truncated]` : text;
+}
+
+function extractToolWorkNotes(content = []) {
+  const notes = new Map();
+  if (!Array.isArray(content)) return notes;
+  let pendingText = '';
+  let latestNote = '';
+  for (const block of content) {
+    if (block?.type === 'text') {
+      pendingText += String(block.text || '');
+      const note = normalizeVisibleWorkNote(pendingText);
+      if (note) latestNote = note;
+      continue;
+    }
+    if (block?.type === 'tool_use' && block.id && latestNote) {
+      notes.set(String(block.id), latestNote);
+    }
+  }
+  return notes;
+}
+
+function rememberToolWorkNotes(session, runId, content = []) {
+  if (!session) return;
+  const notes = extractToolWorkNotes(content);
+  if (notes.size === 0) return;
+  if (!(session.toolWorkNotes instanceof Map)) session.toolWorkNotes = new Map();
+  for (const [toolUseId, workNote] of notes.entries()) {
+    session.toolWorkNotes.set(toolUseId, { runId, workNote });
+  }
+}
+
+function readToolWorkNote(session, runId, toolUseId) {
+  const id = String(toolUseId || '').trim();
+  if (!id || !(session?.toolWorkNotes instanceof Map)) return '';
+  const entry = session.toolWorkNotes.get(id);
+  if (!entry || (entry.runId && runId && entry.runId !== runId)) return '';
+  return normalizeVisibleWorkNote(entry.workNote);
+}
+
 function resolveNullablePositiveInteger(value) {
   if (value === undefined || value === null || value === false) return null;
   const text = String(value).trim().toLowerCase();
@@ -451,6 +494,14 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         return item;
       }));
     } catch { return {}; }
+  }
+
+  function cloneToolInputForExecution(value) {
+    try {
+      return JSON.parse(JSON.stringify(value || {}));
+    } catch {
+      return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+    }
   }
 
   function defaultIdeAgentLedger() {
@@ -891,8 +942,10 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
   function createIdeApprovalInterrupt(runId, requestId, tc, summary = {}, riskReason = '', options = {}) {
     if (!runId || !requestId || !tc?.name || !agentRuntime?.createInterrupt) return null;
     try {
-      const title = options.title || summary.title || tc.name;
-      const detail = formatApprovalDetail(summary, riskReason);
+      const facts = options.approvalFacts || normalizeApprovalFacts(tc, summary, riskReason, options);
+      const title = facts.title || options.title || summary.title || tc.name;
+      const detail = formatApprovalDetail(summary, facts.riskReason || riskReason);
+      const workNote = normalizeVisibleWorkNote(options.workNote);
       return agentRuntime.createInterrupt(runId, {
         type: 'request_approval',
         reason: 'approval_required',
@@ -904,8 +957,10 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
           action: tc.name,
           toolName: tc.name,
           args: redactAgentTraceValue(tc.input || {}),
-          riskLevel: String(options.riskLevel || options.risk_level || ''),
-          riskReason,
+          workNote,
+          riskLevel: facts.riskLevel || String(options.riskLevel || options.risk_level || ''),
+          riskReason: facts.riskReason || riskReason,
+          approval: facts,
         },
         scope: { hostId: tc.input?.hostId || 'local' },
         runnerStatus: 'waiting_approval',
@@ -1190,17 +1245,53 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     const input = tc.input || {};
     switch (tc.name) {
       case 'execute_command':
-        return { title: '执行命令', detail: `主机: ${input.hostId || 'local'}\n命令: ${input.command || ''}` };
+        return {
+          title: '执行命令',
+          detail: `主机: ${input.hostId || 'local'}\n命令: ${input.command || ''}`,
+          actionKind: 'command',
+          actionText: String(input.command || ''),
+          hostId: input.hostId || 'local',
+        };
       case 'create_directory':
-        return { title: '创建目录', detail: `主机: ${input.hostId || 'local'}\n路径: ${input.path || ''}` };
+        return {
+          title: '创建目录',
+          detail: `主机: ${input.hostId || 'local'}\n路径: ${input.path || ''}`,
+          actionKind: 'file_change',
+          actionText: `mkdir ${input.path || ''}`,
+          hostId: input.hostId || 'local',
+        };
       case 'delete_path':
-        return { title: '删除文件/目录（不可恢复）', detail: `主机: ${input.hostId || 'local'}\n路径: ${input.path || ''}` };
+        return {
+          title: '删除文件/目录（不可恢复）',
+          detail: `主机: ${input.hostId || 'local'}\n路径: ${input.path || ''}`,
+          actionKind: 'file_delete',
+          actionText: `delete_path ${input.path || ''}`,
+          hostId: input.hostId || 'local',
+        };
       case 'rename_path':
-        return { title: '重命名/移动', detail: `主机: ${input.hostId || 'local'}\n原路径: ${input.path || ''}\n新路径: ${input.newPath || ''}` };
+        return {
+          title: '重命名/移动',
+          detail: `主机: ${input.hostId || 'local'}\n原路径: ${input.path || ''}\n新路径: ${input.newPath || ''}`,
+          actionKind: 'file_change',
+          actionText: `rename_path ${input.path || ''} -> ${input.newPath || ''}`,
+          hostId: input.hostId || 'local',
+        };
       case 'deploy_local_mcp':
-        return { title: '部署本地 MCP', detail: `仓库: ${input.repoUrl || ''}\n名称: ${input.name || ''}` };
+        return {
+          title: '部署本地 MCP',
+          detail: `仓库: ${input.repoUrl || ''}\n名称: ${input.name || ''}`,
+          actionKind: 'tool',
+          actionText: `deploy_local_mcp ${input.name || ''}\n${input.repoUrl || ''}`,
+          hostId: input.hostId || 'local',
+        };
       default:
-        return { title: tc.name, detail: JSON.stringify(input, null, 2).substring(0, 400) };
+        return {
+          title: tc.name,
+          detail: JSON.stringify(input, null, 2).substring(0, 600),
+          actionKind: 'tool',
+          actionText: `${tc.name}\n${JSON.stringify(input, null, 2).substring(0, 1200)}`,
+          hostId: input.hostId || 'local',
+        };
     }
   }
 
@@ -1249,10 +1340,16 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
   }
 
   function createIdeRuntimeDispatchOptions({ socket, sessionId, runId, session, mcpToolMap, emitLifecycle = true, recordPhase = true, recordEffects = true } = {}) {
-    const requestHarnessApproval = async (toolName, input, summary, riskReason) => {
-      const approval = await waitForApproval(socket, sessionId, { name: toolName, input: input || {} }, session, runId, {
+    const requestHarnessApproval = async (toolName, input, summary, riskReason, approvalContext = {}) => {
+      const toolUseId = String(approvalContext?.toolUseId || approvalContext?.tool_use_id || approvalContext?.providerToolUseId || approvalContext?.provider_tool_use_id || '').trim();
+      const approval = await waitForApproval(socket, sessionId, { id: toolUseId, name: toolName, input: input || {} }, session, runId, {
         summary,
         riskReason,
+        workNote: readToolWorkNote(session, runId, toolUseId),
+        approval: approvalContext?.approval || null,
+        risk: approvalContext?.risk || null,
+        needApproval: approvalContext?.needApproval === true,
+        approvalRequired: approvalContext?.approvalRequired === true,
         title: summary?.title || '操作需要确认',
       });
       throwIfStopped(session, runId);
@@ -1264,7 +1361,13 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       providerToolUseId: action.id,
       scope: { hostId: session?.hostId || action.args?.hostId || 'local' },
       allowApproval: true,
-      requestApproval: requestHarnessApproval,
+      requestApproval: (toolName, input, summary, riskReason, approvalContext = {}) => requestHarnessApproval(
+        toolName,
+        input,
+        summary,
+        riskReason,
+        { ...approvalContext, toolUseId: action.id },
+      ),
       executeTool: async ({ toolName, args, toolCall, context: toolContext }) => {
         const tc = {
           id: toolCall?.providerToolUseId || toolCall?.id || action.id || `${toolName}-${Date.now()}`,
@@ -1287,7 +1390,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         let result = null;
         try {
           throwIfStopped(session, runId);
-          if (emitLifecycle) emitToSession(session, socket, 'ide:tool-start', { sessionId, runId, toolUseId: tc.id, name: tc.name, input: tc.input });
+          if (emitLifecycle) emitToSession(session, socket, 'ide:tool-start', { sessionId, runId, toolUseId: tc.id, name: tc.name, input: tc.input, workNote: readToolWorkNote(session, runId, tc.id) });
           if (recordPhase) {
             const phaseId = tc.name === 'verify_outcome'
               ? 'verify'
@@ -1325,7 +1428,13 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
               safeMode: false,
               session,
               signal: toolAc.signal,
-              requestApproval: requestHarnessApproval,
+              requestApproval: (approvalToolName, approvalInput, approvalSummary, approvalRiskReason, approvalContext = {}) => requestHarnessApproval(
+                approvalToolName,
+                approvalInput,
+                approvalSummary,
+                approvalRiskReason,
+                { ...approvalContext, toolUseId: tc.id },
+              ),
               approvalGranted: toolContext?.approvalGranted === true,
               onToolDelta: emitToolDelta,
             });
@@ -1697,6 +1806,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       for (const tc of toolCalls) {
         tc.input = normalizeIdeAgentToolInput(session.agentGoalProfile, tc.name, tc.input || {});
       }
+      rememberToolWorkNotes(session, runId, data.content);
       if (textParts.length > 0) {
         const fullText = textParts.join('');
         if (!data._emittedTextDelta) emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: fullText });
@@ -1713,12 +1823,17 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       session.messages.push({ role: 'assistant', content: data.content });
       return {
         text: textParts.join(''),
-        toolCalls: toolCalls.map((tc) => ({
-          id: tc.id,
-          toolName: tc.name,
-          args: redactAgentTraceValue(tc.input || {}),
-          input: redactAgentTraceValue(tc.input || {}),
-        })),
+        toolCalls: toolCalls.map((tc) => {
+          const executionInput = cloneToolInputForExecution(tc.input || {});
+          return {
+            id: tc.id,
+            toolName: tc.name,
+            args: executionInput,
+            input: cloneToolInputForExecution(tc.input || {}),
+            traceInput: redactAgentTraceValue(tc.input || {}),
+            workNote: readToolWorkNote(session, runId, tc.id),
+          };
+        }),
         final: toolCalls.length === 0 || data.stop_reason === 'end_turn',
         finishReason: data.stop_reason || '',
       };
@@ -1854,7 +1969,9 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       const baseSummary = getApprovalSummary(tc);
       const summary = options.summary || baseSummary;
       const riskReason = String(options.riskReason || '').trim();
-      const approvalInterrupt = createIdeApprovalInterrupt(runId, requestId, tc, summary, riskReason, options);
+      const workNote = normalizeVisibleWorkNote(options.workNote || readToolWorkNote(session, runId, tc.id));
+      const approvalFacts = normalizeApprovalFacts(tc, summary, riskReason, options);
+      const approvalInterrupt = createIdeApprovalInterrupt(runId, requestId, tc, summary, riskReason, { ...options, workNote, approvalFacts });
       let unregisterCancel = null;
       let settled = false;
 
@@ -1887,9 +2004,19 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
           sessionId,
           runId,
           requestId,
+          toolUseId: tc.id || '',
           toolName: tc.name,
-          title: options.title || summary.title,
-          detail: formatApprovalDetail(summary, riskReason),
+          title: approvalFacts.title || options.title || summary.title,
+          detail: formatApprovalDetail(summary, approvalFacts.riskReason || riskReason),
+          workNote,
+          reason: approvalFacts.reason,
+          riskReason: approvalFacts.riskReason,
+          riskLevel: approvalFacts.riskLevel,
+          hostId: approvalFacts.hostId,
+          actionKind: approvalFacts.actionKind,
+          actionText: approvalFacts.actionText,
+          input: approvalFacts.input,
+          approval: approvalFacts,
         });
       } catch (err) {
         settle(reject, err, { action: 'deny', reason: err.message || 'approval_emit_failed' });
@@ -1905,6 +2032,44 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     if (!detail) return readableReason;
     if (detail.includes(reason) || detail.includes(readableReason)) return detail;
     return [readableReason, detail].filter(Boolean).join('\n\n');
+  }
+
+  function normalizeApprovalFacts(tc, summary = {}, riskReason = '', options = {}) {
+    const input = tc.input || {};
+    const provided = options.approval && typeof options.approval === 'object' ? options.approval : {};
+    const risk = provided.risk && typeof provided.risk === 'object' ? provided.risk : (options.risk && typeof options.risk === 'object' ? options.risk : null);
+    const title = String(options.title || provided.title || summary.title || tc.name || '操作需要确认').trim();
+    const detail = String(provided.detail || summary.detail || '').trim();
+    const normalizedRiskReason = String(provided.riskReason || riskReason || '').trim();
+    const actionText = String(provided.actionText || summary.actionText || detail || '').trim();
+    const riskLevel = String(provided.riskLevel || options.riskLevel || options.risk_level || risk?.level || '').trim();
+    const hostId = String(provided.hostId || summary.hostId || input.hostId || 'local').trim() || 'local';
+    const reason = String(
+      provided.reason
+      || (normalizedRiskReason ? `harness 判断需要人工确认：${normalizedRiskReason}` : '此操作需要你确认后才会继续。')
+    ).trim();
+    const required = provided.required === true || options.approvalRequired === true;
+    return {
+      schemaVersion: 1,
+      source: String(provided.source || 'ide'),
+      toolName: tc.name,
+      title,
+      reason,
+      riskReason: normalizedRiskReason,
+      riskLevel,
+      required,
+      recommended: provided.recommended === true || (options.needApproval === true && !required),
+      actionKind: String(provided.actionKind || summary.actionKind || 'tool'),
+      actionText,
+      detail,
+      hostId,
+      input: redactAgentTraceValue(input || {}),
+      summary: {
+        title,
+        detail,
+      },
+      risk: risk ? redactAgentTraceValue(risk) : null,
+    };
   }
 
   function applyPromptEntry(session, entry) {

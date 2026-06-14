@@ -90,7 +90,12 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
     let approvalGranted = context.approvalGranted === true || context.preApproved === true;
     if (!approvalGranted && verdict.needApproval && context.allowApproval && typeof context.requestApproval === 'function') {
       try {
-        approvalGranted = await context.requestApproval(toolName, input, verdict.summary, verdict.riskReason);
+        approvalGranted = await context.requestApproval(toolName, input, verdict.summary, verdict.riskReason, {
+          approval: verdict.approval || null,
+          risk: verdict.risk || null,
+          needApproval: verdict.needApproval === true,
+          approvalRequired: verdict.approvalRequired === true,
+        });
       } catch (err) {
         // 审批流程异常（如取消）→ 视为拒绝
         trace.end(traceId, { denied: true, reason: `approval error: ${err.message}` });
@@ -102,7 +107,7 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
       }
     }
     if (verdict.approvalRequired && !approvalGranted) {
-      const reason = verdict.riskReason || '当前操作需要人工审批';
+      const reason = verdict.approval?.reason || verdict.riskReason || '当前操作需要人工审批';
       recordSecurityEvent(trace, toolName, input, context, verdict, 'approval_required');
       trace.end(traceId, { denied: true, reason: `approval required: ${reason}`, risk: verdict.risk });
       auditService?.log?.({

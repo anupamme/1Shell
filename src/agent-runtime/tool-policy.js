@@ -130,7 +130,12 @@ function evaluateRuntimeCapabilities(policy = {}, toolName = '', args = {}, opti
 function requiresHostScope(toolName = '', args = {}) {
   const name = String(toolName || '').trim();
   if (args?.hostId || args?.host_id) return true;
-  return ['execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'write_remote_file', 'upload_file', 'download_file'].includes(name);
+  return [
+    'execute_command', 'host_exec',
+    'read_remote_file', 'list_remote_dir',
+    'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
+    'upload_file', 'download_file',
+  ].includes(name);
 }
 
 function evaluateApprovalRequirement(policy = {}, toolName = '', args = {}, options = {}) {
@@ -186,7 +191,7 @@ function isCommandSideEffect(toolName = '', args = {}) {
 function looksLikeMutatingCommand(command = '') {
   const text = String(command || '').toLowerCase();
   if (!text.trim()) return false;
-  if (/[^0-9]>>?/.test(text) || /\btee\b/.test(text)) return true;
+  if (hasWriteRedirection(text) || /\btee\b/.test(text)) return true;
   return /\b(rm|mv|cp|dd|mkfs|chmod|chown|chgrp|ln|truncate|install|kill|pkill|mkdir|rmdir|touch)\b/.test(text)
     || /\b(systemctl|service)\b[^|;&\n]*(start|stop|restart|reload|enable|disable|mask|unmask|reset-failed|daemon-reload)\b/.test(text)
     || /\b(docker|podman)\b[^|;&\n]*(run|rm|rmi|stop|start|restart|exec|compose\b[^|;&\n]*(up|down|pull|build|restart|stop|start))\b/.test(text)
@@ -195,6 +200,13 @@ function looksLikeMutatingCommand(command = '') {
     || /\b(useradd|adduser|userdel|deluser|usermod|groupadd|groupdel|passwd|gpasswd)\b/.test(text)
     || /\b(reboot|shutdown|halt|poweroff|iptables|ufw|nft|firewall-cmd)\b/.test(text)
     || /\bsed\b[^|;&\n]*\s-i\b/.test(text);
+}
+
+function hasWriteRedirection(command = '') {
+  const text = String(command || '')
+    .replace(/(?:^|\s)(?:[12]?>|&>)\s*\/dev\/null\b/g, ' ')
+    .replace(/(?:^|\s)2>&1\b/g, ' ');
+  return /(?<![0-9>])>(?!>)/.test(text) || />>/.test(text);
 }
 
 function describeApprovalRequirement(toolName = '', args = {}, flags = {}) {
@@ -206,29 +218,17 @@ function describeApprovalRequirement(toolName = '', args = {}, flags = {}) {
       title,
       reason: effects.length > 0
         ? `这条命令会${effects.join('、')}，需要你确认。`
-        : '这条命令包含未能精确归类的写入/变更动作；请核对命令内容、目标主机和影响范围后确认。',
+        : '这条命令包含未能精确归类的写入/变更动作，请核对命令内容、目标主机和影响范围后确认。',
       detail,
     };
   }
   if (flags.explicit) {
-    return {
-      title,
-      reason: '当前运行策略要求这一步先经过你确认。',
-      detail,
-    };
+    return { title, reason: '当前运行策略要求这一步先经过你确认。', detail };
   }
   if (flags.optionRequested) {
-    return {
-      title,
-      reason: '这个工具请求人工确认后再继续。',
-      detail,
-    };
+    return { title, reason: '这个工具请求人工确认后再继续。', detail };
   }
-  return {
-    title,
-    reason: '这一步会修改外部状态，需要你确认。',
-    detail,
-  };
+  return { title, reason: '这一步会修改外部状态，需要你确认。', detail };
 }
 
 function approvalTitleForTool(toolName = '') {
@@ -260,9 +260,10 @@ function describeCommandSideEffects(command = '') {
 
   if (/\bgit\b[^|;&\n]*\bclone\b/.test(text)) add('克隆代码仓库');
   if (/\bgit\b[^|;&\n]*\b(fetch|pull)\b/.test(text)) add('拉取代码更新');
-  if (/\bgit\b[^|;&\n]*\b(reset|clean|checkout|switch|merge|rebase)\b/.test(text)) add('改变工作目录里的 Git 状态');
+  if (/\bgit\b[^|;&\n]*\b(reset|clean|checkout|switch|merge|rebase)\b/.test(text)) add('改变 Git 工作目录状态');
   if (/\bdocker\s+compose\b[^|;&\n]*\b(up|start|restart|down|stop|pull|build)\b/.test(text)) add('修改 Docker Compose 服务');
   if (/\bdocker\b[^|;&\n]*\b(run|rm|rmi|stop|start|restart|pull|build)\b/.test(text)) add('修改 Docker 容器或镜像');
+  if (/\bxargs\b[^|;&\n]*\bdocker\b[^|;&\n]*\b(rm|rmi|stop|restart)\b/.test(text)) add('修改 Docker 容器或镜像');
   if (/\bsystemctl\b[^|;&\n]*\b(daemon-reload)\b/.test(text)) add('刷新 systemd 配置');
   if (/\bsystemctl\b[^|;&\n]*\b(start|stop|restart|reload|enable|disable|mask|unmask|reset-failed)\b/.test(text)) add('修改 systemd 服务状态');
   if (/\b(service)\b[^|;&\n]*\b(start|stop|restart|reload|enable|disable)\b/.test(text)) add('修改服务状态');
@@ -272,13 +273,12 @@ function describeCommandSideEffects(command = '') {
   if (/\b(mv|cp|mkdir|rmdir|touch|truncate|install|ln)\b/.test(text)) add('创建、移动或覆盖文件');
   if (/\b(chmod|chown|chgrp)\b/.test(text)) add('修改文件权限或所有者');
   if (/\bsed\b[^|;&\n]*\s-i(?:\.[^\s]+)?(?:\s|$)/.test(text)) add('原地修改文件内容');
-  if (/[^0-9]>>?/.test(text) || /\btee\b/.test(text)) add('写入文件内容');
+  if (hasWriteRedirection(text) || /\btee\b/.test(text)) add('写入文件内容');
   if (/\b(kill|pkill)\b/.test(text)) add('终止进程');
   if (/\b(reboot|shutdown|halt|poweroff)\b/.test(text)) add('重启或关闭主机');
   if (/\b(iptables|ufw|nft|firewall-cmd)\b/.test(text)) add('修改防火墙规则');
   if (/\b(useradd|adduser|userdel|deluser|usermod|groupadd|groupdel|passwd|gpasswd)\b/.test(text)) add('修改用户或权限账户');
-
-  return effects.slice(0, 5);
+  return effects;
 }
 
 function redactPotentialSecrets(value) {
