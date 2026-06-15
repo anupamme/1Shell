@@ -557,6 +557,7 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
 
   async function dispatchTool(runId, toolName, args = {}, options = {}) {
     const state = requireState(runId);
+    const approvalMode = runtimeApprovalMode(state, options);
     const budgetVerdict = canUseTool(state, toolName);
     if (!budgetVerdict.allow) {
       setTaskStatus(state, 'blocked');
@@ -662,39 +663,43 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
       };
     }
 
-    const approvalVerdict = mergeToolApprovalVerdict(policyVerdict, guardPreflight, toolName, args);
+    const approvalVerdict = mergeToolApprovalVerdict(policyVerdict, guardPreflight, toolName, args, { approvalMode });
     let approvalGranted = false;
     if (approvalVerdict.approvalRequired === true) {
-      emit(state, 'agent:approval-required', {
-        toolName,
-        reason: approvalVerdict.reason,
-        summary: approvalVerdict.message || '',
-        scope: options.scope || {},
-      });
-      const approved = await requestRuntimeApproval({
-        options,
-        toolName,
-        args,
-        context: buildPreToolApprovalContext(state, args, options),
-        policyVerdict: approvalVerdict,
-      });
-      if (!approved) {
-        setTaskStatus(state, 'blocked');
-        const observation = appendRejectedToolObservation(state, {
-          kind: 'tool_approval_result',
+      if (isRuntimeApprovalPreApproved(state, options, approvalMode)) {
+        approvalGranted = true;
+      } else {
+        emit(state, 'agent:approval-required', {
           toolName,
-          reason: `Approval denied for ${toolName}: ${approvalVerdict.reason}`,
-          data: { approvalDenied: true, policy: approvalVerdict.approvalPolicy || '' },
+          reason: approvalVerdict.reason,
+          summary: approvalVerdict.message || '',
+          scope: options.scope || {},
         });
-        emit(state, 'agent:observation-recorded', { observation });
-        return {
-          content: `[agent-runtime] Approval denied for ${toolName}: ${approvalVerdict.reason}`,
-          is_error: true,
-          error: approvalVerdict.reason,
-          data: { approvalDenied: true },
-        };
+        const approved = await requestRuntimeApproval({
+          options,
+          toolName,
+          args,
+          context: buildPreToolApprovalContext(state, args, options),
+          policyVerdict: approvalVerdict,
+        });
+        if (!approved) {
+          setTaskStatus(state, 'blocked');
+          const observation = appendRejectedToolObservation(state, {
+            kind: 'tool_approval_result',
+            toolName,
+            reason: `Approval denied for ${toolName}: ${approvalVerdict.reason}`,
+            data: { approvalDenied: true, policy: approvalVerdict.approvalPolicy || '', approvalMode },
+          });
+          emit(state, 'agent:observation-recorded', { observation });
+          return {
+            content: `[agent-runtime] Approval denied for ${toolName}: ${approvalVerdict.reason}`,
+            is_error: true,
+            error: approvalVerdict.reason,
+            data: { approvalDenied: true, approvalMode },
+          };
+        }
+        approvalGranted = true;
       }
-      approvalGranted = true;
     }
 
     recordToolUsage(state, toolName);
@@ -972,10 +977,46 @@ function normalizeHarnessGuardVerdict(verdict) {
   };
 }
 
-function mergeToolApprovalVerdict(policyVerdict = {}, guardVerdict = null, toolName = '', args = {}) {
+function normalizeRuntimeApprovalMode(value) {
+  const text = String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (['delegated', 'approve_for_me', 'auto_review', 'auto'].includes(text)) return 'delegated';
+  if (['full_access', 'full', 'danger_full_access', 'unrestricted'].includes(text)) return 'full_access';
+  return 'manual';
+}
+
+function runtimeApprovalMode(state = {}, options = {}) {
+  return normalizeRuntimeApprovalMode(
+    options.approvalMode
+      || options.approval_mode
+      || state?.spec?.policy?.approvalMode
+      || state?.spec?.policy?.approval_mode,
+  );
+}
+
+function isRuntimeApprovalPreApproved(state = {}, options = {}, approvalMode = '') {
+  if (options.approvalGranted === true || options.preApproved === true) return true;
+  return normalizeRuntimeApprovalMode(approvalMode || runtimeApprovalMode(state, options)) === 'full_access';
+}
+
+function mergeToolApprovalVerdict(policyVerdict = {}, guardVerdict = null, toolName = '', args = {}, options = {}) {
+  const approvalMode = normalizeRuntimeApprovalMode(options.approvalMode || options.approval_mode);
   const guardNeedsApproval = guardVerdict
     && guardVerdict.allow !== false
     && (guardVerdict.needApproval === true || guardVerdict.approvalRequired === true);
+  const guardRequiresApproval = guardVerdict
+    && guardVerdict.allow !== false
+    && guardVerdict.approvalRequired === true;
+  if (
+    approvalMode === 'delegated'
+    && policyVerdict.approvalRequired !== true
+    && guardNeedsApproval
+    && !guardRequiresApproval
+  ) {
+    return {
+      ...policyVerdict,
+      approvalPolicy: policyVerdict.approvalPolicy || 'delegated_auto',
+    };
+  }
   if (policyVerdict.approvalRequired !== true && !guardNeedsApproval) return policyVerdict;
 
   if (!guardNeedsApproval) {
@@ -1073,6 +1114,7 @@ function buildPreToolApprovalContext(state = {}, args = {}, options = {}) {
     hostId: scope.hostId || args?.hostId || args?.host_id || runContext.hostId || runContext.host_id || 'local',
     hostScope: spec.policy?.hostScope,
     capabilities: options.capabilities !== undefined ? options.capabilities : spec.policy?.capabilities,
+    approvalMode: options.approvalMode || options.approval_mode || spec.policy?.approvalMode || spec.policy?.approval_mode || '',
     allowApproval: options.allowApproval === true,
     secrets: Array.isArray(options.secrets) ? options.secrets : [],
   };

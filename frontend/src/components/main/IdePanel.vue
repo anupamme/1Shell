@@ -1,10 +1,12 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 import AppIcon from '@/components/AppIcon.vue';
 import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
 import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
-import { useIdeChat } from '@/composables/useIdeChat';
+import IdeApprovalModeMenu from '@/components/ide/IdeApprovalModeMenu.vue';
+import { useConfirm } from '@/composables/useConfirm';
+import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useHostsStore } from '@/stores/hosts';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
@@ -14,7 +16,9 @@ const props = defineProps<{ active?: boolean }>();
 
 const hosts = useHostsStore();
 const sessionTerminal = useSessionTerminal();
+const { confirm } = useConfirm();
 const claudeCodeEnabled = ref(false);
+const approvalMode = ref<IdeApprovalMode>('manual');
 const chatAreaEl = ref<HTMLElement | null>(null);
 let followOutput = true;
 
@@ -25,6 +29,7 @@ const activeHostName = computed(() => {
 
 const ide = useIdeChat({
   sessionPrefix: 'console-ide',
+  approvalMode: () => approvalMode.value,
   context: () => {
     const hostId = sessionTerminal.activeHostId.value || LOCAL_HOST_ID;
     const host = hosts.hostMap.get(hostId);
@@ -44,6 +49,7 @@ const ide = useIdeChat({
   },
   messagePayload: () => ({
     entry: 'console',
+    approvalMode: approvalMode.value,
     claudeCodeEnabled: claudeCodeEnabled.value,
   }),
 });
@@ -77,6 +83,20 @@ function onInputKeydown(event: KeyboardEvent): void {
 function onSecretRefSubmit(secretRef: string): void {
   ide.approveCustomText.value = secretRef;
   ide.approveCustom();
+}
+
+async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
+  if (ide.isRunning.value || approvalMode.value === mode) return;
+  if (mode === 'full_access') {
+    const ok = await confirm({
+      title: '启用完全访问权限',
+      message: '完全访问权限会对本次 1Shell AI 对话预授权更高风险的文件、命令和网络操作。确定要启用吗？',
+      okText: '启用完全访问权限',
+      okClass: 'bg-red-600 hover:bg-red-700 text-white',
+    });
+    if (!ok) return;
+  }
+  approvalMode.value = mode;
 }
 </script>
 
@@ -149,7 +169,15 @@ function onSecretRefSubmit(secretRef: string): void {
         @keydown="onInputKeydown"
       />
       <div class="console-ide-composer-row">
-        <span class="console-ide-status">{{ ide.statusText.value }}</span>
+        <div class="console-ide-left-actions">
+          <IdeApprovalModeMenu
+            :model-value="approvalMode"
+            :disabled="ide.isRunning.value"
+            density="compact"
+            @update:model-value="setApprovalMode"
+          />
+          <span class="console-ide-status">{{ ide.statusText.value }}</span>
+        </div>
         <button
           v-if="ide.isRunning.value"
           type="button"
@@ -184,7 +212,7 @@ function onSecretRefSubmit(secretRef: string): void {
   background: rgba(248, 250, 252, 0.74);
 }
 
-:global(html.dark) .console-ide-panel {
+:global(.dark) .console-ide-panel {
   color: #e2e8f0;
   background: rgba(2, 6, 23, 0.42);
 }
@@ -199,7 +227,7 @@ function onSecretRefSubmit(secretRef: string): void {
   border-bottom: 1px solid rgba(148, 163, 184, 0.24);
 }
 
-:global(html.dark) .console-ide-header {
+:global(.dark) .console-ide-header {
   border-bottom-color: rgba(51, 65, 85, 0.72);
 }
 
@@ -223,7 +251,7 @@ function onSecretRefSubmit(secretRef: string): void {
   border: 1px solid #bae6fd;
 }
 
-:global(html.dark) .console-ide-title-icon {
+:global(.dark) .console-ide-title-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.24);
@@ -253,7 +281,7 @@ function onSecretRefSubmit(secretRef: string): void {
   font-size: 11px;
 }
 
-:global(html.dark) .console-ide-title-text span {
+:global(.dark) .console-ide-title-text span {
   color: #94a3b8;
 }
 
@@ -310,11 +338,19 @@ function onSecretRefSubmit(secretRef: string): void {
   cursor: not-allowed;
 }
 
-:global(html.dark) .console-ide-toggle,
-:global(html.dark) .console-ide-ghost-btn {
+:global(.dark) .console-ide-toggle,
+:global(.dark) .console-ide-ghost-btn {
   background: rgba(15, 23, 42, 0.72);
   border-color: rgba(71, 85, 105, 0.8);
   color: #cbd5e1;
+}
+
+:global(.dark) .console-ide-toggle:hover,
+:global(.dark) .console-ide-ghost-btn:hover:not(:disabled),
+:global(.dark) .console-ide-toggle--active {
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(30, 41, 59, 0.84);
 }
 
 .console-ide-scroll {
@@ -357,11 +393,11 @@ function onSecretRefSubmit(secretRef: string): void {
   line-height: 1.5;
 }
 
-:global(html.dark) .console-ide-empty {
+:global(.dark) .console-ide-empty {
   color: #94a3b8;
 }
 
-:global(html.dark) .console-ide-empty strong {
+:global(.dark) .console-ide-empty strong {
   color: #e2e8f0;
 }
 
@@ -373,7 +409,7 @@ function onSecretRefSubmit(secretRef: string): void {
   background: rgba(255, 255, 255, 0.78);
 }
 
-:global(html.dark) .console-ide-composer {
+:global(.dark) .console-ide-composer {
   background: rgba(15, 23, 42, 0.68);
   border-top-color: rgba(51, 65, 85, 0.72);
 }
@@ -403,7 +439,7 @@ function onSecretRefSubmit(secretRef: string): void {
   cursor: not-allowed;
 }
 
-:global(html.dark) .console-ide-input {
+:global(.dark) .console-ide-input {
   background: rgba(2, 6, 23, 0.72);
   border-color: rgba(71, 85, 105, 0.9);
   color: #e2e8f0;
@@ -416,6 +452,13 @@ function onSecretRefSubmit(secretRef: string): void {
   gap: 10px;
 }
 
+.console-ide-left-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .console-ide-status {
   min-width: 0;
   overflow: hidden;
@@ -425,7 +468,7 @@ function onSecretRefSubmit(secretRef: string): void {
   font-size: 12px;
 }
 
-:global(html.dark) .console-ide-status {
+:global(.dark) .console-ide-status {
   color: #94a3b8;
 }
 
@@ -459,6 +502,16 @@ function onSecretRefSubmit(secretRef: string): void {
   border-color: rgba(185, 28, 28, 0.54);
 }
 
+:global(.dark) .console-ide-stop-btn {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.24);
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+:global(.dark) .console-ide-stop-btn:hover {
+  background: rgba(127, 29, 29, 0.38);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -469,5 +522,21 @@ function onSecretRefSubmit(secretRef: string): void {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+@media (max-width: 560px) {
+  .console-ide-composer-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .console-ide-left-actions {
+    justify-content: space-between;
+  }
+
+  .console-ide-send-btn,
+  .console-ide-stop-btn {
+    width: 100%;
+  }
 }
 </style>

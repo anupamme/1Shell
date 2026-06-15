@@ -8,6 +8,7 @@ import { createStreamDeltaBuffer } from '@/utils/streaming';
 type IdeChatRole = 'user' | 'assistant';
 type IdeChatStatus = 'streaming' | 'done' | 'error' | 'cancelled';
 type IdeTimelineKind = 'user' | 'assistant' | 'thinking' | 'tool';
+export type IdeApprovalMode = 'manual' | 'delegated' | 'full_access';
 export type IdeToolStatus = 'preparing' | 'running' | 'done' | 'error';
 export type IdeToolLogStream = 'stdout' | 'stderr';
 
@@ -22,6 +23,7 @@ export interface IdeChatMessage {
 export interface IdeToolLogEntry {
   stream: IdeToolLogStream;
   text: string;
+  terminalText?: string;
 }
 
 export interface IdeThinkingTimelineItem {
@@ -95,8 +97,17 @@ export interface IdeApprovalRequest {
 
 export interface IdeChatOptions {
   sessionPrefix?: string;
+  approvalMode?: IdeApprovalMode | (() => IdeApprovalMode);
   context?: () => Record<string, unknown>;
   messagePayload?: () => Record<string, unknown>;
+  onTaskSaved?: (payload: IdeTaskSavedMessage) => void;
+}
+
+export interface IdeTaskSavedMessage extends StreamMessage {
+  action?: 'created' | 'updated' | string;
+  taskId?: string;
+  task?: unknown;
+  authoringEvidence?: unknown;
 }
 
 export interface IdeChatApi {
@@ -122,12 +133,192 @@ interface StreamMessage {
   runId?: string;
 }
 
+type IdeOutgoingMessagePayload = Record<string, unknown> & {
+  context?: Record<string, unknown>;
+};
+
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
 function messageText(value: unknown): string {
   return String(value ?? '').trim();
+}
+
+const TOOL_LOG_MAX_ENTRIES = 12;
+const TOOL_LOG_MAX_VISIBLE_LINES = 140;
+const TOOL_LOG_MAX_VISIBLE_CHARS = 9000;
+const TOOL_LOG_MAX_STATE_LINES = 260;
+const TOOL_LOG_MAX_STATE_CHARS = 18000;
+
+function normalizeAnsiIntroducers(value: string): string {
+  return value.replace(/(?:\uFFFD|\?)\[/g, '\x1b[');
+}
+
+function stripAnsi(value: string): string {
+  return normalizeAnsiIntroducers(value)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x9b[0-?]*[ -/]*[@-~]/g, '');
+}
+
+function parseCsiParam(params: string, fallback = 1): number {
+  const first = String(params || '').split(';')[0]?.replace(/[^\d]/g, '');
+  const value = first ? Number(first) : fallback;
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function trimTerminalState(value: string): string {
+  let text = value;
+  const lines = text.split('\n');
+  if (lines.length > TOOL_LOG_MAX_STATE_LINES) text = lines.slice(-TOOL_LOG_MAX_STATE_LINES).join('\n');
+  if (text.length > TOOL_LOG_MAX_STATE_CHARS) text = text.slice(-TOOL_LOG_MAX_STATE_CHARS);
+  return text;
+}
+
+function compactToolLogText(value: string): string {
+  const lines = stripAnsi(value).replace(/\t/g, '  ').split('\n').map((line) => line.trimEnd());
+  const compacted: string[] = [];
+  let previous: string | null = null;
+  let repeats = 0;
+
+  const flush = () => {
+    if (previous === null) return;
+    if (repeats > 1 && previous.trim()) compacted.push(`${previous}  (重复 ${repeats} 次)`);
+    else compacted.push(previous);
+    previous = null;
+    repeats = 0;
+  };
+
+  for (const line of lines) {
+    if (line === previous) {
+      repeats += 1;
+      continue;
+    }
+    flush();
+    previous = line;
+    repeats = 1;
+  }
+  flush();
+
+  let visible = compacted;
+  if (visible.length > TOOL_LOG_MAX_VISIBLE_LINES) {
+    const omitted = visible.length - TOOL_LOG_MAX_VISIBLE_LINES + 1;
+    visible = [`... 已折叠前 ${omitted} 行输出 ...`, ...visible.slice(-(TOOL_LOG_MAX_VISIBLE_LINES - 1))];
+  }
+
+  let text = visible.join('\n');
+  if (text.length > TOOL_LOG_MAX_VISIBLE_CHARS) {
+    text = `... 已折叠前部输出 ...\n${text.slice(-TOOL_LOG_MAX_VISIBLE_CHARS)}`;
+  }
+  return text;
+}
+
+function applyTerminalDelta(existing: string, delta: string): string {
+  const input = normalizeAnsiIntroducers(String(delta || '')).replace(/\r\n/g, '\n');
+  const lines = existing ? existing.split('\n') : [''];
+  let row = Math.max(0, lines.length - 1);
+  let col = lines[row]?.length || 0;
+
+  const ensureRow = () => {
+    while (row >= lines.length) lines.push('');
+    if (row < 0) row = 0;
+  };
+
+  const writeChar = (ch: string) => {
+    ensureRow();
+    if (ch === '\n') {
+      row += 1;
+      col = 0;
+      ensureRow();
+      return;
+    }
+    if (ch === '\r') {
+      col = 0;
+      return;
+    }
+    if (ch === '\b') {
+      col = Math.max(0, col - 1);
+      return;
+    }
+    const line = lines[row] || '';
+    lines[row] = col >= line.length
+      ? `${line}${' '.repeat(col - line.length)}${ch}`
+      : `${line.slice(0, col)}${ch}${line.slice(col + 1)}`;
+    col += 1;
+  };
+
+  const handleCsi = (params: string, final: string) => {
+    const amount = parseCsiParam(params, 1);
+    if (final === 'A') {
+      row = Math.max(0, row - amount);
+      col = Math.min(col, lines[row]?.length || 0);
+      return;
+    }
+    if (final === 'B') {
+      row += amount;
+      ensureRow();
+      col = Math.min(col, lines[row]?.length || 0);
+      return;
+    }
+    if (final === 'G') {
+      col = Math.max(0, amount - 1);
+      return;
+    }
+    if (final === 'K') {
+      ensureRow();
+      const mode = Number(String(params || '0').replace(/[^\d]/g, '') || 0);
+      const line = lines[row] || '';
+      if (mode === 1) lines[row] = line.slice(col);
+      else if (mode === 2) {
+        lines[row] = '';
+        col = 0;
+      } else {
+        lines[row] = line.slice(0, col);
+      }
+      return;
+    }
+    if (final === 'J' && String(params || '').includes('2')) {
+      lines.splice(0, lines.length, '');
+      row = 0;
+      col = 0;
+    }
+  };
+
+  for (let i = 0; i < input.length;) {
+    const ch = input[i];
+    if (ch === '\x1b' && input[i + 1] === '[') {
+      let end = i + 2;
+      while (end < input.length && !/[\x40-\x7e]/.test(input[end])) end += 1;
+      if (end < input.length) {
+        handleCsi(input.slice(i + 2, end), input[end]);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (ch === '\x1b' && input[i + 1] === ']') {
+      const bel = input.indexOf('\x07', i + 2);
+      const st = input.indexOf('\x1b\\', i + 2);
+      const end = bel >= 0 && (st < 0 || bel < st) ? bel + 1 : (st >= 0 ? st + 2 : -1);
+      if (end > 0) {
+        i = end;
+        continue;
+      }
+    }
+    if (ch === '\x9b') {
+      let end = i + 1;
+      while (end < input.length && !/[\x40-\x7e]/.test(input[end])) end += 1;
+      if (end < input.length) {
+        handleCsi(input.slice(i + 1, end), input[end]);
+        i = end + 1;
+        continue;
+      }
+    }
+    writeChar(ch);
+    i += 1;
+  }
+
+  return trimTerminalState(stripAnsi(lines.join('\n')));
 }
 
 export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
@@ -296,13 +487,18 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     const stream: IdeToolLogStream = msg.stream === 'stderr' ? 'stderr' : 'stdout';
     const last = tool.logs[tool.logs.length - 1];
     if (last && last.stream === stream) {
-      last.text += msg.text;
+      last.terminalText = applyTerminalDelta(last.terminalText ?? last.text, msg.text);
+      last.text = compactToolLogText(last.terminalText);
     } else {
-      tool.logs.push({ stream, text: msg.text });
+      const terminalText = applyTerminalDelta('', msg.text);
+      tool.logs.push({ stream, terminalText, text: compactToolLogText(terminalText) });
     }
-    while (tool.logs.length > 80) tool.logs.shift();
+    while (tool.logs.length > TOOL_LOG_MAX_ENTRIES) tool.logs.shift();
     const current = tool.logs[tool.logs.length - 1];
-    if (current && current.text.length > 12000) current.text = current.text.slice(-12000);
+    if (current?.terminalText) {
+      current.terminalText = trimTerminalState(current.terminalText);
+      current.text = compactToolLogText(current.terminalText);
+    }
     touchTimeline();
   }
 
@@ -469,6 +665,11 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         finishTool(msg);
         setStatus(msg.is_error ? '工具返回错误' : '思考中...');
       }],
+      ['ide:task-saved', (raw: unknown) => {
+        const msg = raw as IdeTaskSavedMessage;
+        if (!matchesCurrentRun(msg)) return;
+        options.onTaskSaved?.(msg);
+      }],
       ['ide:done', (raw: unknown) => {
         const msg = raw as StreamMessage & { taskStatus?: string };
         if (!matchesCurrentRun(msg)) return;
@@ -587,7 +788,18 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     return '完成';
   }
 
-  function emitIdeMessage(sock: Socket, text: string): void {
+  function buildOutgoingMessagePayload(): IdeOutgoingMessagePayload {
+    const approvalMode = typeof options.approvalMode === 'function'
+      ? options.approvalMode()
+      : options.approvalMode;
+    return {
+      context: options.context?.() || {},
+      ...(approvalMode ? { approvalMode } : {}),
+      ...(options.messagePayload?.() || {}),
+    };
+  }
+
+  function emitIdeMessage(sock: Socket, text: string, payload: IdeOutgoingMessagePayload): void {
     sendAckHandle = window.setTimeout(() => {
       appendAssistantLine('ide:message 已发送但未收到后端确认，请检查后端 Socket handler', 'error');
       setStatus('启动超时');
@@ -597,8 +809,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     sock.emit('ide:message', {
       sessionId,
       message: text,
-      context: options.context?.() || {},
-      ...(options.messagePayload?.() || {}),
+      ...payload,
     }, (ack: { ok?: boolean; error?: string } | undefined) => {
       if (sendAckHandle !== null) {
         window.clearTimeout(sendAckHandle);
@@ -612,9 +823,9 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     });
   }
 
-  function sendWhenSocketReady(sock: Socket, text: string): void {
+  function sendWhenSocketReady(sock: Socket, text: string, payload: IdeOutgoingMessagePayload): void {
     if (sock.connected) {
-      emitIdeMessage(sock, text);
+      emitIdeMessage(sock, text, payload);
       return;
     }
 
@@ -625,7 +836,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         sendConnectHandle = null;
       }
       pendingConnectSend = null;
-      emitIdeMessage(sock, text);
+      emitIdeMessage(sock, text, payload);
     };
     sock.once('connect', pendingConnectSend);
     sock.connect();
@@ -644,6 +855,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     if (!text || isRunning.value) return;
 
     const sock = bindSocket();
+    const payload = buildOutgoingMessagePayload();
     pushUserMessage(text);
     inputText.value = '';
     currentAssistant = null;
@@ -654,7 +866,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     currentTextHadDelta = false;
     isRunning.value = true;
     setStatus('启动中...');
-    sendWhenSocketReady(sock, text);
+    sendWhenSocketReady(sock, text, payload);
   }
 
   function prefillAndSend(message: string, onOpen?: () => void): void {

@@ -35,6 +35,7 @@ const { createApp } = require('./src/app/createApp');
 const { createServer } = require('./src/app/createServer');
 const { errorHandler } = require('./src/middleware/error.middleware');
 const { createHostRepository } = require('./src/repositories/host.repository');
+const { createAiTaskRepository } = require('./src/repositories/ai-task.repository');
 const { createScriptRepository } = require('./src/repositories/script.repository');
 const { createAiRouter } = require('./src/routes/ai.routes');
 const { createAuditRouter } = require('./src/routes/audit.routes');
@@ -49,6 +50,7 @@ const { createProbeRelayAdminRouter, createProbeRelayPublicRouter } = require('.
 const { createProbeTrafficRouter } = require('./src/routes/probe-traffic.routes');
 const { createProbeAlertRouter } = require('./src/routes/probe-alert.routes');
 const { createProbeDiagRouter } = require('./src/routes/probe-diag.routes');
+const { createAiTaskRouter } = require('./src/routes/ai-task.routes');
 const { createScriptRouter } = require('./src/routes/script.routes');
 const { createCliSandbox } = require('./src/agents/cli-sandbox');
 const { createAgentProviders } = require('./src/agents/providers');
@@ -60,6 +62,7 @@ const { createAuditService } = require('./src/services/audit.service');
 const { createBridgeService } = require('./src/services/bridge.service');
 const { createCommandGuard } = require('./src/ai/command-safety');
 const { createHarness } = require('./src/harness');
+const { createAiTaskService } = require('./src/services/ai-task.service');
 const { createScriptService } = require('./src/services/script.service');
 const { createSshPool } = require('./src/services/ssh-pool.service');
 const { createSshShellPool } = require('./src/services/ssh-shell-pool.service');
@@ -114,6 +117,7 @@ const db = createDatabase(path.join(dataDir, '1shell.db'), { logger: log });
 const app = createApp(ROOT_DIR);
 const { io, server } = createServer(app);
 const hostRepository = createHostRepository(HOSTS_FILE, db);
+const aiTaskRepository = createAiTaskRepository(db);
 const scriptRepository = createScriptRepository(db);
 const secretService = createSecretService({ db });
 const proxyConfigStore = createProxyConfigStore(dataDir);
@@ -148,6 +152,7 @@ const probeAgentInstallerService = createProbeAgentInstallerService({ rootDir: R
 const probeRelayInstallerService = createProbeRelayInstallerService({ rootDir: ROOT_DIR, hostService, bridgeService, probeRelayService });
 const fileService = createFileService({ hostService, probeAgentService });
 const ipFilterService = createIpFilterService({ db });
+const aiTaskService = createAiTaskService({ aiTaskRepository });
 const scriptService = createScriptService({ scriptRepository, hostService, bridgeService, auditService });
 const libraryService = createLibraryService({ skillRegistry });
 const mcpRegistry = createMcpRegistry({ dataDir });
@@ -175,6 +180,7 @@ const ideTools = createIdeTools({
   localMcpService,
   localMcpDeployer,
   scriptService,
+  aiTaskService,
   fileService,
   probeService,
   probeAgentService,
@@ -186,6 +192,7 @@ const ideTools = createIdeTools({
   dataDir,
   cliSandbox,
   harness,
+  agentRuntime,
 });
 const ideService = createIdeService({
   ideTools,
@@ -274,6 +281,7 @@ app.use('/api', createRemoteMcpRouter({ remoteMcpService, mcpService }));
 app.use('/api', createSecuritySettingsRouter({ securitySettingsService, bridgeService, hostService, auditService }));
 app.use('/api', createFileRouter({ fileService }));
 app.use('/api', createIpFilterRouter({ ipFilterService }));
+app.use('/api', createAiTaskRouter({ aiTaskService }));
 app.use('/api', createScriptRouter({ scriptService, aiService }));
 app.use('/api', createSkillRouter({ libraryService, skillRunner, claudeCodeSkillRegistry, aiService }));
 app.use('/api', createMcpRegistryRouter({ mcpRegistry, localMcpService, localMcpDeployer }));

@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed } from 'vue';
 
 import AppIcon from '@/components/AppIcon.vue';
@@ -273,7 +273,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
 }
 
-:global(html.dark) .ide-approval-card {
+:global(.dark) .ide-approval-card {
   border-color: rgba(71, 85, 105, 0.9);
   background: #111827;
   color: #e5e7eb;
@@ -340,7 +340,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   font-weight: 700;
 }
 
-:global(html.dark) .ide-approval-kicker {
+:global(.dark) .ide-approval-kicker {
   color: #94a3b8;
 }
 
@@ -364,7 +364,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   word-break: break-word;
 }
 
-:global(html.dark) .ide-approval-copy p {
+:global(.dark) .ide-approval-copy p {
   color: #cbd5e1;
 }
 
@@ -406,19 +406,19 @@ function onCustomKeydown(event: KeyboardEvent): void {
   background: rgba(254, 226, 226, 0.84);
 }
 
-:global(html.dark) .ide-approval-chip {
+:global(.dark) .ide-approval-chip {
   border-color: rgba(71, 85, 105, 0.9);
   color: #cbd5e1;
   background: rgba(15, 23, 42, 0.76);
 }
 
-:global(html.dark) .ide-approval-chip--warning {
+:global(.dark) .ide-approval-chip--warning {
   border-color: rgba(245, 158, 11, 0.36);
   color: #fbbf24;
   background: rgba(120, 53, 15, 0.24);
 }
 
-:global(html.dark) .ide-approval-chip--danger {
+:global(.dark) .ide-approval-chip--danger {
   border-color: rgba(248, 113, 113, 0.36);
   color: #fca5a5;
   background: rgba(127, 29, 29, 0.28);
@@ -443,7 +443,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   font-weight: 800;
 }
 
-:global(html.dark) .ide-approval-command-head {
+:global(.dark) .ide-approval-command-head {
   color: #94a3b8;
 }
 
@@ -488,25 +488,25 @@ function onCustomKeydown(event: KeyboardEvent): void {
   word-break: break-word;
 }
 
-:global(html.dark) .ide-approval-note {
+:global(.dark) .ide-approval-note {
   border-color: rgba(71, 85, 105, 0.82);
   background: rgba(15, 23, 42, 0.58);
 }
 
-:global(html.dark) .ide-approval-note--ai {
+:global(.dark) .ide-approval-note--ai {
   border-color: rgba(56, 189, 248, 0.22);
   background: rgba(14, 165, 233, 0.1);
 }
 
-:global(html.dark) .ide-approval-note-title {
+:global(.dark) .ide-approval-note-title {
   color: #cbd5e1;
 }
 
-:global(html.dark) .ide-approval-note--ai .ide-approval-note-title {
+:global(.dark) .ide-approval-note--ai .ide-approval-note-title {
   color: #7dd3fc;
 }
 
-:global(html.dark) .ide-approval-note p {
+:global(.dark) .ide-approval-note p {
   color: #dbeafe;
 }
 
@@ -540,7 +540,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   word-break: break-word;
 }
 
-:global(html.dark) .ide-approval-detail {
+:global(.dark) .ide-approval-detail {
   color: #94a3b8;
 }
 
@@ -679,40 +679,40 @@ function onCustomKeydown(event: KeyboardEvent): void {
   opacity: 0.45;
 }
 
-:global(html.dark) .ide-approval-decision,
-:global(html.dark) .ide-approval-custom-decision {
+:global(.dark) .ide-approval-decision,
+:global(.dark) .ide-approval-custom-decision {
   border-color: rgba(71, 85, 105, 0.9);
   background: rgba(15, 23, 42, 0.74);
   color: #e5e7eb;
 }
 
-:global(html.dark) .ide-approval-decision:hover {
+:global(.dark) .ide-approval-decision:hover {
   border-color: rgba(96, 165, 250, 0.42);
   background: rgba(30, 41, 59, 0.88);
 }
 
-:global(html.dark) .ide-approval-decision small {
+:global(.dark) .ide-approval-decision small {
   color: #94a3b8;
 }
 
-:global(html.dark) .ide-approval-index {
+:global(.dark) .ide-approval-index {
   background: #334155;
   color: #f8fafc;
 }
 
-:global(html.dark) .ide-approval-input {
+:global(.dark) .ide-approval-input {
   border-color: rgba(71, 85, 105, 0.9);
   background: rgba(2, 6, 23, 0.82);
   color: #e5e7eb;
 }
 
-:global(html.dark) .ide-approval-send {
+:global(.dark) .ide-approval-send {
   border-color: rgba(96, 165, 250, 0.38);
   background: rgba(15, 23, 42, 0.9);
   color: #93c5fd;
 }
 
-:global(html.dark) .ide-approval-send:hover:not(:disabled) {
+:global(.dark) .ide-approval-send:hover:not(:disabled) {
   background: rgba(30, 64, 175, 0.22);
 }
 

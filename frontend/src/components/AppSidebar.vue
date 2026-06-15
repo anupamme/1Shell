@@ -15,7 +15,7 @@ const navItems: NavItem[] = [
   { to: '/console',      label: '主控', icon: 'console',    title: '主控台' },
   { to: '/ide',          label: 'IDE',  icon: 'robot',      title: '1Shell AI IDE' },
   { to: '/hosts',        label: '主机', icon: 'server',     title: 'VPS 仓库' },
-  { to: '/scripts',      label: '脚本', icon: 'terminal',   title: '脚本库' },
+  { to: '/features',     label: '功能', icon: 'wrench',     title: 'AI 任务与程序' },
   { to: '/skills',       label: '仓库', icon: 'package',    title: '技能仓库' },
   { to: '/mcp-hub',      label: 'MCP',  icon: 'plug',       title: 'MCP Hub' },
   { to: '/cli-setup',    label: 'AI',   icon: 'spark',      title: 'AI 配置' },

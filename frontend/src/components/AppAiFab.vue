@@ -1,11 +1,13 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 
 import AppIcon from '@/components/AppIcon.vue';
 import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
 import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
-import { useIdeChat } from '@/composables/useIdeChat';
+import IdeApprovalModeMenu from '@/components/ide/IdeApprovalModeMenu.vue';
+import { useConfirm } from '@/composables/useConfirm';
+import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
 interface ModuleContext {
@@ -20,12 +22,19 @@ interface Pos {
 }
 
 const route = useRoute();
+const { confirm } = useConfirm();
 const moduleCtx = ref<ModuleContext>({ name: '1Shell', icon: 'robot', hint: '' });
+const approvalMode = ref<IdeApprovalMode>('manual');
 const ide = useIdeChat({
   sessionPrefix: 'fab',
+  approvalMode: () => approvalMode.value,
   context: () => ({
     module: moduleCtx.value.name,
     moduleHint: moduleCtx.value.hint,
+  }),
+  messagePayload: () => ({
+    entry: 'core',
+    approvalMode: approvalMode.value,
   }),
 });
 
@@ -34,7 +43,7 @@ const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
 
 const MODULE_MAP: Record<string, ModuleContext> = {
   console: { name: '主控', icon: 'console', hint: '当前在主控页面。可结合主机和终端上下文处理运维目标。' },
-  scripts: { name: '脚本库', icon: 'terminal', hint: '当前在脚本库页面。可管理和执行 Shell 脚本。' },
+  features: { name: '功能', icon: 'wrench', hint: '当前在功能页面。可管理 AI 任务和纯代码程序。' },
   skills: { name: 'Skill 仓库', icon: 'package', hint: '当前在 Skill 仓库页面。可查看和运行已有能力。' },
   probe: { name: '探针监控', icon: 'radio', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
   audit: { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },
@@ -192,6 +201,20 @@ function onSecretRefSubmit(secretRef: string): void {
   ide.approveCustom();
 }
 
+async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
+  if (ide.isRunning.value || approvalMode.value === mode) return;
+  if (mode === 'full_access') {
+    const ok = await confirm({
+      title: '启用完全访问权限',
+      message: '完全访问权限会对本次 1Shell AI 对话预授权更高风险的文件、命令和网络操作。确定要启用吗？',
+      okText: '启用完全访问权限',
+      okClass: 'bg-red-600 hover:bg-red-700 text-white',
+    });
+    if (!ok) return;
+  }
+  approvalMode.value = mode;
+}
+
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize);
   ide.dispose();
@@ -283,7 +306,15 @@ onMounted(() => {
           @keydown="onInputKeydown"
         />
         <div class="ai-fab-bottom-row">
-          <span class="ai-fab-status">{{ ide.statusText.value }}</span>
+          <div class="ai-fab-left-actions">
+            <IdeApprovalModeMenu
+              :model-value="approvalMode"
+              :disabled="ide.isRunning.value"
+              density="compact"
+              @update:model-value="setApprovalMode"
+            />
+            <span class="ai-fab-status">{{ ide.statusText.value }}</span>
+          </div>
           <button
             v-if="!ide.isRunning.value"
             type="button"
@@ -359,7 +390,7 @@ onMounted(() => {
   backdrop-filter: blur(18px);
 }
 
-:global(html.dark) .ai-fab-panel {
+:global(.dark) .ai-fab-panel {
   background: rgba(15, 23, 42, 0.94);
   color: #e2e8f0;
   border-color: rgba(71, 85, 105, 0.78);
@@ -376,7 +407,7 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.72);
 }
 
-:global(html.dark) .ai-fab-header {
+:global(.dark) .ai-fab-header {
   background: rgba(15, 23, 42, 0.72);
   border-bottom-color: rgba(51, 65, 85, 0.72);
 }
@@ -393,7 +424,7 @@ onMounted(() => {
   border: 1px solid #bae6fd;
 }
 
-:global(html.dark) .ai-fab-header-icon {
+:global(.dark) .ai-fab-header-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.24);
@@ -407,7 +438,7 @@ onMounted(() => {
   color: #0f172a;
 }
 
-:global(html.dark) .ai-fab-title {
+:global(.dark) .ai-fab-title {
   color: #e2e8f0;
 }
 
@@ -457,10 +488,16 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-:global(html.dark) .ai-fab-mini-btn {
+:global(.dark) .ai-fab-mini-btn {
   background: rgba(15, 23, 42, 0.72);
   border-color: rgba(71, 85, 105, 0.8);
   color: #cbd5e1;
+}
+
+:global(.dark) .ai-fab-mini-btn:hover:not(:disabled) {
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(30, 41, 59, 0.84);
 }
 
 .ai-fab-chat {
@@ -502,11 +539,11 @@ onMounted(() => {
   line-height: 1.5;
 }
 
-:global(html.dark) .ai-fab-placeholder {
+:global(.dark) .ai-fab-placeholder {
   color: #94a3b8;
 }
 
-:global(html.dark) .ai-fab-placeholder strong {
+:global(.dark) .ai-fab-placeholder strong {
   color: #e2e8f0;
 }
 
@@ -518,7 +555,7 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.78);
 }
 
-:global(html.dark) .ai-fab-input-area {
+:global(.dark) .ai-fab-input-area {
   background: rgba(15, 23, 42, 0.78);
   border-top-color: rgba(51, 65, 85, 0.72);
 }
@@ -548,7 +585,7 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-:global(html.dark) .ai-fab-input {
+:global(.dark) .ai-fab-input {
   background: rgba(2, 6, 23, 0.72);
   border-color: rgba(71, 85, 105, 0.9);
   color: #e2e8f0;
@@ -561,6 +598,13 @@ onMounted(() => {
   gap: 10px;
 }
 
+.ai-fab-left-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ai-fab-status {
   min-width: 0;
   overflow: hidden;
@@ -570,7 +614,7 @@ onMounted(() => {
   font-size: 12px;
 }
 
-:global(html.dark) .ai-fab-status {
+:global(.dark) .ai-fab-status {
   color: #94a3b8;
 }
 
@@ -604,6 +648,16 @@ onMounted(() => {
   border-color: rgba(185, 28, 28, 0.54);
 }
 
+:global(.dark) .ai-fab-stop-btn {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.24);
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+:global(.dark) .ai-fab-stop-btn:hover {
+  background: rgba(127, 29, 29, 0.38);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -625,6 +679,20 @@ onMounted(() => {
 
   .ai-fab-header {
     flex-wrap: wrap;
+  }
+
+  .ai-fab-bottom-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ai-fab-left-actions {
+    justify-content: space-between;
+  }
+
+  .ai-fab-send-btn,
+  .ai-fab-stop-btn {
+    width: 100%;
   }
 }
 </style>

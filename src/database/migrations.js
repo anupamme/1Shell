@@ -413,6 +413,71 @@ const migrations = [
       `);
     },
   },
+  {
+    version: 10,
+    name: 'ai tasks: lightweight task templates and prepared runs',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ai_tasks (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          inputs TEXT NOT NULL DEFAULT '[]',
+          steps TEXT NOT NULL DEFAULT '[]',
+          run_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_tasks_updated_at ON ai_tasks(updated_at);
+
+        CREATE TABLE IF NOT EXISTS ai_task_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL,
+          task_name TEXT,
+          input_values TEXT NOT NULL DEFAULT '{}',
+          prepared_prompt TEXT,
+          status TEXT NOT NULL DEFAULT 'prepared',
+          summary TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          finished_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_task_runs_task_id ON ai_task_runs(task_id);
+        CREATE INDEX IF NOT EXISTS idx_ai_task_runs_created_at ON ai_task_runs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_ai_task_runs_status ON ai_task_runs(status);
+      `);
+    },
+  },
+  {
+    version: 11,
+    name: 'ai tasks: authoring evidence side records',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ai_task_authoring_evidence (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL,
+          session_id TEXT,
+          agent_run_id TEXT,
+          mode TEXT,
+          verified INTEGER NOT NULL DEFAULT 0,
+          summary TEXT,
+          validated_scope TEXT NOT NULL DEFAULT '[]',
+          actions TEXT NOT NULL DEFAULT '[]',
+          verification TEXT NOT NULL DEFAULT '[]',
+          limitations TEXT NOT NULL DEFAULT '[]',
+          cleanup TEXT NOT NULL DEFAULT '{}',
+          payload TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_task_authoring_evidence_task_id ON ai_task_authoring_evidence(task_id);
+        CREATE INDEX IF NOT EXISTS idx_ai_task_authoring_evidence_agent_run_id ON ai_task_authoring_evidence(agent_run_id);
+        CREATE INDEX IF NOT EXISTS idx_ai_task_authoring_evidence_created_at ON ai_task_authoring_evidence(created_at);
+      `);
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

@@ -571,11 +571,13 @@ function createOneShellCoreTools(deps = {}) {
     // IDE 是人在场路径，risk-rules 的 approval 动作接入 IDE 审批弹窗；外部 Agent 路径保持无人审。
     if (deps.harness?.dispatch) {
       try {
-        const canRequestApproval = context.source === 'ide' && typeof context.requestApproval === 'function';
+        const canRequestApproval = context.allowApproval !== false && context.source === 'ide' && typeof context.requestApproval === 'function';
         const ctx = deps.harness.buildContext(context.source === 'mcp' ? 'mcp' : (context.source || 'core'), {
           hostId,
           allowApproval: canRequestApproval,
           approvalGranted: context.approvalGranted === true || context.preApproved === true,
+          preApproved: context.preApproved === true,
+          approvalMode: context.approvalMode || '',
           requestApproval: canRequestApproval ? context.requestApproval : undefined,
           runId: context.runId,
           sessionId: context.sessionId,

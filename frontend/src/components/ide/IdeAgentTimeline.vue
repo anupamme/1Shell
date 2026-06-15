@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import AppIcon from '@/components/AppIcon.vue';
 import {
   type IdeChatMessage,
@@ -67,6 +67,17 @@ function shorten(text: string, maxLength = props.density === 'compact' ? 86 : 12
 
 function toolDisplayName(tool: IdeToolTimelineItem): string {
   const name = tool.name.toLowerCase();
+  const exactNames: Record<string, string> = {
+    create_directory: '创建目录',
+    list_remote_dir: '列出目录',
+    read_remote_file: '读取文件',
+    write_remote_file: '写入文件',
+    preview_ai_task: '预览任务',
+    create_ai_task: '保存任务',
+    update_ai_task: '更新任务',
+    get_ai_task: '读取任务',
+  };
+  if (exactNames[name]) return exactNames[name];
   if (name.includes('execute') || name.includes('command') || name === 'shell') return '执行命令';
   if (name.includes('probe') || name.includes('metric') || name.includes('monitor')) return '读取探针数据';
   if (name.includes('host')) return '读取主机信息';
@@ -74,6 +85,7 @@ function toolDisplayName(tool: IdeToolTimelineItem): string {
   if (name.includes('upload')) return '上传文件';
   if (name.includes('read') && name.includes('file')) return '读取文件';
   if (name.includes('write') && name.includes('file')) return '写入文件';
+  if (name.includes('create') && name.includes('dir')) return '创建目录';
   if (name.includes('list') || name.includes('dir')) return '列出目录';
   if (name.includes('approval')) return '请求确认';
   if (name.includes('secret')) return '请求密钥引用';
@@ -161,9 +173,17 @@ function hasToolResult(tool: IdeToolTimelineItem): boolean {
   return tool.result !== undefined && tool.result !== null && String(tool.result).trim() !== '';
 }
 
+function stripTerminalControl(value: string): string {
+  return value
+    .replace(/(?:\uFFFD|\?)\[/g, '\x1b[')
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x9b[0-?]*[ -/]*[@-~]/g, '');
+}
+
 function formatToolValue(value: unknown, maxLength = props.density === 'compact' ? 1800 : 3600): string {
   if (value === undefined || value === null) return '';
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  const text = stripTerminalControl(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
   if (!text) return '';
   return text.length > maxLength ? `${text.slice(0, maxLength)}\n...[truncated]` : text;
 }
@@ -325,7 +345,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   color: #64748b;
 }
 
-:global(html.dark) .ide-agent-message-meta {
+:global(.dark) .ide-agent-message-meta {
   color: #94a3b8;
 }
 
@@ -349,14 +369,14 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   border-color: #0f172a;
 }
 
-:global(html.dark) .ide-agent-bubble {
+:global(.dark) .ide-agent-bubble {
   background: rgba(15, 23, 42, 0.86);
   color: #e2e8f0;
   border-color: rgba(51, 65, 85, 0.85);
   box-shadow: none;
 }
 
-:global(html.dark) .ide-agent-message--user .ide-agent-bubble {
+:global(.dark) .ide-agent-message--user .ide-agent-bubble {
   background: #e2e8f0;
   color: #0f172a;
   border-color: #e2e8f0;
@@ -385,7 +405,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   background: rgba(248, 250, 252, 0.74);
 }
 
-:global(html.dark) .ide-agent-thinking-card {
+:global(.dark) .ide-agent-thinking-card {
   background: rgba(15, 23, 42, 0.62);
   border-color: rgba(71, 85, 105, 0.72);
 }
@@ -424,7 +444,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   padding: 7px 9px;
 }
 
-:global(html.dark) .ide-agent-thinking-summary {
+:global(.dark) .ide-agent-thinking-summary {
   color: #94a3b8;
 }
 
@@ -446,7 +466,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   font-weight: 700;
 }
 
-:global(html.dark) .ide-agent-thinking-title span:last-child {
+:global(.dark) .ide-agent-thinking-title span:last-child {
   color: #7dd3fc;
   border-color: rgba(56, 189, 248, 0.22);
   background: rgba(14, 165, 233, 0.12);
@@ -468,7 +488,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   border: 1px solid #bae6fd;
 }
 
-:global(html.dark) .ide-agent-thinking-icon {
+:global(.dark) .ide-agent-thinking-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.22);
@@ -498,7 +518,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   font-size: 11.5px;
 }
 
-:global(html.dark) .ide-agent-thinking-markdown {
+:global(.dark) .ide-agent-thinking-markdown {
   border-top-color: rgba(51, 65, 85, 0.72);
   color: #cbd5e1;
 }
@@ -509,7 +529,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
 }
 
-:global(html.dark) .ide-agent-tool-card {
+:global(.dark) .ide-agent-tool-card {
   background: rgba(15, 23, 42, 0.82);
   border-color: rgba(71, 85, 105, 0.84);
   box-shadow: none;
@@ -560,19 +580,19 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   border-color: #fecaca;
 }
 
-:global(html.dark) .ide-agent-tool-icon {
+:global(.dark) .ide-agent-tool-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.25);
 }
 
-:global(html.dark) .ide-agent-tool--done .ide-agent-tool-icon {
+:global(.dark) .ide-agent-tool--done .ide-agent-tool-icon {
   color: #6ee7b7;
   background: rgba(16, 185, 129, 0.14);
   border-color: rgba(52, 211, 153, 0.24);
 }
 
-:global(html.dark) .ide-agent-tool--error .ide-agent-tool-icon {
+:global(.dark) .ide-agent-tool--error .ide-agent-tool-icon {
   color: #fecaca;
   background: rgba(127, 29, 29, 0.24);
   border-color: rgba(248, 113, 113, 0.3);
@@ -635,19 +655,19 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   background: rgba(254, 226, 226, 0.8);
 }
 
-:global(html.dark) .ide-agent-tool-status {
+:global(.dark) .ide-agent-tool-status {
   color: #7dd3fc;
   border-color: rgba(56, 189, 248, 0.2);
   background: rgba(14, 165, 233, 0.12);
 }
 
-:global(html.dark) .ide-agent-tool--done .ide-agent-tool-status {
+:global(.dark) .ide-agent-tool--done .ide-agent-tool-status {
   color: #6ee7b7;
   border-color: rgba(52, 211, 153, 0.22);
   background: rgba(16, 185, 129, 0.14);
 }
 
-:global(html.dark) .ide-agent-tool--error .ide-agent-tool-status {
+:global(.dark) .ide-agent-tool--error .ide-agent-tool-status {
   color: #fecaca;
   border-color: rgba(248, 113, 113, 0.26);
   background: rgba(127, 29, 29, 0.24);
@@ -680,7 +700,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   opacity: 0.45;
 }
 
-:global(html.dark) .ide-agent-tool-subtitle {
+:global(.dark) .ide-agent-tool-subtitle {
   color: #94a3b8;
 }
 
@@ -700,7 +720,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   padding-top: 10px;
 }
 
-:global(html.dark) .ide-agent-tool-section {
+:global(.dark) .ide-agent-tool-section {
   border-top-color: rgba(51, 65, 85, 0.82);
 }
 
@@ -717,8 +737,8 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   cursor: pointer;
 }
 
-:global(html.dark) .ide-agent-tool-section summary,
-:global(html.dark) .ide-agent-tool-section-title {
+:global(.dark) .ide-agent-tool-section summary,
+:global(.dark) .ide-agent-tool-section-title {
   color: #cbd5e1;
 }
 
@@ -735,7 +755,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   word-break: break-word;
 }
 
-:global(html.dark) .ide-agent-tool-section--note p {
+:global(.dark) .ide-agent-tool-section--note p {
   border-color: rgba(56, 189, 248, 0.2);
   background: rgba(14, 165, 233, 0.1);
   color: #dbeafe;
@@ -744,7 +764,9 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 .ide-agent-tool-section pre,
 .ide-agent-log pre {
   margin: 0;
+  max-height: 340px;
   overflow-x: auto;
+  overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
   border-radius: 8px;
@@ -759,12 +781,13 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 
 .ide-agent-timeline--compact .ide-agent-tool-section pre,
 .ide-agent-timeline--compact .ide-agent-log pre {
+  max-height: 240px;
   padding: 8px;
   font-size: 11px;
 }
 
-:global(html.dark) .ide-agent-tool-section pre,
-:global(html.dark) .ide-agent-log pre {
+:global(.dark) .ide-agent-tool-section pre,
+:global(.dark) .ide-agent-log pre {
   border-color: rgba(71, 85, 105, 0.86);
   background: rgba(2, 6, 23, 0.66);
   color: #e2e8f0;
@@ -796,12 +819,12 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   background: rgba(220, 38, 38, 0.1);
 }
 
-:global(html.dark) .ide-agent-log-stream {
+:global(.dark) .ide-agent-log-stream {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.14);
 }
 
-:global(html.dark) .ide-agent-log--stderr .ide-agent-log-stream {
+:global(.dark) .ide-agent-log--stderr .ide-agent-log-stream {
   color: #fecaca;
   background: rgba(220, 38, 38, 0.18);
 }

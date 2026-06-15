@@ -246,6 +246,13 @@ const CAPABILITY_RULES = {
     ]),
     commandCheck: null,
   },
+  task_authoring: {
+    label: 'AI 任务创作',
+    allowedTools: new Set([
+      'preview_ai_task', 'create_ai_task', 'update_ai_task', 'get_ai_task',
+    ]),
+    commandCheck: null,
+  },
 };
 
 const DEFAULT_CAPABILITIES = ['exec_command'];

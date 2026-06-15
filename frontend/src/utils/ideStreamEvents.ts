@@ -31,6 +31,7 @@ const TYPE_TO_LEGACY_EVENT: Record<string, string> = {
   authoring_session: 'ide:authoring-session',
   authoring_interaction: 'ide:authoring-interaction',
   authoring_artifact: 'ide:authoring-artifact',
+  task_saved: 'ide:task-saved',
   mcp_status: 'ide:mcp-status',
 };
 

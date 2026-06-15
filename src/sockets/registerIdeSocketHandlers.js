@@ -46,6 +46,7 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
         claudeCodeEnabled: payload.claudeCodeEnabled,
         unlimitedTurns: payload.unlimitedTurns,
         entry: payload.entry || payload.source || '',
+        approvalMode: payload.approvalMode || payload.approval_mode || '',
       })).catch((err) => {
         emitIdeEvent(socket, 'ide:error', { sessionId, error: err?.message || 'ide:message 处理失败' });
       });

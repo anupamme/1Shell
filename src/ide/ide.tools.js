@@ -14,7 +14,7 @@ function commandHasTruncationMarker(command) {
   return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
 }
 
-function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness }) {
+function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness, agentRuntime }) {
   const coreTools = createOneShellCoreTools({
     bridgeService,
     hostService,
@@ -229,6 +229,100 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       },
     },
   ];
+
+  const TASK_AUTHORING_TOOL_SCHEMAS = [
+    {
+      name: 'preview_ai_task',
+      description:
+        '预览并规范化一个 AI 任务模板，但不保存。' +
+        '\n任务模板只能表达输入项和流程步骤，不是 DSL、调度器、权限系统或执行运行时。',
+      input_schema: taskPayloadSchema(),
+    },
+    {
+      name: 'create_ai_task',
+      description:
+        '创建一个新的 1Shell AI 任务模板。' +
+        '\n只保存 name / description / inputs / steps；真正执行仍由纯 1Shell AI 和现有工具链完成。',
+      input_schema: taskPayloadSchema(),
+    },
+    {
+      name: 'update_ai_task',
+      description:
+        '更新一个已有 1Shell AI 任务模板。' +
+        '\n仅在用户明确要修改已有任务，或刚创建后需要修正时使用。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '要更新的 AI 任务 ID' },
+          ...taskPayloadSchema().properties,
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'get_ai_task',
+      description: '读取一个已有 1Shell AI 任务模板，用于继续编辑或确认保存结果。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'AI 任务 ID' },
+        },
+        required: ['id'],
+      },
+    },
+  ];
+
+  function taskPayloadSchema() {
+    return {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '任务名称' },
+        description: { type: 'string', description: '任务说明，可为空' },
+        inputs: {
+          type: 'array',
+          description: '用户执行任务前需要填写的输入项。保持简单，不要设计 DSL。',
+          items: {
+            type: 'object',
+            properties: {
+              key: { type: 'string', description: '稳定字段名，如 host / service_name / api_token' },
+              label: { type: 'string', description: '展示给用户看的名称' },
+              type: { type: 'string', description: 'text / textarea / number / boolean / select / secret / host，也允许未来自定义类型' },
+              required: { type: 'boolean', description: '是否必填' },
+              default: { type: 'string', description: '默认值，可选' },
+              placeholder: { type: 'string', description: '输入提示，可选' },
+              help: { type: 'string', description: '补充说明，可选' },
+              options: {
+                type: 'array',
+                description: 'type=select 时的选项',
+                items: {
+                  type: 'object',
+                  properties: {
+                    value: { type: 'string' },
+                    label: { type: 'string' },
+                  },
+                  required: ['value'],
+                },
+              },
+            },
+            required: ['key', 'label', 'type'],
+          },
+        },
+        steps: {
+          type: 'array',
+          description: '流程步骤卡片。每一步是给 1Shell AI 的自然语言执行说明。',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: '步骤标题' },
+              instruction: { type: 'string', description: '步骤说明' },
+            },
+            required: ['title', 'instruction'],
+          },
+        },
+      },
+      required: ['name', 'inputs', 'steps'],
+    };
+  }
 
   function buildToolSchemas() {
     const seen = new Set();
@@ -590,15 +684,373 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     return verificationToolResult({ type: type || 'unknown', ok: false, status: 'unsupported', taskStatus: 'unverified', reason: input.reason, reasons: ['unsupported_verifier_type'], evidence: `unsupported type: ${input.type || ''}` });
   }
 
-  async function handle(name, input, { socket, sessionId, runId, safeMode, session, signal, requestApproval, approvalGranted, onToolDelta }) {
+  const TASK_AUTHORING_NON_PRACTICE_TOOLS = new Set([
+    'preview_ai_task',
+    'create_ai_task',
+    'update_ai_task',
+    'get_ai_task',
+    'ask_user',
+    'request_secret',
+    'verify_outcome',
+    'list_hosts',
+    'list_artifacts',
+    'query_format',
+    'list_scripts',
+    'list_mcp_servers',
+    'query_audit',
+  ]);
+
+  function requireTaskAuthoringEvidence({ runId, sessionId, session, taskPayload }) {
+    if (!runId) return { ok: false, error: 'Cannot save AI task: missing AgentRun id for this /task session.' };
+    if (!agentRuntime?.getState) return { ok: false, error: 'Cannot save AI task: AgentRun trace is unavailable, so practice evidence cannot be verified.' };
+    const state = agentRuntime.getState(runId);
+    if (!state) return { ok: false, error: `Cannot save AI task: AgentRun trace not found (${runId}).` };
+
+    const verification = latestSuccessfulVerification(state);
+    if (!verification) {
+      return {
+        ok: false,
+        error: 'Cannot save AI task: no successful verify_outcome evidence was recorded in this /task AgentRun. Practice the workflow first, then verify it with command/http/file/port evidence.',
+      };
+    }
+
+    if (String(verification.type || '').toLowerCase() === 'manual') {
+      return {
+        ok: false,
+        error: 'Cannot save AI task: manual verification is not enough for task authoring. Use command/http/file_exists/port verification with external evidence.',
+      };
+    }
+
+    const practiceCalls = successfulPracticeToolCalls(state);
+    if (practiceCalls.length === 0) {
+      return {
+        ok: false,
+        error: 'Cannot save AI task: this /task run has verification, but no successful practice tool call before saving. Reading or writing the task record itself is not workflow practice.',
+      };
+    }
+
+    if (looksLikePersistenceOnlyVerification(verification)) {
+      return {
+        ok: false,
+        error: 'Cannot save AI task: DB/task persistence verification does not count as workflow verification.',
+      };
+    }
+
+    const scopeCheck = validateTaskPayloadAgainstPractice(taskPayload, verification, practiceCalls);
+    if (!scopeCheck.ok) return scopeCheck;
+
+    return {
+      ok: true,
+      evidence: {
+        mode: 'agent_run_practice',
+        verified: true,
+        sessionId,
+        agentRunId: runId,
+        summary: summarizeAuthoringEvidence(verification, practiceCalls),
+        validatedScope: inferValidatedScope(session, verification, practiceCalls),
+        actions: practiceCalls.map((call) => summarizePracticeToolCall(call)).filter(Boolean).slice(0, 30),
+        verification: [summarizeVerificationForEvidence(verification)],
+        limitations: ['Only the practiced path in this AgentRun is validated. Untested branches must be marked unverified.'],
+        cleanup: { required: false, status: 'not_recorded' },
+        payload: {
+          verification,
+          practiceToolCalls: practiceCalls.map((call) => ({
+            toolName: call.toolName || '',
+            hostId: inferPracticeHostId(call),
+            status: call.status || '',
+            ok: call.result?.ok === true,
+            startedAt: call.startedAt || '',
+            endedAt: call.endedAt || '',
+          })),
+        },
+      },
+    };
+  }
+
+  function latestSuccessfulVerification(state = {}) {
+    const candidates = [];
+    if (state.verification) candidates.push(state.verification);
+    if (state.memory?.verification) candidates.push(state.memory.verification);
+    if (state.runtimeState?.worldState?.verification) candidates.push(state.runtimeState.worldState.verification);
+    const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
+    for (const artifact of artifacts) {
+      if (artifact?.type === 'verification_result' && artifact.data) {
+        candidates.push({ ...artifact.data, evidence: artifact.content || artifact.data.evidence || '' });
+      }
+    }
+    return candidates
+      .reverse()
+      .find((item) => item?.ok === true || String(item?.status || '').toLowerCase() === 'passed') || null;
+  }
+
+  function successfulPracticeToolCalls(state = {}) {
+    const toolCalls = Array.isArray(state.toolCalls) ? state.toolCalls : [];
+    return toolCalls.filter((call) => {
+      const name = String(call?.toolName || '').trim();
+      if (!name || TASK_AUTHORING_NON_PRACTICE_TOOLS.has(name)) return false;
+      if (String(call.status || '') !== 'completed') return false;
+      if (call.result && call.result.ok !== true) return false;
+      return true;
+    });
+  }
+
+  function looksLikePersistenceOnlyVerification(verification = {}) {
+    const text = [
+      verification.type,
+      verification.target,
+      verification.reason,
+      verification.evidence,
+      Array.isArray(verification.reasons) ? verification.reasons.join(' ') : '',
+    ].map((item) => String(item || '').toLowerCase()).join('\n');
+    return /(get_ai_task|create_ai_task|update_ai_task|ai_task|ai task|sqlite|database|db persistence|saved task|task id)/i.test(text);
+  }
+
+  function summarizeAuthoringEvidence(verification, practiceCalls) {
+    const first = practiceCalls[0];
+    const last = practiceCalls[practiceCalls.length - 1];
+    return [
+      `Practiced ${practiceCalls.length} tool call(s) before saving.`,
+      first?.toolName ? `First practice tool: ${first.toolName}.` : '',
+      last?.toolName ? `Last practice tool: ${last.toolName}.` : '',
+      verification?.type ? `Verified by ${verification.type}.` : '',
+      verification?.target ? `Target: ${verification.target}.` : '',
+    ].filter(Boolean).join(' ');
+  }
+
+  function inferValidatedScope(session, verification, practiceCalls) {
+    const hostIds = [...new Set(practiceCalls.map(inferPracticeHostId).filter(Boolean))];
+    const scope = [];
+    if (hostIds.length) scope.push(`host(s): ${hostIds.join(', ')}`);
+    if (verification?.type) scope.push(`verification: ${verification.type}`);
+    if (verification?.target) scope.push(`target: ${verification.target}`);
+    if (session?.entry) scope.push(`entry: ${session.entry}`);
+    return scope.length ? scope : ['current /task AgentRun practice path'];
+  }
+
+  function summarizePracticeToolCall(call = {}) {
+    const input = call.args || {};
+    const hostId = inferPracticeHostId(call);
+    const detail = input.command || input.path || input.url || input.scriptId || '';
+    return [call.toolName || 'tool', hostId ? `host=${hostId}` : '', detail ? String(detail).slice(0, 500) : ''].filter(Boolean).join(' ');
+  }
+
+  function inferPracticeHostId(call = {}) {
+    const input = call.args || {};
+    return String(input.hostId || input.host_id || input.host || call.scope?.hostId || '').trim();
+  }
+
+  function validateTaskPayloadAgainstPractice(taskPayload, verification, practiceCalls) {
+    if (!taskPayload || typeof taskPayload !== 'object') return { ok: true };
+    const taskText = taskPayloadText(taskPayload);
+    if (!taskClaimsGithubDeployment(taskPayload, taskText)) return { ok: true };
+
+    const practiceText = practiceEvidenceText(practiceCalls, verification);
+    const repoUrls = extractGithubUrls(taskText);
+    const repoUrlWasUsed = repoUrls.length === 0 || repoUrls.some((url) => evidenceContainsUrl(practiceText, url));
+    const repoWorkflowWasPracticed = /(git\s+(clone|pull|fetch|checkout)|docker\s+build|docker\s+compose\s+build|\bbuild\s*:|https?:\/\/github\.com\/[^\s"'`),]+\.git)/i.test(practiceText);
+
+    if (repoUrlWasUsed && repoWorkflowWasPracticed) return { ok: true };
+
+    const imageOnlyHint = /(image\s*:|docker\s+pull|calciumion\/new-api|ghcr\.io\/|docker\.io\/)/i.test(practiceText);
+    return {
+      ok: false,
+      error: imageOnlyHint
+        ? 'Cannot save AI task: the task claims GitHub repository deployment, but the practiced path used a prebuilt Docker image. Practice cloning/building the GitHub repo first, or package this as an image-based deployment task without repo_url/GitHub-project claims.'
+        : 'Cannot save AI task: the task claims GitHub repository deployment, but the AgentRun has no successful git clone/build/repository-use evidence. Practice the repository workflow first, then save only that verified path.',
+    };
+  }
+
+  function taskPayloadText(payload = {}) {
+    const parts = [payload.name, payload.description];
+    for (const input of Array.isArray(payload.inputs) ? payload.inputs : []) {
+      if (!input || typeof input !== 'object') continue;
+      parts.push(input.key, input.label, input.type, input.default, input.placeholder, input.help);
+      if (Array.isArray(input.options)) {
+        for (const option of input.options) parts.push(option?.value, option?.label);
+      }
+    }
+    for (const step of Array.isArray(payload.steps) ? payload.steps : []) {
+      if (!step || typeof step !== 'object') continue;
+      parts.push(step.title, step.instruction);
+    }
+    return parts.map((part) => String(part || '')).join('\n');
+  }
+
+  function taskClaimsGithubDeployment(payload = {}, taskText = '') {
+    const inputs = Array.isArray(payload.inputs) ? payload.inputs : [];
+    const hasRepoInput = inputs.some((input) => {
+      const text = [input?.key, input?.label, input?.help, input?.default].map((part) => String(part || '')).join(' ');
+      return /(^|[_\s-])(repo|repository|repo_url)([_\s-]|$)|github|仓库/i.test(text);
+    });
+    const textClaimsDeployment = /(github|github\.com|仓库|repo|repository)/i.test(taskText)
+      && /(deploy|deployment|部署|发布|上线|clone|build|构建|运行)/i.test(taskText);
+    return hasRepoInput || textClaimsDeployment;
+  }
+
+  function practiceEvidenceText(practiceCalls = [], verification = {}) {
+    const parts = [];
+    for (const call of practiceCalls) {
+      parts.push(call?.toolName);
+      parts.push(safeStringify(call?.args));
+      parts.push(safeStringify(call?.result));
+      parts.push(call?.content, call?.stdout, call?.stderr);
+    }
+    parts.push(safeStringify(verification));
+    return parts.map((part) => String(part || '')).join('\n');
+  }
+
+  function safeStringify(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  function extractGithubUrls(text) {
+    const matches = String(text || '').match(/https?:\/\/github\.com\/[^\s"'`),]+/ig) || [];
+    return [...new Set(matches.map(normalizeEvidenceUrl).filter(Boolean))];
+  }
+
+  function evidenceContainsUrl(evidenceText, url) {
+    const normalizedEvidence = normalizeEvidenceUrl(evidenceText);
+    const normalizedUrl = normalizeEvidenceUrl(url);
+    return Boolean(normalizedUrl && normalizedEvidence.includes(normalizedUrl));
+  }
+
+  function normalizeEvidenceUrl(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\.git\b/g, '')
+      .replace(/[\\/#?&]+$/g, '');
+  }
+
+  function summarizeVerificationForEvidence(verification = {}) {
+    return [
+      verification.type ? `type=${verification.type}` : '',
+      verification.target ? `target=${verification.target}` : '',
+      verification.status ? `status=${verification.status}` : 'status=passed',
+      verification.evidence ? `evidence=${String(verification.evidence).slice(0, 2000)}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  function publicAuthoringEvidence(evidence = {}) {
+    return {
+      verified: evidence.verified === true,
+      mode: evidence.mode || '',
+      agentRunId: evidence.agentRunId || '',
+      summary: evidence.summary || '',
+      validatedScope: Array.isArray(evidence.validatedScope) ? evidence.validatedScope : [],
+      limitations: Array.isArray(evidence.limitations) ? evidence.limitations : [],
+    };
+  }
+
+  function emitTaskSaved(socket, payload = {}) {
+    if (!socket?.emit) return;
+    emitIdeEvent(socket, 'ide:task-saved', payload);
+  }
+
+  async function handle(name, input, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta }) {
     const authoringBlocked = null;
     if (authoringBlocked) return authoringBlocked;
 
     if (CORE_DELEGATED_TOOL_NAMES.has(name)) {
-      return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, approvalGranted, onToolDelta, source: 'ide' });
+      return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta, source: 'ide' });
     }
 
     switch (name) {
+      case 'preview_ai_task': {
+        const blocked = requireTaskAuthoringSession(session);
+        if (blocked) return blocked;
+        if (!aiTaskService?.previewTask) return err('AI 任务服务未初始化');
+        try {
+          const task = aiTaskService.previewTask(input || {});
+          return ok(formatJson({
+            ok: true,
+            status: 'draft',
+            saveStatus: 'cannot_save_until_practiced',
+            task,
+            message: 'Preview only. Practice the workflow and record successful verify_outcome evidence before saving.',
+          }));
+        } catch (e) {
+          return err(e.message);
+        }
+      }
+
+      case 'create_ai_task': {
+        const blocked = requireTaskAuthoringSession(session);
+        if (blocked) return blocked;
+        if (!aiTaskService?.createTask) return err('AI 任务服务未初始化');
+        try {
+          const evidenceGate = requireTaskAuthoringEvidence({ runId, sessionId, session, taskPayload: input || {} });
+          if (!evidenceGate.ok) return err(evidenceGate.error);
+          const createdTask = aiTaskService.createTask(input || {}, { authoringEvidence: evidenceGate.evidence });
+          emitTaskSaved(socket, {
+            sessionId,
+            runId,
+            action: 'created',
+            taskId: createdTask.id,
+            task: createdTask,
+            authoringEvidence: publicAuthoringEvidence(evidenceGate.evidence),
+          });
+          return ok(formatJson({
+            ok: true,
+            task: createdTask,
+            authoringEvidence: publicAuthoringEvidence(evidenceGate.evidence),
+            message: 'AI task saved from a practiced and verified AgentRun.',
+          }));
+          return ok(formatJson({ ok: true, task, message: 'AI 任务已创建。用户可以在 功能 / AI 任务 中继续编辑或执行。' }));
+        } catch (e) {
+          return err(e.message);
+        }
+      }
+
+      case 'update_ai_task': {
+        const blocked = requireTaskAuthoringSession(session);
+        if (blocked) return blocked;
+        if (!aiTaskService?.updateTask) return err('AI 任务服务未初始化');
+        const id = String(input?.id || '').trim();
+        if (!id) return err('id 为必填');
+        try {
+          const existing = aiTaskService.getTask?.(id);
+          if (!existing) return err(`AI 任务不存在: ${id}`);
+          const payload = {
+            name: input?.name ?? existing.name,
+            description: input?.description ?? existing.description,
+            inputs: input?.inputs ?? existing.inputs,
+            steps: input?.steps ?? existing.steps,
+          };
+          const evidenceGate = requireTaskAuthoringEvidence({ runId, sessionId, session, taskPayload: payload });
+          if (!evidenceGate.ok) return err(evidenceGate.error);
+          const task = aiTaskService.updateTask(id, payload, { authoringEvidence: evidenceGate.evidence });
+          if (!task) return err(`AI 任务不存在: ${id}`);
+          emitTaskSaved(socket, {
+            sessionId,
+            runId,
+            action: 'updated',
+            taskId: task.id,
+            task,
+            authoringEvidence: publicAuthoringEvidence(evidenceGate.evidence),
+          });
+          return ok(formatJson({ ok: true, task, message: 'AI 任务已更新。' }));
+        } catch (e) {
+          return err(e.message);
+        }
+      }
+
+      case 'get_ai_task': {
+        const blocked = requireTaskAuthoringSession(session);
+        if (blocked) return blocked;
+        if (!aiTaskService?.getTask) return err('AI 任务服务未初始化');
+        const id = String(input?.id || '').trim();
+        if (!id) return err('id 为必填');
+        const task = aiTaskService.getTask(id);
+        if (!task) return err(`AI 任务不存在: ${id}`);
+        return ok(formatJson({ ok: true, task }));
+      }
 
       case 'execute_command': {
         const hostId = String(input.hostId || '').trim();
@@ -824,7 +1276,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
         return handleInvokeClaudeCode(input, { session });
 
       default: {
-        const coreResult = await coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, onToolDelta, source: 'ide' });
+        const coreResult = await coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta, source: 'ide' });
         if (!coreResult.is_error || !String(coreResult.content || '').startsWith('[ERROR] 未知工具:')) return coreResult;
         return err(`未知工具: ${name}`);
       }
@@ -921,6 +1373,15 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     return result;
   }
 
+  function requireTaskAuthoringSession(session) {
+    if (String(session?.entry || '') === 'task') return null;
+    return err('AI 任务创作工具只能在 IDE 的 /task 模式中使用');
+  }
+
+  function formatJson(value) {
+    return JSON.stringify(value, null, 2);
+  }
+
   function ok(text)  { return { content: text, is_error: false }; }
   function err(text) { return { content: `[ERROR] ${text}`, is_error: true }; }
 
@@ -962,7 +1423,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     }});
   }
 
-  return { TOOL_SCHEMAS: buildToolSchemas(), CLAUDE_CODE_TOOL, handle, approveCommand };
+  return { TOOL_SCHEMAS: buildToolSchemas(), TASK_AUTHORING_TOOL_SCHEMAS, CLAUDE_CODE_TOOL, handle, approveCommand };
 }
 
 module.exports = { createIdeTools };

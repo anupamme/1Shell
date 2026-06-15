@@ -2240,6 +2240,68 @@
 .ai-chat-send-btn:hover:not(:disabled) { box-shadow: 0 6px 16px rgba(59, 130, 246, 0.30); transform: translateY(-1px); }
 .ai-chat-send-btn:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; transform: none; }
 
+/* ── 1Shell AI IDE / 主控 / 浮窗：暗色 surface 兜底 ── */
+.dark .ide-page {
+  background: rgba(2, 6, 23, 0.94) !important;
+  color: #e2e8f0 !important;
+}
+
+.dark .ide-page-header,
+.dark .console-ide-header,
+.dark .ai-fab-header {
+  background: rgba(15, 23, 42, 0.9) !important;
+  border-color: #1e293b !important;
+}
+
+.dark .ide-chat-scroll,
+.dark .console-ide-scroll,
+.dark .ai-fab-chat {
+  background: rgba(2, 6, 23, 0.34) !important;
+}
+
+.dark .ide-chat-composer,
+.dark .console-ide-composer,
+.dark .ai-fab-input-area {
+  background: rgba(15, 23, 42, 0.92) !important;
+  border-color: #1e293b !important;
+}
+
+.dark .ide-chat-input,
+.dark .console-ide-input,
+.dark .ai-fab-input {
+  background: #020617 !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+  -webkit-text-fill-color: #e2e8f0;
+}
+
+.dark .ide-chat-input::placeholder,
+.dark .console-ide-input::placeholder,
+.dark .ai-fab-input::placeholder {
+  color: #64748b !important;
+  -webkit-text-fill-color: #64748b;
+}
+
+.dark .console-ide-panel,
+.dark .ai-fab-panel {
+  background: rgba(15, 23, 42, 0.96) !important;
+  color: #e2e8f0 !important;
+  border-color: #334155 !important;
+}
+
+.dark .console-ide-empty,
+.dark .ai-fab-placeholder,
+.dark .ide-chat-empty {
+  color: #94a3b8 !important;
+}
+
+.dark .console-ide-empty strong,
+.dark .ai-fab-placeholder strong,
+.dark .ide-chat-empty strong,
+.dark .ai-fab-title {
+  color: #e2e8f0 !important;
+}
+
 /* ── AI API 配置 modal ── */
 .ai-api-modal-mask {
   position: fixed;

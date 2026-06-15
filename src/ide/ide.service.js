@@ -9,6 +9,10 @@ const {
 const {
   evaluateAgentRunOutcome,
 } = require('../agent-runtime/outcome');
+const {
+  composeSystemPrompt,
+  resolveAiSkillContext,
+} = require('../skills/ai-skill-resolver');
 const { canUseTool, createBudgetExceededResult } = require('../agent-runtime/budget');
 const {
   DEFAULT_IDE_AGENT_LIMITS,
@@ -17,6 +21,7 @@ const {
   createIdeAgentGoalProfile,
   evaluateIdeAgentProfileToolUse,
   filterToolsForAgent,
+  normalizeIdeApprovalMode,
   normalizeIdeAgentToolInput,
   shouldRequestAgentApproval,
 } = require('./ide.agent-kernel');
@@ -290,6 +295,9 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
 const KEEP_RECENT = 40;
 const TRUNCATE_TO = 6000;
 const MAX_PROVIDER_TRANSIENT_RETRIES = 2;
+const EMPTY_MODEL_RESPONSE_RETRY_LIMIT = 2;
+const TASK_AUTHORING_PACKAGING_RETRY_LIMIT = 3;
+const TASK_AUTHORING_CONNECTION_FAILURE_LIMIT = 3;
 
 function toolContentPreview(content) {
   if (typeof content === 'string') return content;
@@ -299,6 +307,49 @@ function toolContentPreview(content) {
     if (block?.type === 'image') return '[image]';
     return JSON.stringify(block);
   }).join('\n');
+}
+
+function stripTerminalControl(text) {
+  return String(text || '')
+    .replace(/(?:\uFFFD|\?)\[/g, '\x1b[')
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x9b[0-?]*[ -/]*[@-~]/g, '');
+}
+
+function compactTerminalOutputForModel(text, maxChars = 5000, maxLines = 160) {
+  const lines = stripTerminalControl(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').map(line => line.trimEnd());
+  const compacted = [];
+  let previous = null;
+  let repeats = 0;
+  const flush = () => {
+    if (previous === null) return;
+    compacted.push(repeats > 1 && previous.trim() ? `${previous}  (重复 ${repeats} 次)` : previous);
+    previous = null;
+    repeats = 0;
+  };
+  for (const line of lines) {
+    if (line === previous) {
+      repeats += 1;
+      continue;
+    }
+    flush();
+    previous = line;
+    repeats = 1;
+  }
+  flush();
+
+  let visible = compacted;
+  if (visible.length > maxLines) {
+    const omitted = visible.length - maxLines + 1;
+    visible = [`... 已折叠前 ${omitted} 行工具输出 ...`, ...visible.slice(-(maxLines - 1))];
+  }
+
+  let output = visible.join('\n');
+  if (output.length > maxChars) {
+    output = `${output.slice(0, maxChars)}\n...(tool_result 已裁剪，原 ${output.length} 字符)`;
+  }
+  return output;
 }
 
 function isTransientProviderError(err) {
@@ -315,7 +366,8 @@ function isProviderProtocolError(err) {
 function compactToolResultForModel(toolName, content) {
   const text = toolContentPreview(content);
   if (!text) return content;
-  return text.length > 5000 ? `${text.slice(0, 5000)}\n...(tool_result 已裁剪，原 ${text.length} 字符)` : content;
+  const compacted = compactTerminalOutputForModel(text, 5000, 160);
+  return compacted === text && text.length <= 5000 ? content : compacted;
 }
 
 function compactMessages(messages) {
@@ -329,8 +381,9 @@ function compactMessages(messages) {
     const compacted = msg.content.map((block) => {
       if (block.type !== 'tool_result') return block;
       const text = toolContentPreview(block.content);
-      if (text.length <= TRUNCATE_TO) return block;
-      return { ...block, content: text.slice(0, TRUNCATE_TO) + `\n...(已压缩，原 ${text.length} 字符)` };
+      const compactedText = compactTerminalOutputForModel(text, TRUNCATE_TO, 120);
+      if (compactedText === text && text.length <= TRUNCATE_TO) return block;
+      return { ...block, content: compactedText };
     });
     return { ...msg, content: compacted };
   });
@@ -420,11 +473,57 @@ function repairDanglingToolUseMessages(messages) {
   }
 }
 
-function normalizePromptEntry(entry) {
+const TASK_AUTHORING_SYSTEM_PROMPT = [
+  '',
+  '当前处于 IDE /task 任务创作模式。',
+  '你可以创建或更新 1Shell AI 任务模板，但任务模板必须保持轻量：输入项 + 流程步骤卡片。',
+  '不要设计新的权限系统、审批层、调度器、DSL 或第二套 Agent。',
+  '当用户想创建新任务时，必须先真实实践或沙箱实践可行流程，再把成功路径包装成任务；不要凭空猜，也不要只写通用模板。',
+  'list_hosts、list_scripts、read_remote_file 等发现类工具只算上下文收集，不算成功实践证据。',
+  '如果缺少目标主机、仓库地址、分支、端口、运行方式、密钥或清理偏好，先用 ask_user 或 request_secret 补齐，不要静默结束。',
+  '当用户想把上面对话打包成任务时，从当前会话历史提取成功路径，忽略失败分支；缺关键信息时先问用户。',
+  '需要密钥、token、密码时使用 request_secret，不要要求用户在普通文本里粘贴明文。',
+  'create_ai_task / update_ai_task have a hard evidence gate: practice first, record successful verify_outcome evidence, and never treat get_ai_task/database persistence as workflow verification.',
+  'For GitHub deployment tasks, the practice run must actually use the repository, such as git clone/checkout plus build/run or docker build from the repo URL. If practice only used a prebuilt Docker image, package it as image-based deployment and do not include repo_url or GitHub-project claims.',
+  '在 /task 模式中，preview_ai_task / create_ai_task / update_ai_task / get_ai_task 是保存任务的唯一入口；不要把任务 JSON 直接贴给用户来代替保存。',
+  '当任务模板已经可信，使用 preview_ai_task 检查结构，再用 create_ai_task 或 update_ai_task 保存。',
+].join('\n');
+
+const TASK_AUTHORING_SAVE_TOOL_NAMES = new Set(['create_ai_task', 'update_ai_task']);
+const REQUIRED_TASK_AUTHORING_TOOL_NAMES = ['preview_ai_task', 'create_ai_task', 'update_ai_task', 'get_ai_task'];
+const TASK_AUTHORING_NON_PRACTICE_TOOL_NAMES = new Set([
+  'preview_ai_task',
+  'create_ai_task',
+  'update_ai_task',
+  'get_ai_task',
+  'ask_user',
+  'request_secret',
+  'verify_outcome',
+  'list_hosts',
+  'list_artifacts',
+  'query_format',
+  'list_scripts',
+  'list_mcp_servers',
+  'query_audit',
+]);
+
+function normalizePromptEntry(entry, context = null, message = '') {
+  const value = String(entry || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (value === 'core') return 'core';
+  if (value === 'task') return 'task';
+  if (value === 'task_run') return 'task_run';
+  const ctx = context && typeof context === 'object' && !Array.isArray(context) ? context : {};
+  if (ctx.taskRun || ctx.task_run || ctx.taskExecution || ctx.task_execution) return 'task_run';
+  if (ctx.taskAuthoring || ctx.task_authoring) return 'task';
+  const text = String(message || '').trim();
+  if (/^进入\s*\/task\s*任务创作模式|\/task\s+任务创作|task authoring/i.test(text)) return 'task';
   return 'core';
 }
 
 function promptForEntry(entry) {
+  if (normalizePromptEntry(entry) === 'task') {
+    return `${ONESHELL_CORE_SYSTEM_PROMPT}\n${TASK_AUTHORING_SYSTEM_PROMPT}`;
+  }
   return ONESHELL_CORE_SYSTEM_PROMPT;
 }
 
@@ -436,7 +535,7 @@ function promptForEntry(entry) {
  *   - 工具集更广（list_artifacts / query_format 等）
  *   - 用户是对话主体，AI 响应用户指令而非自驱执行
  */
-function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, harness, agentRuntime, secretService }) {
+function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry, harness, agentRuntime, secretService }) {
 
   // sessionId → { messages[], system, hostId, abortController }
   const sessions = new Map();
@@ -484,6 +583,48 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       const agentRunId = payload.agentRunId || payload.runId;
       agentRuntime?.recordTraceEvent?.(agentRunId, { stage, eventType, ...payload });
     } catch { /* AgentRun trace must not block IDE execution */ }
+  }
+
+  function resolveSessionSkillContext({ message, context, entry }) {
+    try {
+      const normalizedEntry = normalizePromptEntry(entry);
+      const forcedSkillIds = normalizedEntry === 'task' ? ['oneshell-task-authoring'] : [];
+      const existingSkillIds = []
+        .concat(context?.activeSkillIds || [])
+        .concat(context?.skillIds || [])
+        .concat(context?.skillId || [])
+        .filter(Boolean);
+      const skillContext = forcedSkillIds.length > 0
+        ? {
+          ...(context && typeof context === 'object' && !Array.isArray(context) ? context : {}),
+          activeSkillIds: [...new Set(existingSkillIds.concat(forcedSkillIds))],
+        }
+        : context;
+      return resolveAiSkillContext({
+        skillRegistry,
+        message,
+        context: skillContext,
+        entry: normalizedEntry,
+      });
+    } catch (err) {
+      logger?.warn?.(`[ide] failed to resolve active skills: ${err.message}`);
+      return { skills: [], prompt: '' };
+    }
+  }
+
+  function recordActiveSkills(runId, sessionId, session, skillContext) {
+    const skills = Array.isArray(skillContext?.skills) ? skillContext.skills : [];
+    if (skills.length === 0) return;
+    const summary = skills.map((skill) => `${skill.id}${skill.reason ? ` (${skill.reason})` : ''}`).join(', ');
+    recordTraceEvent('instruction', 'skills_activated', {
+      source: 'ide',
+      runId,
+      sessionId,
+      hostId: session?.hostId || 'local',
+      toolName: 'skill_resolver',
+      summary,
+      data: { skills },
+    });
   }
 
   function redactAgentTraceValue(value) {
@@ -684,11 +825,13 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     });
   }
 
-  function startIdeAgentRun({ session, sessionId, runId, message, context, entry, tools = [], claudeCodeEnabled, legacyFlags = {}, goalProfile = null }) {
+  function startIdeAgentRun({ session, sessionId, runId, message, context, entry, approvalMode, tools = [], claudeCodeEnabled, legacyFlags = {}, goalProfile = null }) {
     if (!agentRuntime?.startRun) throw new Error('Agent runtime 未初始化，1Shell AI 无法启动 AgentRun');
     try {
       const source = 'ide';
-      const policy = createIdeAgentPolicy({ tools, entry, remotePolicy: session?.toolPolicy, goalProfile });
+      const normalizedEntry = normalizePromptEntry(entry);
+      const normalizedApprovalMode = normalizeIdeApprovalMode(approvalMode || session?.approvalMode, { entry: normalizedEntry });
+      const policy = createIdeAgentPolicy({ tools, entry: normalizedEntry, approvalMode: normalizedApprovalMode, remotePolicy: session?.toolPolicy, goalProfile });
       const state = agentRuntime.startRun({
         source,
         goal: String(message || '').trim(),
@@ -706,7 +849,8 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         metadata: {
           entrypoint: 'ide:message',
           sessionId,
-          entry: normalizePromptEntry(entry),
+          entry: normalizedEntry,
+          approvalMode: normalizedApprovalMode,
           claudeCodeEnabled: !!claudeCodeEnabled,
           legacySafeMode: legacyFlags.safeMode,
           legacyUnlimitedTurns: legacyFlags.unlimitedTurns,
@@ -1340,6 +1484,9 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
   }
 
   function createIdeRuntimeDispatchOptions({ socket, sessionId, runId, session, mcpToolMap, emitLifecycle = true, recordPhase = true, recordEffects = true } = {}) {
+    const approvalMode = normalizeIdeApprovalMode(session?.approvalMode, { entry: session?.entry });
+    const allowInteractiveApproval = approvalMode === 'manual';
+    const preApproved = approvalMode === 'full_access';
     const requestHarnessApproval = async (toolName, input, summary, riskReason, approvalContext = {}) => {
       const toolUseId = String(approvalContext?.toolUseId || approvalContext?.tool_use_id || approvalContext?.providerToolUseId || approvalContext?.provider_tool_use_id || '').trim();
       const approval = await waitForApproval(socket, sessionId, { id: toolUseId, name: toolName, input: input || {} }, session, runId, {
@@ -1360,14 +1507,16 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       toolCallId: action.id,
       providerToolUseId: action.id,
       scope: { hostId: session?.hostId || action.args?.hostId || 'local' },
-      allowApproval: true,
-      requestApproval: (toolName, input, summary, riskReason, approvalContext = {}) => requestHarnessApproval(
+      approvalMode,
+      allowApproval: allowInteractiveApproval,
+      preApproved,
+      requestApproval: allowInteractiveApproval ? (toolName, input, summary, riskReason, approvalContext = {}) => requestHarnessApproval(
         toolName,
         input,
         summary,
         riskReason,
         { ...approvalContext, toolUseId: action.id },
-      ),
+      ) : undefined,
       executeTool: async ({ toolName, args, toolCall, context: toolContext }) => {
         const tc = {
           id: toolCall?.providerToolUseId || toolCall?.id || action.id || `${toolName}-${Date.now()}`,
@@ -1428,13 +1577,16 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
               safeMode: false,
               session,
               signal: toolAc.signal,
-              requestApproval: (approvalToolName, approvalInput, approvalSummary, approvalRiskReason, approvalContext = {}) => requestHarnessApproval(
+              approvalMode,
+              allowApproval: allowInteractiveApproval,
+              preApproved,
+              requestApproval: allowInteractiveApproval ? (approvalToolName, approvalInput, approvalSummary, approvalRiskReason, approvalContext = {}) => requestHarnessApproval(
                 approvalToolName,
                 approvalInput,
                 approvalSummary,
                 approvalRiskReason,
                 { ...approvalContext, toolUseId: tc.id },
-              ),
+              ) : undefined,
               approvalGranted: toolContext?.approvalGranted === true,
               onToolDelta: emitToolDelta,
             });
@@ -1480,7 +1632,14 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       const block = observationToProviderMessageBlock(observation, { providerToolUseIds });
       if (block) blocks.push(block);
     }
-    if (blocks.length > 0) session.messages.push({ role: 'user', content: blocks });
+    if (blocks.length > 0) {
+      const lastMessage = session.messages[session.messages.length - 1];
+      if (lastMessage?.role === 'user' && Array.isArray(lastMessage.content)) {
+        lastMessage.content.push(...blocks);
+      } else {
+        session.messages.push({ role: 'user', content: blocks });
+      }
+    }
   }
 
   // Normalize a Harness dispatchTool result into an observation the streaming adapter can
@@ -1628,7 +1787,9 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
   function runtimeObservationTextForProvider(observation = {}) {
     const kind = String(observation.kind || observation.type || '').trim();
     const toolName = String(observation.toolName || observation.tool_name || '').trim();
-    if (kind !== 'interrupt_resolution' && toolName !== 'agent_interrupt') return '';
+    if (kind !== 'interrupt_resolution' && toolName !== 'agent_interrupt') {
+      return toolContentPreview(observation.content || observation.summary || observation.error || '').trim();
+    }
     const data = observation.data && typeof observation.data === 'object' && !Array.isArray(observation.data) ? observation.data : {};
     const resolution = data.resolution && typeof data.resolution === 'object' && !Array.isArray(data.resolution) ? data.resolution : {};
     const lines = ['User input received for the interrupted run.'];
@@ -1679,7 +1840,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         sanitizeProviderMessageHistory(session.messages);
         repairDanglingToolUseMessages(session.messages);
         const compactedMessages = compactMessages(session.messages);
-        const baseSystem = session.system;
+        const baseSystem = composeSystemPrompt(session.system, session.activeSkillContext);
         const apiBody = JSON.stringify({
           model,
           max_tokens: 8192,
@@ -1807,8 +1968,8 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         tc.input = normalizeIdeAgentToolInput(session.agentGoalProfile, tc.name, tc.input || {});
       }
       rememberToolWorkNotes(session, runId, data.content);
-      if (textParts.length > 0) {
-        const fullText = textParts.join('');
+      const fullText = textParts.join('');
+      if (fullText.trim().length > 0) {
         if (!data._emittedTextDelta) emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: fullText });
         emitToSession(session, socket, 'ide:text', { sessionId, runId, text: fullText });
         recordTraceEvent('reasoning', toolCalls.length > 0 ? 'tool_decision' : 'reasoning_summary', {
@@ -1820,9 +1981,11 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
           summary: fullText,
         });
       }
-      session.messages.push({ role: 'assistant', content: data.content });
+      if (hasProviderAssistantContent(data.content)) {
+        session.messages.push({ role: 'assistant', content: data.content });
+      }
       return {
-        text: textParts.join(''),
+        text: fullText,
         toolCalls: toolCalls.map((tc) => {
           const executionInput = cloneToolInputForExecution(tc.input || {});
           return {
@@ -1838,6 +2001,162 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
         finishReason: data.stop_reason || '',
       };
     };
+  }
+
+  function hasProviderAssistantContent(content = []) {
+    return Array.isArray(content) && content.some((block) => {
+      if (block?.type === 'tool_use') return true;
+      if (block?.type === 'text') return String(block.text || '').trim().length > 0;
+      return false;
+    });
+  }
+
+  function isEmptyModelResult(result = {}) {
+    const toolCalls = Array.isArray(result?.toolCalls) ? result.toolCalls : [];
+    if (toolCalls.length > 0) return false;
+    return ![result?.text, result?.report, result?.content].some((value) => String(value || '').trim().length > 0);
+  }
+
+  function createEmptyModelResponseObservation({ entry, attempt }) {
+    const inTaskMode = normalizePromptEntry(entry) === 'task';
+    const guidance = inTaskMode
+      ? 'You are still in /task authoring mode. Continue by asking for missing required inputs, running the next real/sandbox practice tool, or explaining the blocker in visible assistant text. Do not call create_ai_task/update_ai_task until successful practice and verify_outcome evidence exist.'
+      : 'Continue by producing visible assistant text, calling the next appropriate tool, asking a required user question, or explaining the blocker.';
+    const content = [
+      'RUNTIME_EMPTY_MODEL_RESPONSE',
+      `attempt=${attempt}`,
+      'The previous provider response contained no assistant text and no tool calls, so 1Shell did not treat it as completion.',
+      guidance,
+    ].join('\n');
+    return {
+      id: `runtime-empty-model-response-${Date.now()}-${attempt}`,
+      kind: 'runtime_empty_model_response',
+      toolName: 'agent_controller',
+      content,
+      summary: content,
+      ok: false,
+      isError: true,
+    };
+  }
+
+  function shouldContinueTaskAuthoringPackaging({ session, runId }) {
+    if (normalizePromptEntry(session?.entry) !== 'task') return false;
+    const state = safeGetIdeAgentState(runId);
+    if (!state) return false;
+    if (hasSavedAiTaskInRun(state)) return false;
+    if (!latestSuccessfulTaskAuthoringVerification(state)) return false;
+    return successfulTaskAuthoringPracticeCalls(state).length > 0;
+  }
+
+  function hasSavedAiTaskInRun(state = {}) {
+    return (Array.isArray(state.toolCalls) ? state.toolCalls : []).some((call) => {
+      const name = String(call?.toolName || '').trim();
+      if (!TASK_AUTHORING_SAVE_TOOL_NAMES.has(name)) return false;
+      if (String(call.status || '') !== 'completed') return false;
+      return !call.result || call.result.ok === true;
+    });
+  }
+
+  function successfulTaskAuthoringPracticeCalls(state = {}) {
+    return (Array.isArray(state.toolCalls) ? state.toolCalls : []).filter((call) => {
+      const name = String(call?.toolName || '').trim();
+      if (!name || TASK_AUTHORING_NON_PRACTICE_TOOL_NAMES.has(name)) return false;
+      if (String(call.status || '') !== 'completed') return false;
+      return !call.result || call.result.ok === true;
+    });
+  }
+
+  function latestSuccessfulTaskAuthoringVerification(state = {}) {
+    const candidates = [];
+    if (state.verification) candidates.push(state.verification);
+    if (state.memory?.verification) candidates.push(state.memory.verification);
+    if (state.runtimeState?.worldState?.verification) candidates.push(state.runtimeState.worldState.verification);
+    const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
+    for (const artifact of artifacts) {
+      if (artifact?.type === 'verification_result' && artifact.data) {
+        candidates.push({ ...artifact.data, evidence: artifact.content || artifact.data.evidence || '' });
+      }
+    }
+    return candidates
+      .reverse()
+      .find((item) => {
+        const ok = item?.ok === true || String(item?.status || '').toLowerCase() === 'passed';
+        if (!ok) return false;
+        if (String(item?.type || '').toLowerCase() === 'manual') return false;
+        return !looksLikeTaskPersistenceVerification(item);
+      }) || null;
+  }
+
+  function looksLikeTaskPersistenceVerification(verification = {}) {
+    const text = [
+      verification.type,
+      verification.target,
+      verification.reason,
+      verification.evidence,
+      Array.isArray(verification.reasons) ? verification.reasons.join(' ') : '',
+    ].map((item) => String(item || '').toLowerCase()).join('\n');
+    return /(get_ai_task|create_ai_task|update_ai_task|ai_task|ai task|sqlite|database|db persistence|saved task|task id)/i.test(text);
+  }
+
+  function createTaskPackagingRequiredObservation({ attempt }) {
+    const content = [
+      'RUNTIME_TASK_PACKAGING_REQUIRED',
+      `attempt=${attempt}`,
+      'The /task practice path has successful tool execution and successful verify_outcome evidence, but no AI task has been saved yet.',
+      'Continue now by extracting only the successful practiced path, calling preview_ai_task, then calling create_ai_task or update_ai_task.',
+      'Do not finish with a report only. If task payload validation fails, fix the payload and call the save tool again.',
+    ].join('\n');
+    return {
+      id: `runtime-task-packaging-required-${Date.now()}-${attempt}`,
+      kind: 'runtime_task_packaging_required',
+      toolName: 'agent_controller',
+      content,
+      summary: content,
+      ok: false,
+      isError: true,
+    };
+  }
+
+  function taskAuthoringConnectionFailureText(observation = {}) {
+    const text = [
+      observation.error,
+      observation.summary,
+      observation.content,
+      observation.stderr,
+      observation.stdout,
+    ].map((item) => String(item || '')).join('\n');
+    return /(ssh\s+.*(handshake|timed out|timeout|connection)|timed out while waiting for handshake|shell connection closed|connection closed|连接失败|握手超时|连接断开|超时)/i.test(text)
+      ? text
+      : '';
+  }
+
+  function shouldBlockTaskAuthoringForConnectionFailures({ session, runId, observations, streak }) {
+    if (normalizePromptEntry(session?.entry) !== 'task') return { blocked: false, streak };
+    const failures = (Array.isArray(observations) ? observations : [])
+      .filter((observation) => observation?.isError === true || observation?.ok === false)
+      .map(taskAuthoringConnectionFailureText)
+      .filter(Boolean);
+    const nextStreak = failures.length > 0 ? streak + failures.length : 0;
+    if (nextStreak < TASK_AUTHORING_CONNECTION_FAILURE_LIMIT) return { blocked: false, streak: nextStreak };
+    const state = safeGetIdeAgentState(runId);
+    if (latestSuccessfulTaskAuthoringVerification(state || {})) return { blocked: false, streak: nextStreak };
+    return {
+      blocked: true,
+      streak: nextStreak,
+      reason: failures[failures.length - 1] || 'remote connection failed repeatedly',
+    };
+  }
+
+  function taskAuthoringConnectionBlockedMessage({ reason, streak }) {
+    return [
+      '这次 /task 实践已停止，原因是目标主机连续出现 SSH 握手超时或 shell 连接关闭。',
+      '',
+      `连续连接失败次数：${streak}`,
+      `最后一次失败：${String(reason || '').split(/\r?\n/).find(Boolean) || 'remote connection failed repeatedly'}`,
+      '',
+      '没有完成成功实践，也没有 verify_outcome 成功证据，所以不会保存 AI 任务。',
+      '请先恢复目标主机，或换成资源更充足/已准备构建缓存的测试环境后再重新创作这个任务。',
+    ].join('\n');
   }
 
   function filteredHostsForPolicy(policy) {
@@ -1941,6 +2260,13 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       seenToolNames.add(t.name);
       allTools.push(t);
     }
+    if (session?.entry === 'task' && Array.isArray(ideTools.TASK_AUTHORING_TOOL_SCHEMAS)) {
+      for (const t of ideTools.TASK_AUTHORING_TOOL_SCHEMAS) {
+        if (seenToolNames.has(t.name)) continue;
+        seenToolNames.add(t.name);
+        allTools.push(t);
+      }
+    }
     if (session?.claudeCodeEnabled && ideTools.CLAUDE_CODE_TOOL) {
       const t = ideTools.CLAUDE_CODE_TOOL;
       if (!seenToolNames.has(t.name)) {
@@ -1961,6 +2287,22 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       }
     }
     return { allTools, mcpToolMap };
+  }
+
+  function validateTaskAuthoringToolCatalog(session, allTools = [], agentTools = [], agentPolicy = {}) {
+    if (normalizePromptEntry(session?.entry) !== 'task') return '';
+    const allNames = new Set((Array.isArray(allTools) ? allTools : []).map((tool) => String(tool?.name || '').trim()).filter(Boolean));
+    const exposedNames = new Set((Array.isArray(agentTools) ? agentTools : []).map((tool) => String(tool?.name || '').trim()).filter(Boolean));
+    const missingFromCatalog = REQUIRED_TASK_AUTHORING_TOOL_NAMES.filter((name) => !allNames.has(name));
+    if (missingFromCatalog.length > 0) {
+      return `Internal /task tool catalog error: missing task authoring tool(s): ${missingFromCatalog.join(', ')}.`;
+    }
+    const missingFromModel = REQUIRED_TASK_AUTHORING_TOOL_NAMES.filter((name) => !exposedNames.has(name));
+    if (missingFromModel.length > 0) {
+      const allowed = Array.isArray(agentPolicy.allowedTools) ? agentPolicy.allowedTools : [];
+      return `Internal /task permission error: task authoring tool(s) were built but not exposed to the model: ${missingFromModel.join(', ')}. allowedTools=${allowed.join(',')}`;
+    }
+    return '';
   }
 
   function waitForApproval(socket, sessionId, tc, session, runId, options = {}) {
@@ -2072,18 +2414,21 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     };
   }
 
-  function applyPromptEntry(session, entry) {
-    if (entry == null || String(entry).trim() === '') return;
+  function applyPromptEntry(session, entry, approvalMode = null) {
     const nextEntry = normalizePromptEntry(entry);
-    if (session.entry === nextEntry) return;
-    session.entry = nextEntry;
-    session.system = promptForEntry(nextEntry);
+    const nextApprovalMode = normalizeIdeApprovalMode(approvalMode || session.approvalMode, { entry: nextEntry });
+    if (session.entry !== nextEntry) {
+      session.entry = nextEntry;
+      session.system = promptForEntry(nextEntry);
+      session.activeSkillContext = null;
+    }
+    session.approvalMode = nextApprovalMode;
   }
 
-  function getOrCreateSession(sessionId, context, entry) {
+  function getOrCreateSession(sessionId, context, entry, approvalMode = null) {
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
-      applyPromptEntry(session, entry);
+      applyPromptEntry(session, entry, approvalMode);
       if (context?.toolPolicy) session.toolPolicy = normalizeToolPolicy(context.toolPolicy);
       return session;
     }
@@ -2115,9 +2460,11 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     }
 
     const promptEntry = normalizePromptEntry(entry);
+    const promptApprovalMode = normalizeIdeApprovalMode(approvalMode, { entry: promptEntry });
     const session = {
       messages: [],
       entry: promptEntry,
+      approvalMode: promptApprovalMode,
       system: promptForEntry(promptEntry),
       contextBlock,
       hostId: context?.hosts?.[0]?.id || 'local',
@@ -2137,19 +2484,23 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       toolPolicy: context?.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null,
       agentPolicy: null,
       agentGoalProfile: null,
+      activeSkillContext: null,
       finalizationRepairRounds: 0,
     };
     sessions.set(sessionId, session);
     return session;
   }
 
-  async function handleMessage({ socket, sessionId, message, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry }) {
+  async function handleMessage({ socket, sessionId, message, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry, approvalMode }) {
     if (!agentRuntime?.startRun || !agentRuntime?.getState) {
       emitToSession(null, socket, 'ide:error', { sessionId, error: 'Agent runtime 未初始化，1Shell AI 已停止旧聊天降级路径。' });
       return;
     }
 
-    const session = getOrCreateSession(sessionId, context, entry);
+    const effectiveEntry = normalizePromptEntry(entry, context, message);
+    const contextApprovalMode = context && typeof context === 'object' && !Array.isArray(context) ? (context.approvalMode || context.approval_mode) : null;
+    const effectiveApprovalMode = normalizeIdeApprovalMode(approvalMode || contextApprovalMode, { entry: effectiveEntry });
+    const session = getOrCreateSession(sessionId, context, effectiveEntry, effectiveApprovalMode);
     ensureSessionCancellation(session);
     const runId = newRunId();
     session.currentRunId = runId;
@@ -2168,9 +2519,15 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       session.claudeCodeEnabled = !!claudeCodeEnabled;
     }
 
-    const agentGoalProfile = createIdeAgentGoalProfile({ message, context, entry });
+    const agentGoalProfile = createIdeAgentGoalProfile({ message, context, entry: session.entry });
     session.agentGoalProfile = agentGoalProfile;
     session.finalizationRepairRounds = 0;
+    const activeSkillContext = resolveSessionSkillContext({ message, context, entry: session.entry });
+    session.activeSkillContext = activeSkillContext;
+    const runContext = {
+      ...(context && typeof context === 'object' && !Array.isArray(context) ? context : {}),
+      activeSkills: activeSkillContext.skills,
+    };
 
     const { allTools, mcpToolMap } = buildIdeToolCatalog(session);
     const agentState = startIdeAgentRun({
@@ -2178,15 +2535,23 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       sessionId,
       runId,
       message,
-      context,
-      entry,
+      context: runContext,
+      entry: session.entry,
+      approvalMode: session.approvalMode,
       tools: allTools,
       claudeCodeEnabled: session.claudeCodeEnabled,
       goalProfile: agentGoalProfile,
       legacyFlags: ignoredLegacyFlags,
     });
-    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry, remotePolicy: session.toolPolicy, goalProfile: agentGoalProfile });
+    recordActiveSkills(runId, sessionId, session, activeSkillContext);
+    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry: session.entry, approvalMode: session.approvalMode, remotePolicy: session.toolPolicy, goalProfile: agentGoalProfile });
     const agentTools = filterToolsForAgent(allTools, agentPolicy);
+    const taskToolCatalogError = validateTaskAuthoringToolCatalog(session, allTools, agentTools, agentPolicy);
+    if (taskToolCatalogError) {
+      emitToSession(session, socket, 'ide:error', { sessionId, runId, error: taskToolCatalogError });
+      endIdeAgentRun(runId, { runnerStatus: 'failed', taskStatus: 'blocked', error: taskToolCatalogError });
+      return;
+    }
 
     sanitizeProviderMessageHistory(session.messages);
     repairDanglingToolUseMessages(session.messages);
@@ -2229,19 +2594,86 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     try {
       let observations = [];
       let lastResult = null;
+      let emptyModelResponseRetries = 0;
+      let taskPackagingRetries = 0;
+      let taskConnectionFailureStreak = 0;
       let round = 0;
       for (; round < MAX_TOOL_ROUNDS; round++) {
         throwIfStopped(session, runId);
         recordIdeAgentTurn(runId, round + 1, { status: 'running', stage: observations.length > 0 ? 'observe' : 'decide' });
         lastResult = await modelAdapter({ runId, turn: round + 1, observations });
         const toolCalls = Array.isArray(lastResult?.toolCalls) ? lastResult.toolCalls : [];
-        if (toolCalls.length === 0) break; // model produced a final answer (end_turn)
+        if (toolCalls.length === 0) {
+          if (isEmptyModelResult(lastResult)) {
+            emptyModelResponseRetries += 1;
+            recordTraceEvent('provider', 'empty_model_response', {
+              source: 'ide',
+              runId,
+              sessionId,
+              hostId: session.hostId,
+              toolName: 'model_provider',
+              summary: `provider returned empty assistant response (${emptyModelResponseRetries}/${EMPTY_MODEL_RESPONSE_RETRY_LIMIT})`,
+              data: { round: round + 1, retry: emptyModelResponseRetries, entry: session.entry },
+            });
+            if (emptyModelResponseRetries <= EMPTY_MODEL_RESPONSE_RETRY_LIMIT) {
+              observations = [createEmptyModelResponseObservation({ entry: session.entry, attempt: emptyModelResponseRetries })];
+              continue;
+            }
+            throw new Error('Cannot continue IDE agent run: provider returned empty assistant responses repeatedly.');
+          }
+          if (shouldContinueTaskAuthoringPackaging({ session, runId })) {
+            taskPackagingRetries += 1;
+            recordTraceEvent('task_authoring', 'task_packaging_required', {
+              source: 'ide',
+              runId,
+              sessionId,
+              hostId: session.hostId,
+              toolName: 'agent_controller',
+              summary: `task authoring packaging required (${taskPackagingRetries}/${TASK_AUTHORING_PACKAGING_RETRY_LIMIT})`,
+              data: { round: round + 1, retry: taskPackagingRetries },
+            });
+            if (taskPackagingRetries <= TASK_AUTHORING_PACKAGING_RETRY_LIMIT) {
+              observations = [createTaskPackagingRequiredObservation({ attempt: taskPackagingRetries })];
+              continue;
+            }
+            throw new Error('Cannot complete /task authoring: the workflow was practiced and verified, but no AI task was saved.');
+          }
+          break; // model produced a visible final answer
+        }
+        emptyModelResponseRetries = 0;
         observations = [];
         for (const tc of toolCalls) {
           throwIfStopped(session, runId);
           const extra = dispatchOptionsForAction({ action: { id: tc.id, toolName: tc.toolName, args: tc.args, options: {} } });
           const dispatched = await agentRuntime.dispatchTool(runId, tc.toolName, tc.args || {}, extra);
           observations.push(normalizeIdeToolObservation(tc, dispatched));
+        }
+        const connectionBlock = shouldBlockTaskAuthoringForConnectionFailures({
+          session,
+          runId,
+          observations,
+          streak: taskConnectionFailureStreak,
+        });
+        taskConnectionFailureStreak = connectionBlock.streak;
+        if (connectionBlock.blocked) {
+          const message = taskAuthoringConnectionBlockedMessage(connectionBlock);
+          recordTraceEvent('task_authoring', 'connection_failure_blocked', {
+            source: 'ide',
+            runId,
+            sessionId,
+            hostId: session.hostId,
+            toolName: 'agent_controller',
+            summary: `task authoring blocked after ${connectionBlock.streak} connection failures`,
+            data: { round: round + 1, reason: connectionBlock.reason || '' },
+          });
+          if (isRunCurrent(session, runId)) {
+            emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: message });
+            emitToSession(session, socket, 'ide:text', { sessionId, runId, text: message });
+            emitToSession(session, socket, 'ide:done', { sessionId, runId, round: round + 1, taskStatus: 'blocked' });
+          }
+          recordIdeAgentPhase(runId, 'blocked', 'Task authoring blocked by repeated remote connection failures', { status: 'blocked', evidence: [connectionBlock.reason || ''] });
+          endIdeAgentRun(runId, { runnerStatus: 'blocked', taskStatus: 'blocked', error: message });
+          return;
         }
       }
 
@@ -2288,7 +2720,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
 
   }
 
-  async function ask({ message, context = null, safeMode = undefined, claudeCodeEnabled = false, unlimitedTurns = undefined, entry = 'core', timeoutMs = 300000, approvalAction = 'deny' } = {}) {
+  async function ask({ message, context = null, safeMode = undefined, claudeCodeEnabled = false, unlimitedTurns = undefined, entry = 'core', approvalMode = null, timeoutMs = 300000, approvalAction = 'deny' } = {}) {
     const text = String(message || '').trim();
     if (!text) throw new Error('message 为空');
     const sessionId = `mcp-ai-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -2363,7 +2795,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     let timer = null;
     try {
       await Promise.race([
-        handleMessage({ socket, sessionId, message: text, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry }),
+        handleMessage({ socket, sessionId, message: text, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry, approvalMode }),
         new Promise((_, reject) => {
           timer = setTimeout(() => {
             cancelSession(sessionId, `headless timeout (${timeout}ms)`);

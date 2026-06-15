@@ -249,6 +249,14 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M7 18a4 4 0 0 1 0-8 5 5 0 0 1 9.5-1.5A4.5 4.5 0 0 1 17 18H7z" />
     </template>
 
+    <!-- 手掌 / 请求批准 -->
+    <template v-else-if="name === 'hand'">
+      <path d="M8.5 11V5.8a1.3 1.3 0 0 1 2.6 0V11" />
+      <path d="M11.1 10V4.8a1.3 1.3 0 0 1 2.6 0V11" />
+      <path d="M13.7 10.5V6.2a1.3 1.3 0 0 1 2.6 0v7" />
+      <path d="M8.5 12.8l-1.2-1.2a1.5 1.5 0 0 0-2.2 2l4.1 5.2A5.2 5.2 0 0 0 13.3 21h1.4a5.3 5.3 0 0 0 5.3-5.3V9.2a1.3 1.3 0 0 0-2.6 0V13" />
+    </template>
+
     <!-- 盾 / 安全 -->
     <template v-else-if="name === 'shield'">
       <path d="M12 3l8 3v6c0 4.5-3.5 8.5-8 9-4.5-.5-8-4.5-8-9V6l8-3z" />

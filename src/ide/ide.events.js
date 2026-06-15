@@ -17,6 +17,7 @@ const LEGACY_EVENT_TYPES = {
   'ide:authoring-session': 'authoring_session',
   'ide:authoring-interaction': 'authoring_interaction',
   'ide:authoring-artifact': 'authoring_artifact',
+  'ide:task-saved': 'task_saved',
   'ide:mcp-status': 'mcp_status',
 };
 
