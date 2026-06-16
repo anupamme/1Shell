@@ -46,6 +46,7 @@ const preparingRun = ref(false);
 const runValues = ref<Record<string, RunValue>>({});
 const activeRun = ref<AiTaskRun | null>(null);
 const definitionOpen = ref(false);
+const taskRepairAuthorization = ref<{ taskId: string; runId: number | string } | null>(null);
 
 const currentTask = computed(() => {
   if (!currentId.value) return null;
@@ -95,10 +96,15 @@ const taskAi = useIdeChat({
     taskId: currentTask.value?.id || '',
     taskName: currentTask.value?.name || '',
     taskRunId: activeRun.value?.id || null,
+    taskRepairAuthorized: Boolean(taskRepairAuthorization.value),
+    taskRepairTaskId: taskRepairAuthorization.value?.taskId || '',
+    taskRepairRunId: taskRepairAuthorization.value?.runId || '',
   }),
   messagePayload: () => ({
     entry: 'task_run',
     approvalMode: 'delegated',
+    taskRepairAuthorized: Boolean(taskRepairAuthorization.value),
+    taskRepairTaskId: taskRepairAuthorization.value?.taskId || '',
   }),
 });
 
@@ -276,6 +282,7 @@ async function executeTask(): Promise<void> {
   const task = currentTask.value;
   if (!task || !validateRunInputs()) return;
 
+  taskRepairAuthorization.value = null;
   preparingRun.value = true;
   try {
     const resp = await requestJson<AiTaskRunPrepareResponse>(`/api/ai-tasks/${encodeURIComponent(task.id)}/runs`, {
@@ -298,7 +305,8 @@ async function executeTask(): Promise<void> {
 async function finishActiveRun(): Promise<void> {
   const run = activeRun.value;
   if (!run) return;
-  const status = ['出错', '失败', '已停止'].some((text) => taskAi.statusText.value.includes(text)) ? 'failed' : 'completed';
+  const failed = ['出错', '失败', '已停止'].some((text) => taskAi.statusText.value.includes(text));
+  const status = failed ? 'failed' : 'completed';
   const summary = lastAssistantText();
   try {
     await requestJson(`/api/ai-task-runs/${run.id}`, {
@@ -311,6 +319,30 @@ async function finishActiveRun(): Promise<void> {
   } finally {
     activeRun.value = null;
   }
+
+  // 任务模式默认替用户审批、不逐步打扰；只有在任务失败时，才弹框询问是否
+  // 让同一个 agent 当场分析失败原因并改进 —— 这就是失败自愈的入口。
+  if (failed) void offerFailureRecovery(run, summary);
+}
+
+async function offerFailureRecovery(run: AiTaskRun, summary: string): Promise<void> {
+  if (taskAi.isRunning.value) return; // 避免在自愈轮次里重复弹框
+  const taskName = run.taskName || currentTask.value?.name || '该任务';
+  const ok = await confirm({
+    title: '任务执行失败',
+    message: `"${taskName}"没有顺利完成。是否让 1Shell AI 分析失败原因，并尝试改进任务定义或重试？`,
+    okText: '让 AI 改进',
+    okClass: 'bg-sky-600 hover:bg-sky-700 text-white',
+  });
+  if (!ok || taskAi.isRunning.value) return;
+  taskRepairAuthorization.value = { taskId: run.taskId, runId: run.id };
+  const detail = summary ? `\n\n上一轮的结果摘要：\n${summary.slice(0, 2000)}` : '';
+  taskAi.prefillAndSend(
+    `刚才这次任务执行没有成功。请基于上面的执行记录，分析失败的根本原因：\n`
+    + `1) 如果是现场环境/操作问题，在同一台目标主机上修正后重试，尽量达成任务目标；\n`
+    + `2) 如果是任务定义本身的缺陷（输入缺失、步骤顺序错误、说明不准确等），`
+    + `请用 update_ai_task 直接修正这个任务定义，并说明改了什么、为什么。${detail}`,
+  );
 }
 
 function lastAssistantText(): string {
@@ -334,7 +366,10 @@ function formatDate(value?: string): string {
 }
 
 watch(taskAi.isRunning, (running, wasRunning) => {
-  if (!running && wasRunning) void finishActiveRun();
+  if (!running && wasRunning) {
+    if (activeRun.value) void finishActiveRun();
+    else taskRepairAuthorization.value = null;
+  }
 });
 
 onMounted(() => {
@@ -348,7 +383,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="h-screen flex flex-col p-2 gap-2 bg-slate-100 text-slate-900 dark:bg-[#020617] dark:text-slate-100">
+  <div class="h-full flex flex-col p-2 gap-2 bg-slate-100 text-slate-900 dark:bg-[#020617] dark:text-slate-100">
     <header class="shrink-0 h-14 flex items-center px-5 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
       <div class="flex items-center gap-3 shrink-0">
         <span class="w-9 h-9 rounded-xl bg-sky-100 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300 flex items-center justify-center">
@@ -382,7 +417,7 @@ onBeforeUnmount(() => {
         v-if="activeTab === 'tasks'"
         type="button"
         class="h-9 px-4 rounded-lg bg-sky-600 text-white text-xs font-semibold shadow-sm hover:bg-sky-700 transition-colors cursor-pointer flex items-center gap-1.5"
-        title="到 IDE 中使用 /task 创作新任务"
+        title="到 Panel 中使用 /task 创作新任务"
         @click="startTaskAuthoring"
       >
         <AppIcon name="spark" :size="14" />
@@ -456,7 +491,7 @@ onBeforeUnmount(() => {
               class="mt-4 h-9 px-4 rounded-lg bg-sky-600 text-white text-xs font-semibold hover:bg-sky-700 transition-colors cursor-pointer"
               @click="startTaskAuthoring"
             >
-              到 IDE 创作
+              到 Panel 创作
             </button>
           </div>
         </div>

@@ -36,6 +36,7 @@ const { createServer } = require('./src/app/createServer');
 const { errorHandler } = require('./src/middleware/error.middleware');
 const { createHostRepository } = require('./src/repositories/host.repository');
 const { createAiTaskRepository } = require('./src/repositories/ai-task.repository');
+const { createIdeSessionRepository } = require('./src/repositories/ide-session.repository');
 const { createScriptRepository } = require('./src/repositories/script.repository');
 const { createAiRouter } = require('./src/routes/ai.routes');
 const { createAuditRouter } = require('./src/routes/audit.routes');
@@ -51,6 +52,7 @@ const { createProbeTrafficRouter } = require('./src/routes/probe-traffic.routes'
 const { createProbeAlertRouter } = require('./src/routes/probe-alert.routes');
 const { createProbeDiagRouter } = require('./src/routes/probe-diag.routes');
 const { createAiTaskRouter } = require('./src/routes/ai-task.routes');
+const { createIdeSessionRouter } = require('./src/routes/ide-session.routes');
 const { createScriptRouter } = require('./src/routes/script.routes');
 const { createCliSandbox } = require('./src/agents/cli-sandbox');
 const { createAgentProviders } = require('./src/agents/providers');
@@ -118,6 +120,7 @@ const app = createApp(ROOT_DIR);
 const { io, server } = createServer(app);
 const hostRepository = createHostRepository(HOSTS_FILE, db);
 const aiTaskRepository = createAiTaskRepository(db);
+const ideSessionRepository = createIdeSessionRepository(db);
 const scriptRepository = createScriptRepository(db);
 const secretService = createSecretService({ db });
 const proxyConfigStore = createProxyConfigStore(dataDir);
@@ -193,6 +196,7 @@ const ideTools = createIdeTools({
   cliSandbox,
   harness,
   agentRuntime,
+  skillRegistry,
 });
 const ideService = createIdeService({
   ideTools,
@@ -207,6 +211,7 @@ const ideService = createIdeService({
   harness,
   agentRuntime,
   secretService,
+  ideSessionRepository,
 });
 
 const mcpService = createMcpService({
@@ -282,6 +287,7 @@ app.use('/api', createSecuritySettingsRouter({ securitySettingsService, bridgeSe
 app.use('/api', createFileRouter({ fileService }));
 app.use('/api', createIpFilterRouter({ ipFilterService }));
 app.use('/api', createAiTaskRouter({ aiTaskService }));
+app.use('/api', createIdeSessionRouter({ ideService }));
 app.use('/api', createScriptRouter({ scriptService, aiService }));
 app.use('/api', createSkillRouter({ libraryService, skillRunner, claudeCodeSkillRegistry, aiService }));
 app.use('/api', createMcpRegistryRouter({ mcpRegistry, localMcpService, localMcpDeployer }));

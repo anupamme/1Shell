@@ -6,8 +6,6 @@ import { useConfirm } from '@/composables/useConfirm';
 import { getCachedPageState, isPageStateFresh, readStorageState, setCachedPageState, writeStorageState } from '@/composables/usePageState';
 import {
   isLocalMcp,
-  type ClaudeCodeSkillInfo,
-  type ClaudeCodeSkillsResponse,
   type McpInfo,
   type McpServersResponse,
   type SkillInfo,
@@ -29,41 +27,7 @@ const { confirm } = useConfirm();
 
 interface SkillsCache {
   skills: SkillInfo[];
-  claudeCodeSkills: ClaudeCodeSkillInfo[];
   allMcpServers: McpInfo[];
-}
-
-interface ClaudeCodeSkillConversionItem {
-  sourceSkillId: string;
-  sourcePath: string;
-  targetId: string;
-  name: string;
-  description?: string;
-}
-
-interface ClaudeCodeSkillConversionResponse {
-  packageId: string;
-  packageName: string;
-  conversions: ClaudeCodeSkillConversionItem[];
-  converted?: ClaudeCodeSkillConversionItem[];
-}
-
-interface AdaptedSkillFile {
-  path: string;
-  content: string;
-}
-
-interface SkillAdaptationProposal {
-  packageId: string;
-  packageName: string;
-  recommended: boolean;
-  targetId: string;
-  name: string;
-  description?: string;
-  compatibility: 'high' | 'medium' | 'low' | 'not_recommended';
-  warnings?: string[];
-  report?: string;
-  files: AdaptedSkillFile[];
 }
 
 const SKILLS_PREFS_KEY = '1shell.skills.prefs.v1';
@@ -71,29 +35,19 @@ const SKILLS_CACHE_KEY = 'skills.page.cache.v1';
 const SKILLS_CACHE_TTL_MS = 45_000;
 
 // ── 数据 ──────────────────────────────────────────
-const currentTab = ref<TabKey>(readStorageState<TabKey>(SKILLS_PREFS_KEY, 'skill'));
+const storedTab = readStorageState<TabKey | 'claude'>(SKILLS_PREFS_KEY, 'skill');
+const currentTab = ref<TabKey>(storedTab === 'claude' ? 'skill' : storedTab);
 const skills = ref<SkillInfo[]>([]);
-const claudeCodeSkills = ref<ClaudeCodeSkillInfo[]>([]);
 const allMcpServers = ref<McpInfo[]>([]);
 const skillLoadError = ref<string | null>(null);
-const claudeSkillLoadError = ref<string | null>(null);
 const mcpLoadError = ref<string | null>(null);
-const adaptingClaudeSkillId = ref<string | null>(null);
 
 const remoteMcps = computed(() => allMcpServers.value.filter((m) => !isLocalMcp(m)));
 const localMcps  = computed(() => allMcpServers.value.filter((m) => isLocalMcp(m)));
 
-function isProtectedClaudeCodeSkill(s: ClaudeCodeSkillInfo): boolean {
-  return s.id === 'oneshell-skill-authoring'
-    || s.deletable === false
-    || s.builtin === true
-    || s.system === true;
-}
-
 function saveSkillsCache(): void {
   setCachedPageState<SkillsCache>(SKILLS_CACHE_KEY, {
     skills: skills.value,
-    claudeCodeSkills: claudeCodeSkills.value,
     allMcpServers: allMcpServers.value,
   });
 }
@@ -102,7 +56,6 @@ function restoreSkillsCache(): boolean {
   const entry = getCachedPageState<SkillsCache>(SKILLS_CACHE_KEY);
   if (!entry) return false;
   skills.value = entry.value.skills || [];
-  claudeCodeSkills.value = entry.value.claudeCodeSkills || [];
   allMcpServers.value = entry.value.allMcpServers || [];
   return true;
 }
@@ -126,17 +79,6 @@ async function loadSkills(): Promise<void> {
   }
 }
 
-async function loadClaudeCodeSkills(): Promise<void> {
-  try {
-    const data = await requestJson<ClaudeCodeSkillsResponse>('/api/claude-code-skills');
-    claudeCodeSkills.value = data.skills || [];
-    claudeSkillLoadError.value = null;
-    saveSkillsCache();
-  } catch (err) {
-    claudeSkillLoadError.value = err instanceof Error ? err.message : '加载失败';
-  }
-}
-
 async function loadMcps(): Promise<void> {
   try {
     const data = await requestJson<McpServersResponse>('/api/mcp-servers');
@@ -149,7 +91,7 @@ async function loadMcps(): Promise<void> {
 }
 
 async function reloadAll(): Promise<void> {
-  await Promise.all([loadSkills(), loadClaudeCodeSkills(), loadMcps()]);
+  await Promise.all([loadSkills(), loadMcps()]);
 }
 
 // ── 删除 ────────────────────────────────────────
@@ -166,107 +108,6 @@ async function onDeleteSkill(id: string): Promise<void> {
     await requestJson(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
     notify.success('已删除');
     await loadSkills();
-  } catch (err) {
-    const msg = err instanceof ApiError || err instanceof Error ? err.message : '删除失败';
-    notify.error(msg, 5000);
-  }
-}
-
-async function onToggleClaudeCodeSkill(id: string): Promise<void> {
-  const s = claudeCodeSkills.value.find((x) => x.id === id);
-  if (!s) return;
-  const enabled = s.enabled === false;
-  try {
-    const data = await requestJson<{ skill?: ClaudeCodeSkillInfo }>(`/api/claude-code-skills/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    });
-    if (data.skill) {
-      claudeCodeSkills.value = claudeCodeSkills.value.map((item) => item.id === id ? data.skill! : item);
-      saveSkillsCache();
-    } else {
-      await loadClaudeCodeSkills();
-    }
-    notify.success(enabled ? '已启用' : '已禁用');
-  } catch (err) {
-    const msg = err instanceof ApiError || err instanceof Error ? err.message : '更新失败';
-    notify.error(msg, 5000);
-  }
-}
-
-async function onConvertClaudeCodeSkill(id: string): Promise<void> {
-  const s = claudeCodeSkills.value.find((x) => x.id === id);
-  if (!s) return;
-  try {
-    const preview = await requestJson<ClaudeCodeSkillConversionResponse>(`/api/claude-code-skills/${encodeURIComponent(id)}/convert/preview`, { method: 'POST' });
-    if (!preview.conversions.length) {
-      notify.error('没有可转换的 SKILL.md', 4000);
-      return;
-    }
-    const lines = preview.conversions.map((item) => `- ${item.name || item.sourceSkillId} → ${item.targetId}`).join('\n');
-    const ok = await confirm({
-      title: '导入为 1Shell 草稿',
-      message: `将托管包 "${preview.packageName || s.name || id}" 结构导入为 1Shell Skill 草稿：\n\n${lines}\n\n这是文件结构导入，适合轻量 prompt/workflow Skill；重型 Claude Code coding skill 应优先给内部 Claude Code 使用。`,
-      okText: '导入草稿',
-    });
-    if (!ok) return;
-    const result = await requestJson<ClaudeCodeSkillConversionResponse>(`/api/claude-code-skills/${encodeURIComponent(id)}/convert`, { method: 'POST' });
-    notify.success(`已导入 ${result.converted?.length || result.conversions.length} 个 1Shell Skill 草稿`);
-    await Promise.all([loadSkills(), loadClaudeCodeSkills()]);
-    currentTab.value = 'skill';
-  } catch (err) {
-    const msg = err instanceof ApiError || err instanceof Error ? err.message : '导入失败';
-    notify.error(msg, 5000);
-  }
-}
-
-async function onAdaptClaudeCodeSkill(id: string): Promise<void> {
-  const s = claudeCodeSkills.value.find((x) => x.id === id);
-  if (!s || adaptingClaudeSkillId.value) return;
-  adaptingClaudeSkillId.value = id;
-  try {
-    const data = await requestJson<{ proposal: SkillAdaptationProposal }>(`/api/claude-code-skills/${encodeURIComponent(id)}/adapt/preview`, { method: 'POST' });
-    const p = data.proposal;
-    const warnings = (p.warnings || []).map((item) => `- ${item}`).join('\n') || '- 无';
-    const files = p.files.map((file) => `- ${file.path}`).join('\n');
-    const ok = await confirm({
-      title: 'AI 适配为 1Shell Skill',
-      message: `AI 已生成适配草稿：\n\n目标 ID：${p.targetId}\n名称：${p.name}\n兼容性：${p.compatibility}${p.recommended ? '' : '（不推荐转换）'}\n\n风险/限制：\n${warnings}\n\n将写入文件：\n${files}\n\n${p.report || ''}\n\n确认后写入 data/skills，并进入 1Shell AI 可用列表。`,
-      okText: p.recommended ? '确认写入' : '仍然写入',
-    });
-    if (!ok) return;
-    await requestJson(`/api/claude-code-skills/${encodeURIComponent(id)}/adapt/commit`, {
-      method: 'POST',
-      body: JSON.stringify({ proposal: p }),
-    });
-    notify.success(`已 AI 适配为 1Shell Skill：${p.targetId}`);
-    await Promise.all([loadSkills(), loadClaudeCodeSkills()]);
-    currentTab.value = 'skill';
-  } catch (err) {
-    const msg = err instanceof ApiError || err instanceof Error ? err.message : 'AI 适配失败';
-    notify.error(msg, 7000);
-  } finally {
-    adaptingClaudeSkillId.value = null;
-  }
-}
-
-async function onDeleteClaudeCodeSkill(id: string): Promise<void> {
-  const s = claudeCodeSkills.value.find((x) => x.id === id);
-  if (!s) return;
-  if (isProtectedClaudeCodeSkill(s)) {
-    notify.error('系统默认 Claude Code Skill 不允许删除', 4000);
-    return;
-  }
-  const ok = await confirm({
-    title: '删除 Claude Code Skill',
-    message: `删除托管 Skill "${s.name || id}"？\n原始仓库副本和 manifest 将被删除，不会影响 1Shell 扩展。`,
-    okText: '删除',
-  });
-  if (!ok) return;
-  try {
-    await requestJson(`/api/claude-code-skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    notify.success('已删除');
-    await loadClaudeCodeSkills();
   } catch (err) {
     const msg = err instanceof ApiError || err instanceof Error ? err.message : '删除失败';
     notify.error(msg, 5000);
@@ -346,7 +187,7 @@ onMounted(() => {
             仓库
             <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300 font-semibold">Warehouse</span>
           </div>
-          <div class="text-[11px] text-slate-400">1Shell 扩展、Claude Code Skill 与 MCP Server 的导入与存放</div>
+          <div class="text-[11px] text-slate-400">Skill 与 MCP Server 的导入与存放</div>
         </div>
       </div>
       <div class="flex-1"></div>
@@ -356,11 +197,7 @@ onMounted(() => {
     <div class="shrink-0 bg-shell-panel rounded-2xl border border-slate-200 dark:border-[#1e293b] dark:bg-[#0f172a] px-4 flex items-center gap-2 text-slate-700 dark:text-slate-200">
       <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'skill' }" @click="currentTab = 'skill'">
         <AppIcon name="package" :size="14" />
-        <span>1Shell 扩展（<span>{{ skills.length }}</span>）</span>
-      </button>
-      <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'claude' }" @click="currentTab = 'claude'">
-        <AppIcon name="puzzle" :size="14" />
-        <span>Claude Skill（<span>{{ claudeCodeSkills.length }}</span>）</span>
+        <span>Skill（<span>{{ skills.length }}</span>）</span>
       </button>
       <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'mcp' }" @click="currentTab = 'mcp'">
         <AppIcon name="plug" :size="14" />
@@ -372,7 +209,7 @@ onMounted(() => {
       </button>
       <div class="flex-1"></div>
       <button
-        v-if="currentTab === 'claude'"
+        v-if="currentTab === 'skill'"
         class="text-[11px] px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500 to-blue-500 text-white hover:opacity-90"
         @click="openDeployClaudeSkillModal"
       >+ 导入 Skill</button>
@@ -411,64 +248,6 @@ onMounted(() => {
           :skill="s"
           @delete="onDeleteSkill"
         />
-      </div>
-
-      <!-- Claude Code Skill -->
-      <div v-show="currentTab === 'claude'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        <div v-if="claudeSkillLoadError" class="col-span-full text-red-500 text-center py-10 text-xs">加载失败: {{ claudeSkillLoadError }}</div>
-        <div v-else-if="claudeCodeSkills.length === 0" class="col-span-full text-[12px] text-slate-400 text-center py-10">
-          尚未托管 Claude Code Skill。<br/>
-          点右上角 "+ 导入 Skill" 粘贴 GitHub 链接，1Shell 会下载并扫描标准 SKILL.md。
-        </div>
-        <article
-          v-for="s in claudeCodeSkills"
-          :key="s.id"
-          class="rounded-2xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827] p-4 flex flex-col gap-3 shadow-sm"
-          :class="{ 'opacity-60': s.enabled === false }"
-        >
-          <div class="flex items-start gap-3">
-            <div class="w-9 h-9 rounded-xl bg-purple-100 text-purple-600 dark:bg-purple-500/15 dark:text-purple-300 flex items-center justify-center shrink-0">
-              <AppIcon name="puzzle" :size="20" />
-            </div>
-            <div class="min-w-0 flex-1">
-              <div class="text-sm font-semibold truncate flex items-center gap-1.5">
-                <span class="truncate">{{ s.name || s.id }}</span>
-                <span
-                  class="text-[9px] px-1.5 py-0.5 rounded font-semibold shrink-0"
-                  :class="s.enabled === false ? 'bg-slate-100 text-slate-400 dark:bg-[#1e293b] dark:text-slate-500' : 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300'"
-                >{{ s.enabled === false ? 'disabled' : 'enabled' }}</span>
-                <span
-                  v-if="isProtectedClaudeCodeSkill(s)"
-                  class="text-[9px] px-1.5 py-0.5 rounded font-semibold shrink-0 bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300"
-                >系统默认</span>
-              </div>
-              <div class="text-[10px] text-slate-400 font-mono truncate">{{ s.id }}</div>
-            </div>
-            <button class="text-[10px] text-blue-500 hover:text-blue-600" @click="onToggleClaudeCodeSkill(s.id)">{{ s.enabled === false ? '启用' : '禁用' }}</button>
-            <button
-              v-if="(s.skills?.length || 0) > 0"
-              class="text-[10px] text-emerald-500 hover:text-emerald-600 disabled:opacity-50"
-              :disabled="adaptingClaudeSkillId === s.id"
-              @click="onAdaptClaudeCodeSkill(s.id)"
-            >{{ adaptingClaudeSkillId === s.id ? '适配中' : 'AI适配' }}</button>
-            <button
-              v-if="(s.skills?.length || 0) > 0"
-              class="text-[10px] text-slate-500 hover:text-slate-600"
-              @click="onConvertClaudeCodeSkill(s.id)"
-            >导入草稿</button>
-            <button
-              v-if="!isProtectedClaudeCodeSkill(s)"
-              class="text-[10px] text-red-400 hover:text-red-500"
-              @click="onDeleteClaudeCodeSkill(s.id)"
-            >删除</button>
-          </div>
-          <p class="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-3 min-h-[42px]">{{ s.description || '标准 Claude Code Skill 托管包，暂不直接进入 1Shell runner。' }}</p>
-          <div class="text-[10px] text-slate-400 font-mono truncate" :title="s.repoUrl">{{ s.repoUrl || 'local' }}</div>
-          <div class="text-[10px] text-slate-400">发现 {{ s.skills?.length || 0 }} 个 SKILL.md</div>
-          <div v-if="s.tags?.length" class="flex flex-wrap gap-1">
-            <span v-for="tag in s.tags" :key="tag" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#1e293b] text-slate-500 dark:text-slate-300">{{ tag }}</span>
-          </div>
-        </article>
       </div>
 
       <!-- MCP 远程 -->
@@ -521,7 +300,7 @@ onMounted(() => {
     />
     <DeployClaudeSkillModal
       v-model:open="deployClaudeSkillModalOpen"
-      @saved="loadClaudeCodeSkills"
+      @saved="reloadAll"
     />
   </div>
 </template>

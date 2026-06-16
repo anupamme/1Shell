@@ -10,8 +10,6 @@ function createAiTaskRepository(db) {
       createTask: () => { throw new Error('AI 任务需要 SQLite 支持，当前环境不可用'); },
       updateTask: () => { throw new Error('AI 任务需要 SQLite 支持，当前环境不可用'); },
       deleteTask: () => false,
-      recordAuthoringEvidence: () => null,
-      listAuthoringEvidence: () => [],
       createRun: () => { throw new Error('AI 任务需要 SQLite 支持，当前环境不可用'); },
       updateRun: () => null,
       findRun: () => null,
@@ -39,22 +37,6 @@ function createAiTaskRepository(db) {
     deleteTask: db.prepare('DELETE FROM ai_tasks WHERE id = ?'),
     deleteRunsByTask: db.prepare('DELETE FROM ai_task_runs WHERE task_id = ?'),
     deleteEvidenceByTask: db.prepare('DELETE FROM ai_task_authoring_evidence WHERE task_id = ?'),
-    insertAuthoringEvidence: db.prepare(`
-      INSERT INTO ai_task_authoring_evidence (
-        task_id, session_id, agent_run_id, mode, verified, summary,
-        validated_scope, actions, verification, limitations, cleanup, payload, created_at
-      )
-      VALUES (
-        @task_id, @session_id, @agent_run_id, @mode, @verified, @summary,
-        @validated_scope, @actions, @verification, @limitations, @cleanup, @payload, datetime('now')
-      )
-    `),
-    selectEvidenceById: db.prepare('SELECT * FROM ai_task_authoring_evidence WHERE id = ?'),
-    selectEvidenceByTask: db.prepare(`
-      SELECT * FROM ai_task_authoring_evidence
-      WHERE task_id = ?
-      ORDER BY created_at DESC
-    `),
     incrementRunCount: db.prepare("UPDATE ai_tasks SET run_count = run_count + 1, updated_at = datetime('now') WHERE id = ?"),
     insertRun: db.prepare(`
       INSERT INTO ai_task_runs (task_id, task_name, input_values, prepared_prompt, status, created_at, updated_at)
@@ -102,7 +84,6 @@ function createAiTaskRepository(db) {
       inputs: JSON.stringify(payload.inputs || []),
       steps: JSON.stringify(payload.steps || []),
     });
-    if (payload.authoringEvidence) insertAuthoringEvidence(id, payload.authoringEvidence);
     return id;
   });
 
@@ -116,7 +97,6 @@ function createAiTaskRepository(db) {
       inputs: JSON.stringify(payload.inputs || []),
       steps: JSON.stringify(payload.steps || []),
     });
-    if (payload.authoringEvidence) insertAuthoringEvidence(id, payload.authoringEvidence);
     return true;
   });
 
@@ -159,26 +139,6 @@ function createAiTaskRepository(db) {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       finishedAt: row.finished_at,
-    };
-  }
-
-  function rowToEvidence(row) {
-    if (!row) return null;
-    return {
-      id: row.id,
-      taskId: row.task_id,
-      sessionId: row.session_id || '',
-      agentRunId: row.agent_run_id || '',
-      mode: row.mode || '',
-      verified: row.verified === 1,
-      summary: row.summary || '',
-      validatedScope: safeParseArray(row.validated_scope),
-      actions: safeParseArray(row.actions),
-      verification: safeParseArray(row.verification),
-      limitations: safeParseArray(row.limitations),
-      cleanup: safeParseObject(row.cleanup),
-      payload: safeParseObject(row.payload),
-      createdAt: row.created_at,
     };
   }
 
@@ -243,43 +203,12 @@ function createAiTaskRepository(db) {
     return { runs: rows.map(rowToRun), total };
   }
 
-  function recordAuthoringEvidence(taskId, evidence) {
-    const id = String(taskId || '').trim();
-    if (!id || !stmts.selectTask.get(id)) return null;
-    const rowId = insertAuthoringEvidence(id, evidence || {});
-    return rowToEvidence(stmts.selectEvidenceById.get(rowId));
-  }
-
-  function listAuthoringEvidence(taskId) {
-    return stmts.selectEvidenceByTask.all(taskId).map(rowToEvidence);
-  }
-
-  function insertAuthoringEvidence(taskId, evidence = {}) {
-    const info = stmts.insertAuthoringEvidence.run({
-      task_id: taskId,
-      session_id: evidence.sessionId || evidence.session_id || null,
-      agent_run_id: evidence.agentRunId || evidence.agent_run_id || null,
-      mode: evidence.mode || null,
-      verified: evidence.verified === false ? 0 : 1,
-      summary: evidence.summary || null,
-      validated_scope: JSON.stringify(asArray(evidence.validatedScope || evidence.validated_scope)),
-      actions: JSON.stringify(asArray(evidence.actions)),
-      verification: JSON.stringify(asArray(evidence.verification)),
-      limitations: JSON.stringify(asArray(evidence.limitations)),
-      cleanup: JSON.stringify(asObject(evidence.cleanup)),
-      payload: JSON.stringify(asObject(evidence.payload || evidence)),
-    });
-    return info.lastInsertRowid;
-  }
-
   return {
     listTasks,
     findTask,
     createTask,
     updateTask,
     deleteTask,
-    recordAuthoringEvidence,
-    listAuthoringEvidence,
     createRun,
     updateRun,
     findRun,
@@ -306,14 +235,6 @@ function safeParseObject(value) {
   } catch {
     return {};
   }
-}
-
-function asArray(value) {
-  return Array.isArray(value) ? value : [];
-}
-
-function asObject(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
 module.exports = { createAiTaskRepository };

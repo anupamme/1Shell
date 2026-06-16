@@ -4,6 +4,7 @@
 // 结构（自上而下）：terminal-tabs → 状态栏 → SuggestionBox → CmdInlinePanel → terminal-main（含 terminal-hint / terminal-container / Ghost / fab）
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue';
 
+import AppIcon from '@/components/AppIcon.vue';
 import AnalyzeFab from '@/components/main/AnalyzeFab.vue';
 import AnalyzePanel from '@/components/main/AnalyzePanel.vue';
 import CmdInlinePanel from '@/components/main/CmdInlinePanel.vue';
@@ -19,10 +20,22 @@ import { useHostsStore } from '@/stores/hosts';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import type { SessionInfo } from '@/utils/terminal';
 
+const props = defineProps<{
+  hostName: string;
+  cpu: string;
+  memory: string;
+  load: string;
+  disk: string;
+  sidebarCollapsed?: boolean;
+  aiPanelCollapsed?: boolean;
+}>();
+
 const emit = defineEmits<{
   'host-change': [hostId: string];
   'host-close': [hostId: string];
   'fullscreen-toggle': [value: boolean];
+  'toggle-sidebar': [];
+  'toggle-ai-panel': [];
 }>();
 
 const hosts = useHostsStore();
@@ -152,11 +165,22 @@ onBeforeUnmount(() => {
           {{ aiContextText }}
         </span>
       </div>
+      <div class="terminal-probe-strip" aria-label="主机简况">
+        <span class="terminal-probe-host">{{ props.hostName }}</span>
+        <span class="terminal-probe-sep"></span>
+        <span>CPU <b>{{ props.cpu }}</b></span>
+        <span class="terminal-probe-sep"></span>
+        <span>内存 <b>{{ props.memory }}</b></span>
+        <span class="terminal-probe-sep"></span>
+        <span>负载 <b>{{ props.load }}</b></span>
+        <span class="terminal-probe-sep"></span>
+        <span>硬盘 <b>{{ props.disk }}</b></span>
+      </div>
       <div class="terminal-actions">
         <button
           id="inject-script-btn"
           type="button"
-          class="terminal-action-btn purple"
+          class="terminal-action-btn"
           :class="{ active: scriptInject.scriptOpen.value }"
           title="快捷执行脚本库中的脚本"
           @click="scriptInject.scriptOpen.value ? scriptInject.closeScriptPanel() : scriptInject.openScriptPanel()"
@@ -171,6 +195,22 @@ onBeforeUnmount(() => {
           title="全屏终端"
           @click="toggleFullscreen"
         >{{ isFullscreen ? '退出全屏' : '全屏' }}</button>
+        <button
+          type="button"
+          class="terminal-mini-btn"
+          :title="props.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏'"
+          @click="emit('toggle-sidebar')"
+        >
+          <AppIcon name="arrow-right" :size="12" :class="props.sidebarCollapsed ? '' : 'rotate-180'" />
+        </button>
+        <button
+          type="button"
+          class="terminal-mini-btn"
+          :title="props.aiPanelCollapsed ? '展开 AI 面板' : '收起 AI 面板'"
+          @click="emit('toggle-ai-panel')"
+        >
+          <AppIcon name="spark" :size="12" />
+        </button>
       </div>
     </div>
 

@@ -13,22 +13,16 @@ function createAiTaskService({ aiTaskRepository }) {
     return aiTaskRepository.findTask(id);
   }
 
-  function createTask(payload, options = {}) {
-    return aiTaskRepository.createTask({
-      ...validateTaskPayload(payload),
-      ...(options.authoringEvidence ? { authoringEvidence: options.authoringEvidence } : {}),
-    });
+  function createTask(payload) {
+    return aiTaskRepository.createTask(validateTaskPayload(payload));
   }
 
   function previewTask(payload) {
     return validateTaskPayload(payload);
   }
 
-  function updateTask(id, payload, options = {}) {
-    return aiTaskRepository.updateTask(id, {
-      ...validateTaskPayload(payload),
-      ...(options.authoringEvidence ? { authoringEvidence: options.authoringEvidence } : {}),
-    });
+  function updateTask(id, payload) {
+    return aiTaskRepository.updateTask(id, validateTaskPayload(payload));
   }
 
   function deleteTask(id) {
@@ -70,14 +64,6 @@ function createAiTaskService({ aiTaskRepository }) {
     return aiTaskRepository.listAllRuns(opts);
   }
 
-  function recordAuthoringEvidence(taskId, evidence) {
-    return aiTaskRepository.recordAuthoringEvidence?.(taskId, evidence) || null;
-  }
-
-  function listAuthoringEvidence(taskId) {
-    return aiTaskRepository.listAuthoringEvidence?.(taskId) || [];
-  }
-
   return {
     listTasks,
     getTask,
@@ -90,8 +76,6 @@ function createAiTaskService({ aiTaskRepository }) {
     getRun,
     listRunsByTask,
     listAllRuns,
-    recordAuthoringEvidence,
-    listAuthoringEvidence,
     buildTaskPrompt,
   };
 }
@@ -250,7 +234,9 @@ function buildTaskPrompt(task, inputValues) {
   lines.push('你是 1Shell AI agent，正在执行一个用户保存的 AI 任务。');
   lines.push('这个任务只是下级工具数据：输入表单、步骤引导和历史创作证据；它不是新的 Agent，也不是独立运行时。');
   lines.push('除非用户明确要求修改任务，否则不要调用任务创作或任务保存工具，只按当前任务定义执行现场工作。');
+  lines.push('（仅当本次执行失败、且用户要求改进时，可用 update_ai_task 修正下面这个任务定义。）');
   lines.push('');
+  lines.push(`任务 ID：${task.id}`);
   lines.push(`任务名称：${task.name}`);
   if (task.description) {
     lines.push(`任务说明：${task.description}`);

@@ -19,6 +19,8 @@ const sessionTerminal = useSessionTerminal();
 const { confirm } = useConfirm();
 const claudeCodeEnabled = ref(false);
 const approvalMode = ref<IdeApprovalMode>('manual');
+const agentGoal = ref('');
+const currentModel = ref('默认模型');
 const chatAreaEl = ref<HTMLElement | null>(null);
 let followOutput = true;
 
@@ -26,6 +28,10 @@ const activeHostName = computed(() => {
   const host = hosts.hostMap.get(sessionTerminal.activeHostId.value || LOCAL_HOST_ID);
   return host?.name || '本机';
 });
+
+const agentGoalLabel = computed(() => agentGoal.value || '未设置目标');
+const modelLabel = computed(() => currentModel.value || '默认模型');
+const modeLabel = computed(() => approvalModeLabel(approvalMode.value));
 
 const ide = useIdeChat({
   sessionPrefix: 'console-ide',
@@ -36,6 +42,8 @@ const ide = useIdeChat({
     return {
       module: '主控',
       moduleHint: '当前在主控页面。可结合主机和终端上下文处理运维目标。',
+      agentGoal: agentGoal.value || undefined,
+      modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
       activeSessionId: sessionTerminal.activeSessionId.value,
       terminalStatus: sessionTerminal.statusText.value,
       hosts: host ? [{
@@ -50,6 +58,8 @@ const ide = useIdeChat({
   messagePayload: () => ({
     entry: 'console',
     approvalMode: approvalMode.value,
+    goal: agentGoal.value || undefined,
+    modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
     claudeCodeEnabled: claudeCodeEnabled.value,
   }),
 });
@@ -76,7 +86,7 @@ function scrollToBottom(force = false): void {
 function onInputKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
-    ide.sendMessage();
+    sendOrHandleCommand();
   }
 }
 
@@ -98,6 +108,54 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
   }
   approvalMode.value = mode;
 }
+
+function parseAgentShellCommand(value: string): { name: 'goal' | 'model'; arg: string } | null {
+  const match = String(value || '').trim().match(/^\/(goal|model)(?:\s+([\s\S]*))?$/i);
+  if (!match) return null;
+  const name = String(match[1] || '').toLowerCase();
+  if (name !== 'goal' && name !== 'model') return null;
+  return { name, arg: String(match[2] || '').trim() };
+}
+
+function handleAgentShellCommand(value: string): boolean {
+  const command = parseAgentShellCommand(value);
+  if (!command) return false;
+  ide.inputText.value = '';
+
+  if (command.name === 'goal') {
+    if (!command.arg) {
+      ide.pushSystemEvent('/goal', agentGoal.value ? `当前目标：${agentGoal.value}` : '当前还没有设置目标。输入 /goal 加目标内容即可设置。');
+      return true;
+    }
+    agentGoal.value = command.arg;
+    ide.pushSystemEvent('/goal', `当前目标已设置为：${command.arg}`, 'success');
+    return true;
+  }
+
+  if (!command.arg) {
+    ide.pushSystemEvent('/model', `当前模型偏好：${currentModel.value}`);
+    return true;
+  }
+  currentModel.value = command.arg;
+  ide.pushSystemEvent('/model', `已记录本会话模型偏好：${command.arg}。实际模型路由以当前后端配置为准。`, 'success');
+  return true;
+}
+
+function approvalModeLabel(mode: IdeApprovalMode): string {
+  if (mode === 'full_access') return '完全权限';
+  if (mode === 'delegated') return '委托审批';
+  return '人工审批';
+}
+
+function sendOrHandleCommand(): void {
+  if (handleAgentShellCommand(ide.inputText.value)) return;
+  ide.sendMessage();
+}
+
+function prefillCommand(command: '/goal' | '/model'): void {
+  if (ide.isRunning.value) return;
+  ide.inputText.value = `${command} `;
+}
 </script>
 
 <template>
@@ -112,6 +170,21 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
           <span>{{ activeHostName }}</span>
         </div>
         <span class="console-ide-badge">IDE</span>
+      </div>
+
+      <div class="console-ide-context" aria-label="当前 Agent 上下文">
+        <span class="console-ide-context-chip console-ide-context-chip--goal">
+          <span>Goal</span>
+          <strong>{{ agentGoalLabel }}</strong>
+        </span>
+        <span class="console-ide-context-chip">
+          <span>Model</span>
+          <strong>{{ modelLabel }}</strong>
+        </span>
+        <span class="console-ide-context-chip">
+          <span>Mode</span>
+          <strong>{{ modeLabel }}</strong>
+        </span>
       </div>
 
       <div class="console-ide-actions">
@@ -163,11 +236,21 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
         v-model="ide.inputText.value"
         rows="3"
         class="console-ide-input"
-        placeholder="输入你的目标..."
+        placeholder="输入目标，或使用 /goal、/model 设置上下文..."
         :disabled="ide.isRunning.value"
         spellcheck="false"
         @keydown="onInputKeydown"
       />
+      <div class="console-ide-command-row" aria-label="Agent Shell 快捷命令">
+        <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/goal')">
+          <strong>/goal</strong>
+          <span>目标</span>
+        </button>
+        <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/model')">
+          <strong>/model</strong>
+          <span>模型</span>
+        </button>
+      </div>
       <div class="console-ide-composer-row">
         <div class="console-ide-left-actions">
           <IdeApprovalModeMenu
@@ -191,7 +274,7 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
           type="button"
           class="console-ide-send-btn"
           :disabled="!ide.inputText.value.trim()"
-          @click="ide.sendMessage"
+          @click="sendOrHandleCommand"
         >
           <AppIcon name="arrow-up" :size="14" :stroke-width="2" />
           <span>发送</span>

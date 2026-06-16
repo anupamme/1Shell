@@ -25,19 +25,29 @@ const taskIntent = ref('');
 const savingTaskDraft = ref(false);
 const nextEntry = ref<'core' | 'task'>('core');
 const approvalMode = ref<IdeApprovalMode>('manual');
+const agentGoal = ref('');
+const currentModel = ref('默认模型');
 const taskAuthoringContext = ref<Record<string, unknown> | null>(null);
 const ide = useIdeChat({
   approvalMode: () => outgoingApprovalMode(),
   context: () => ({
+    agentGoal: agentGoal.value || undefined,
+    modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
     taskAuthoring: taskAuthoringContext.value,
   }),
   messagePayload: () => ({
     entry: nextEntry.value,
     approvalMode: outgoingApprovalMode(),
+    goal: agentGoal.value || undefined,
+    modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
   }),
   onTaskSaved: handleTaskSaved,
 });
 let followOutput = true;
+
+const agentGoalLabel = computed(() => agentGoal.value || '未设置目标');
+const modelLabel = computed(() => currentModel.value || '默认模型');
+const modeLabel = computed(() => approvalModeLabel(outgoingApprovalMode()));
 
 const taskSuggestionVisible = computed(() => {
   if (ide.isRunning.value) return false;
@@ -101,6 +111,44 @@ function parseTaskCommand(value: string): string | null {
   return String(match[1] || '').trim();
 }
 
+function parseAgentShellCommand(value: string): { name: 'goal' | 'model'; arg: string } | null {
+  const match = String(value || '').trim().match(/^\/(goal|model)(?:\s+([\s\S]*))?$/i);
+  if (!match) return null;
+  const name = String(match[1] || '').toLowerCase();
+  if (name !== 'goal' && name !== 'model') return null;
+  return { name, arg: String(match[2] || '').trim() };
+}
+
+function handleAgentShellCommand(value: string): boolean {
+  const command = parseAgentShellCommand(value);
+  if (!command) return false;
+  ide.inputText.value = '';
+
+  if (command.name === 'goal') {
+    if (!command.arg) {
+      ide.pushSystemEvent('/goal', agentGoal.value ? `当前目标：${agentGoal.value}` : '当前还没有设置目标。输入 /goal 加目标内容即可设置。');
+      return true;
+    }
+    agentGoal.value = command.arg;
+    ide.pushSystemEvent('/goal', `当前目标已设置为：${command.arg}`, 'success');
+    return true;
+  }
+
+  if (!command.arg) {
+    ide.pushSystemEvent('/model', `当前模型偏好：${currentModel.value}`);
+    return true;
+  }
+  currentModel.value = command.arg;
+  ide.pushSystemEvent('/model', `已记录本会话模型偏好：${command.arg}。实际模型路由以当前后端配置为准。`, 'success');
+  return true;
+}
+
+function approvalModeLabel(mode: IdeApprovalMode): string {
+  if (mode === 'full_access') return '完全权限';
+  if (mode === 'delegated') return '委托审批';
+  return '人工审批';
+}
+
 function openTaskModal(initialIntent = ''): void {
   taskIntent.value = initialIntent;
   taskMode.value = looksLikePackRequest(initialIntent) ? 'pack' : 'new';
@@ -131,6 +179,7 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
 }
 
 function sendOrOpenTask(): void {
+  if (handleAgentShellCommand(ide.inputText.value)) return;
   const commandIntent = parseTaskCommand(ide.inputText.value);
   if (commandIntent === null) {
     nextEntry.value = 'core';
@@ -146,6 +195,11 @@ function selectTaskSuggestion(): void {
   const commandIntent = parseTaskCommand(ide.inputText.value);
   ide.inputText.value = '';
   openTaskModal(commandIntent || '');
+}
+
+function prefillCommand(command: '/goal' | '/model' | '/task'): void {
+  if (ide.isRunning.value) return;
+  ide.inputText.value = `${command} `;
 }
 
 function looksLikePackRequest(value: string): boolean {
@@ -242,9 +296,23 @@ async function saveEmptyTaskDraft(): Promise<void> {
           <AppIcon name="robot" :size="18" />
         </span>
         <div>
-          <h1>IDE</h1>
-          <p>1Shell AI</p>
+          <h1>Panel</h1>
+          <p>VPS 管理与 Agent 能力面板</p>
         </div>
+      </div>
+      <div class="ide-shell-meta" aria-label="当前 Agent 上下文">
+        <span class="ide-shell-chip ide-shell-chip--goal">
+          <span>Goal</span>
+          <strong>{{ agentGoalLabel }}</strong>
+        </span>
+        <span class="ide-shell-chip">
+          <span>Model</span>
+          <strong>{{ modelLabel }}</strong>
+        </span>
+        <span class="ide-shell-chip">
+          <span>Mode</span>
+          <strong>{{ modeLabel }}</strong>
+        </span>
       </div>
       <div class="ide-page-actions">
         <span class="ide-page-status">{{ ide.statusText.value }}</span>
@@ -305,11 +373,25 @@ async function saveEmptyTaskDraft(): Promise<void> {
           v-model="ide.inputText.value"
           rows="3"
           class="ide-chat-input"
-          placeholder="输入你的目标..."
+          placeholder="输入目标，或使用 /goal、/model 设置本会话上下文..."
           :disabled="ide.isRunning.value"
           spellcheck="false"
           @keydown="onInputKeydown"
         />
+        <div class="ide-chat-command-row" aria-label="Agent Shell 快捷命令">
+          <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/goal')">
+            <strong>/goal</strong>
+            <span>设置目标</span>
+          </button>
+          <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/model')">
+            <strong>/model</strong>
+            <span>模型偏好</span>
+          </button>
+          <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/task')">
+            <strong>/task</strong>
+            <span>任务创作</span>
+          </button>
+        </div>
         <div class="ide-chat-composer-actions">
           <div class="ide-chat-left-actions">
             <IdeApprovalModeMenu
@@ -485,6 +567,69 @@ async function saveEmptyTaskDraft(): Promise<void> {
 
 :global(.dark) .ide-page-title p {
   color: #94a3b8;
+}
+
+.ide-shell-meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.ide-shell-chip {
+  min-width: 0;
+  max-width: 210px;
+  min-height: 38px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 10px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding: 6px 10px;
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.ide-shell-chip span,
+.ide-shell-chip strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ide-shell-chip span {
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ide-shell-chip strong {
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.25;
+  font-weight: 760;
+}
+
+.ide-shell-chip--goal {
+  max-width: 320px;
+}
+
+:global(.dark) .ide-shell-chip {
+  border-color: rgba(51, 65, 85, 0.78);
+  background: rgba(2, 6, 23, 0.42);
+}
+
+:global(.dark) .ide-shell-chip span {
+  color: #94a3b8;
+}
+
+:global(.dark) .ide-shell-chip strong {
+  color: #e2e8f0;
 }
 
 .ide-page-actions {
@@ -778,6 +923,70 @@ async function saveEmptyTaskDraft(): Promise<void> {
 }
 
 :global(.dark) .ide-command-suggestion-copy span {
+  color: #94a3b8;
+}
+
+.ide-chat-command-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ide-chat-command-row button {
+  min-height: 36px;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  color: #334155;
+  background: rgba(248, 250, 252, 0.82);
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.ide-chat-command-row button:hover:not(:disabled),
+.ide-chat-command-row button:focus-visible {
+  border-color: rgba(14, 165, 233, 0.48);
+  color: #0369a1;
+  background: #f0f9ff;
+  outline: none;
+}
+
+.ide-chat-command-row button:focus-visible {
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.16);
+}
+
+.ide-chat-command-row button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.ide-chat-command-row strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+}
+
+.ide-chat-command-row span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+:global(.dark) .ide-chat-command-row button {
+  border-color: rgba(71, 85, 105, 0.76);
+  color: #cbd5e1;
+  background: rgba(2, 6, 23, 0.42);
+}
+
+:global(.dark) .ide-chat-command-row button:hover:not(:disabled),
+:global(.dark) .ide-chat-command-row button:focus-visible {
+  border-color: rgba(56, 189, 248, 0.34);
+  color: #7dd3fc;
+  background: rgba(14, 165, 233, 0.12);
+}
+
+:global(.dark) .ide-chat-command-row span {
   color: #94a3b8;
 }
 
@@ -1131,6 +1340,21 @@ async function saveEmptyTaskDraft(): Promise<void> {
   .ide-page-actions {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .ide-shell-meta {
+    width: 100%;
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .ide-shell-chip {
+    min-width: 128px;
+  }
+
+  .ide-shell-chip--goal {
+    min-width: 180px;
   }
 
   .ide-chat-composer-actions {

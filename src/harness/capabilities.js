@@ -218,6 +218,7 @@ const CAPABILITY_RULES = {
     // 只读能力下允许的工具
     allowedTools: new Set([
       'execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'list_hosts',
+      'load_skill',
       'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
       'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
     ]),

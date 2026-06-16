@@ -25,9 +25,17 @@ const taskPolicy = createIdeAgentPolicy({ tools: [], entry: 'task' });
 assert.ok(taskPolicy.capabilities.includes('task_authoring'), 'task policy must include task_authoring');
 
 const taskRunPolicy = createIdeAgentPolicy({ tools: [], entry: 'task_run' });
-assert.ok(!taskRunPolicy.capabilities.includes('task_authoring'), 'task_run policy must not include task_authoring');
+assert.ok(!taskRunPolicy.capabilities.includes('task_authoring'), 'task_run policy must not include task_authoring by default');
 assert.strictEqual(taskRunPolicy.approvalMode, 'delegated', 'task_run policy must default to delegated approval mode');
 assert.strictEqual(taskRunPolicy.approvalPolicy, 'none', 'task_run policy must not request interactive side-effect approvals');
+
+const taskRepairPolicy = createIdeAgentPolicy({
+  tools: [],
+  entry: 'task_run',
+  taskRepair: { authorized: true, taskId: 'task-demo', runId: 1 },
+});
+assert.ok(taskRepairPolicy.capabilities.includes('task_authoring'), 'task_run repair policy must temporarily include task_authoring');
+assert.strictEqual(taskRepairPolicy.approvalMode, 'delegated', 'task_run repair policy must remain delegated');
 
 const delegatedPolicy = createIdeAgentPolicy({ tools: [], entry: 'core', approvalMode: 'delegated' });
 assert.strictEqual(delegatedPolicy.approvalPolicy, 'none', 'delegated IDE mode must not request interactive side-effect approvals');
@@ -39,12 +47,21 @@ const ideServiceSource = fs.readFileSync(path.join(ROOT_DIR, 'src', 'ide', 'ide.
 const useIdeChatSource = fs.readFileSync(path.join(ROOT_DIR, 'frontend', 'src', 'composables', 'useIdeChat.ts'), 'utf8');
 assert.ok(ideServiceSource.includes('ctx.taskAuthoring'), '/task entry must be inferred from taskAuthoring context even if the frontend entry payload is missing');
 assert.ok(ideServiceSource.includes('ctx.taskRun'), 'task_run entry must be inferred from taskRun context');
+assert.ok(ideServiceSource.includes('taskRepairAuthorized'), 'task_run repair authorization must be carried through IDE context');
+assert.ok(ideServiceSource.includes("const repairToolNames = new Set(['preview_ai_task', 'update_ai_task', 'get_ai_task'])"), 'task_run repair must expose only the minimal task repair tool set');
 assert.ok(ideServiceSource.includes('const effectiveEntry = normalizePromptEntry(entry, context, message)'), 'IDE message handling must resolve an effective entry before creating the session');
 assert.ok(ideServiceSource.includes('entry: session.entry'), 'AgentRun policy must use the normalized session entry');
 assert.ok(ideServiceSource.includes('approvalMode: session.approvalMode'), 'AgentRun policy must use the normalized session approval mode');
-assert.ok(ideServiceSource.includes('validateTaskAuthoringToolCatalog'), '/task mode must validate that task authoring tools are exposed to the model');
-assert.ok(ideServiceSource.includes('REQUIRED_TASK_AUTHORING_TOOL_NAMES'), '/task mode must define required task authoring tools');
-assert.ok(ideServiceSource.includes("normalizePromptEntry(session?.entry) !== 'task'"), 'task authoring validation must remain scoped to /task only');
+assert.ok(ideServiceSource.includes('taskRepair: session.taskRepair'), 'AgentRun policy must receive per-run task repair authorization');
+// /task authoring is read-only exploration (A boundary); the evidence-gate / packaging machinery is gone.
+assert.ok(taskPolicy.capabilities.includes('read_only'), 'task authoring must keep read-only exploration');
+assert.ok(!taskPolicy.capabilities.includes('exec_command'), 'task authoring must drop exec_command so it cannot make real changes');
+assert.ok(taskRunPolicy.capabilities.includes('exec_command'), 'task_run execution must keep full exec capability');
+assert.strictEqual(checkCapabilities('execute_command', { command: 'ls -la /etc' }, taskPolicy.capabilities).allow, true, 'read-only command must be allowed during authoring');
+assert.strictEqual(checkCapabilities('execute_command', { command: 'rm -rf /tmp/x' }, taskPolicy.capabilities).allow, false, 'mutating command must be denied during authoring');
+assert.strictEqual(checkCapabilities('write_remote_file', { path: '/etc/x' }, taskPolicy.capabilities).allow, false, 'write tools must be denied during authoring');
+assert.ok(!ideServiceSource.includes('requireTaskAuthoringEvidence'), '/task authoring must not gate saving behind a practice/evidence wall');
+assert.ok(!ideServiceSource.includes('createTaskPackagingRequiredObservation'), '/task authoring must not force packaging via synthetic observations');
 assert.ok(useIdeChatSource.includes('buildOutgoingMessagePayload'), 'IDE frontend must snapshot entry/context before socket connection latency can reset /task state');
 assert.ok(useIdeChatSource.includes('const payload = buildOutgoingMessagePayload()'), 'IDE sendMessage must capture outgoing payload at send time');
 

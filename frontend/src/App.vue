@@ -4,7 +4,7 @@ import { RouterView } from 'vue-router';
 import { useApiClient, ApiError } from '@/composables/useApiClient';
 import { prefetchProbePageState } from '@/composables/useProbePrefetch';
 import { useAuthStore } from '@/stores/auth';
-import AppSidebar from './components/AppSidebar.vue';
+import AppHeader from './components/AppHeader.vue';
 import ToastHost from './components/ToastHost.vue';
 import AppAiFab from './components/AppAiFab.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
@@ -26,7 +26,6 @@ function prefetchProbeSilently(force = false): void {
   void prefetchProbePageState(requestJson, force).catch(() => undefined);
 }
 
-// 全局登录闸门：auth 启用且未登录 → 必须先登录
 const needLogin = computed(() => auth.enabled && !auth.authenticated);
 
 async function bootstrapAuth(): Promise<void> {
@@ -37,7 +36,6 @@ async function bootstrapAuth(): Promise<void> {
     if (!data.enabled || data.authenticated) prefetchProbeSilently();
     bootstrapError.value = null;
   } catch (err) {
-    // 后端不可达：保持未登录态，让 LoginScreen 自己显示报错
     auth.setEnabled(true);
     auth.setAuthenticated(false);
     bootstrapError.value = (err as ApiError | Error).message || '无法连接服务器';
@@ -56,7 +54,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <!-- 启动期 splash：等 /api/auth/status 返回，避免地图先闪一下 -->
+  <!-- 启动期 splash -->
   <div
     v-if="bootstrapping"
     class="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-950 text-slate-400 text-sm select-none"
@@ -71,14 +69,16 @@ onMounted(() => {
   <LoginScreen v-else-if="needLogin" @logged-in="onLoggedIn" />
 
   <!-- 已登录或 auth 关闭 → 正常 app shell -->
-  <div v-else class="min-h-screen flex text-slate-100 isolate">
+  <div v-else class="h-screen flex flex-col text-slate-100 isolate">
     <AppBackground />
-    <AppSidebar />
-    <main class="flex-1 min-w-0 overflow-hidden">
+    <AppHeader />
+    <main class="flex-1 min-h-0 overflow-hidden relative">
       <RouterView v-slot="{ Component }">
-        <KeepAlive>
-          <component :is="Component" />
-        </KeepAlive>
+        <div class="absolute inset-0 overflow-hidden">
+          <KeepAlive>
+            <component :is="Component" />
+          </KeepAlive>
+        </div>
       </RouterView>
     </main>
     <ToastHost />

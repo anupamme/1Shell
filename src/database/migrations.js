@@ -478,6 +478,28 @@ const migrations = [
       `);
     },
   },
+  {
+    version: 12,
+    name: 'ide sessions: persisted agent conversations',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ide_sessions (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT '',
+          entry TEXT NOT NULL DEFAULT 'core',
+          host_id TEXT,
+          model_label TEXT,
+          message_count INTEGER NOT NULL DEFAULT 0,
+          messages_json TEXT NOT NULL DEFAULT '[]',
+          preview TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ide_sessions_updated_at ON ide_sessions(updated_at);
+      `);
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

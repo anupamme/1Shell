@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
 import { RouterLink } from 'vue-router';
 import AppIcon from './AppIcon.vue';
 
@@ -11,52 +10,19 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { to: '/',             label: '主页', icon: 'globe',      title: '世界地图主页' },
-  { to: '/console',      label: '主控', icon: 'console',    title: '主控台' },
-  { to: '/ide',          label: 'IDE',  icon: 'robot',      title: '1Shell AI IDE' },
-  { to: '/hosts',        label: '主机', icon: 'server',     title: 'VPS 仓库' },
-  { to: '/features',     label: '功能', icon: 'wrench',     title: 'AI 任务与程序' },
-  { to: '/skills',       label: '仓库', icon: 'package',    title: '技能仓库' },
-  { to: '/mcp-hub',      label: 'MCP',  icon: 'plug',       title: 'MCP Hub' },
-  { to: '/cli-setup',    label: 'AI',   icon: 'spark',      title: 'AI 配置' },
-  { to: '/probe',        label: '探针', icon: 'radio',      title: '探针' },
-  { to: '/audit',        label: '审计', icon: 'clipboard',  title: '审计日志' },
+  { to: '/panel/hosts',    label: '主机', icon: 'server',      title: 'VPS 仓库' },
+  { to: '/panel/features', label: '程序', icon: 'wrench',      title: '任务与程序' },
+  { to: '/panel/skills',   label: '仓库', icon: 'package',     title: '技能仓库' },
+  { to: '/panel/mcp',      label: 'MCP',  icon: 'plug',        title: 'MCP Hub' },
+  { to: '/panel/ai',       label: 'AI',   icon: 'spark',       title: 'AI 配置' },
+  { to: '/panel/probe',    label: '探针', icon: 'radio',       title: '探针' },
+  { to: '/panel/audit',    label: '审计', icon: 'clipboard',   title: '审计日志' },
 ];
-
-const isDark = ref(true);
-const themeIcon = ref<'sun' | 'moon'>('sun');
-
-function syncFromDom(): void {
-  isDark.value = document.documentElement.classList.contains('dark');
-  themeIcon.value = isDark.value ? 'sun' : 'moon';
-}
-
-function toggleTheme(): void {
-  const html = document.documentElement;
-  const next = !html.classList.contains('dark');
-  if (next) html.classList.add('dark');
-  else html.classList.remove('dark');
-  localStorage.setItem('1shell-theme', next ? 'dark' : 'light');
-  syncFromDom();
-}
-
-onMounted(syncFromDom);
 </script>
 
 <template>
-  <aside
-    class="sidebar-aside shrink-0 w-16 flex flex-col items-stretch py-3"
-  >
-    <RouterLink
-      to="/"
-      class="sidebar-logo shrink-0 mx-auto mb-3 w-10 h-10 rounded-xl overflow-hidden flex items-center justify-center transition-all"
-      title="1Shell"
-    >
-      <img src="/logo.png" alt="1Shell" class="w-full h-full object-cover" />
-    </RouterLink>
-    <div class="sidebar-divider mx-3 h-px mb-2"></div>
-
-    <nav class="flex-1 flex flex-col gap-1 px-1">
+  <aside class="sidebar-aside shrink-0 w-16 flex flex-col items-stretch py-3">
+    <nav class="flex flex-col gap-1 px-1">
       <RouterLink
         v-for="item in navItems"
         :key="item.to"
@@ -68,26 +34,5 @@ onMounted(syncFromDom);
         <span>{{ item.label }}</span>
       </RouterLink>
     </nav>
-
-    <div class="shrink-0 flex flex-col gap-1 px-1">
-      <div class="sidebar-divider mx-3 h-px mb-1"></div>
-      <RouterLink
-        to="/settings"
-        class="side-nav-item"
-        title="系统设置"
-      >
-        <AppIcon name="cog" :size="20" />
-        <span>设置</span>
-      </RouterLink>
-      <button
-        type="button"
-        class="side-nav-item"
-        title="主题切换"
-        @click="toggleTheme"
-      >
-        <AppIcon :name="themeIcon" :size="18" />
-        <span>主题</span>
-      </button>
-    </div>
   </aside>
 </template>

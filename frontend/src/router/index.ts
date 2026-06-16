@@ -1,18 +1,38 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 
 const routes: RouteRecordRaw[] = [
-  { path: '/',             name: 'home',        component: () => import('@/views/WorldHomeView.vue') },
-  { path: '/console',      name: 'console',     component: () => import('@/views/MainConsoleView.vue') },
-  { path: '/ide',          name: 'ide',         component: () => import('@/views/IdeView.vue') },
-  { path: '/hosts',        name: 'hosts',       component: () => import('@/views/HostRepositoryView.vue') },
-  { path: '/audit',        name: 'audit',       component: () => import('@/views/AuditView.vue') },
-  { path: '/probe',        name: 'probe',       component: () => import('@/views/ProbeView.vue') },
-  { path: '/cli-setup',    name: 'cli-setup',   component: () => import('@/views/CliSetupView.vue') },
-  { path: '/features',     name: 'features',    component: () => import('@/views/FeaturesView.vue') },
-  { path: '/scripts',      redirect: { path: '/features', query: { tab: 'programs' } } },
-  { path: '/skills',       name: 'skills',      component: () => import('@/views/SkillsView.vue') },
-  { path: '/mcp-hub',      name: 'mcp-hub',     component: () => import('@/views/McpHubView.vue') },
-  { path: '/settings',     name: 'settings',    component: () => import('@/views/SettingsView.vue') },
+  // ========== 四大顶层页面 + 独立设置 ==========
+  { path: '/',         name: 'home',     component: () => import('@/views/WorldHomeView.vue') },
+  { path: '/agent',    name: 'agent',    component: () => import('@/views/AgentView.vue') },
+  { path: '/terminal', name: 'terminal', component: () => import('@/views/MainConsoleView.vue') },
+  { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
+  {
+    path: '/panel',
+    component: () => import('@/views/PanelView.vue'),
+    redirect: '/panel/hosts',
+    children: [
+      { path: 'hosts',     name: 'panel-hosts',     component: () => import('@/views/HostRepositoryView.vue') },
+      { path: 'probe',     name: 'panel-probe',     component: () => import('@/views/ProbeView.vue') },
+      { path: 'audit',     name: 'panel-audit',     component: () => import('@/views/AuditView.vue') },
+      { path: 'features',  name: 'panel-features',  component: () => import('@/views/FeaturesView.vue') },
+      { path: 'skills',    name: 'panel-skills',    component: () => import('@/views/SkillsView.vue') },
+      { path: 'mcp',       name: 'panel-mcp',       component: () => import('@/views/McpHubView.vue') },
+      { path: 'ai',        name: 'panel-ai',        component: () => import('@/views/CliSetupView.vue') },
+    ],
+  },
+
+  // ========== 兼容旧路径 ==========
+  { path: '/console',   redirect: '/terminal' },
+  { path: '/ide',       redirect: '/terminal' },
+  { path: '/hosts',     redirect: '/panel/hosts' },
+  { path: '/probe',     redirect: '/panel/probe' },
+  { path: '/audit',     redirect: '/panel/audit' },
+  { path: '/features',  redirect: '/panel/features' },
+  { path: '/scripts',   redirect: { path: '/panel/features', query: { tab: 'programs' } } },
+  { path: '/skills',    redirect: '/panel/skills' },
+  { path: '/mcp-hub',   redirect: '/panel/mcp' },
+  { path: '/cli-setup', redirect: '/panel/ai' },
+  { path: '/panel/settings', redirect: '/settings' },
 ];
 
 const router = createRouter({

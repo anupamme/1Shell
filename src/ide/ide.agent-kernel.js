@@ -29,12 +29,25 @@ function approvalPolicyForMode(approvalMode) {
   return approvalMode === 'manual' ? 'agent_side_effects' : 'none';
 }
 
-function createIdeAgentPolicy({ tools = [], entry = 'core', approvalMode = null, remotePolicy = null, goalProfile = null } = {}) {
+function createIdeAgentPolicy({ tools = [], entry = 'core', approvalMode = null, remotePolicy = null, goalProfile = null, taskRepair = null } = {}) {
   const toolNames = uniqueStrings(tools.map((tool) => tool?.name));
   const normalizedEntry = String(entry || 'core').trim().toLowerCase().replace(/[-\s]+/g, '_') || 'core';
   const normalizedApprovalMode = normalizeIdeApprovalMode(approvalMode, { entry: normalizedEntry });
-  const capabilities = ['read_only', 'exec_command', 'agent_control'];
-  if (normalizedEntry === 'task') capabilities.push('task_authoring');
+  const taskRepairAuthorized = isTaskRepairAuthorized(taskRepair);
+  // /task 创作模式只做只读探索 + 推演，不执行真正的变更：去掉 exec_command，
+  // 变更/高危工具与非只读命令由 Harness capability 直接拒绝（A 边界）。
+  // task_run 默认只执行任务；只有用户在失败后明确授权修复本任务时，才临时授予
+  // task_authoring，让 agent 可用 update_ai_task 修正该任务定义。
+  let capabilities;
+  if (normalizedEntry === 'task') {
+    capabilities = ['read_only', 'agent_control', 'task_authoring'];
+  } else if (normalizedEntry === 'task_run') {
+    capabilities = taskRepairAuthorized
+      ? ['read_only', 'exec_command', 'agent_control', 'task_authoring']
+      : ['read_only', 'exec_command', 'agent_control'];
+  } else {
+    capabilities = ['read_only', 'exec_command', 'agent_control'];
+  }
   return {
     allowedTools: toolNames,
     deniedTools: [],
@@ -51,10 +64,21 @@ function createIdeAgentPolicy({ tools = [], entry = 'core', approvalMode = null,
     maxRepeatedFailures: 3,
     readOnly: false,
     entry: normalizedEntry,
+    taskRepairAuthorized,
     remotePolicy: remotePolicy ? summarizeRemotePolicy(remotePolicy) : undefined,
     goalProfile: goalProfile || undefined,
     legacyFlagsIgnored: ['safeMode', 'unlimitedTurns'],
   };
+}
+
+function isTaskRepairAuthorized(value) {
+  if (value === true) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return value.authorized === true
+    || value.taskRepairAuthorized === true
+    || value.task_repair_authorized === true
+    || value.taskRepair === true
+    || value.task_repair === true;
 }
 
 function filterToolsForAgent(tools = [], policy = {}) {
@@ -116,6 +140,7 @@ module.exports = {
   createIdeAgentGoalProfile,
   evaluateIdeAgentProfileToolUse,
   filterToolsForAgent,
+  isTaskRepairAuthorized,
   normalizeIdeApprovalMode,
   normalizeIdeAgentToolInput,
   shouldRequestAgentApproval,

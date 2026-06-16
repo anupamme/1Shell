@@ -14,7 +14,7 @@ function commandHasTruncationMarker(command) {
   return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
 }
 
-function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness, agentRuntime }) {
+function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness, agentRuntime, skillRegistry }) {
   const coreTools = createOneShellCoreTools({
     bridgeService,
     hostService,
@@ -56,6 +56,20 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       name: 'list_hosts',
       description: '列出 1Shell 中所有已托管主机（含本机），返回 id / name / host / port。',
       input_schema: { type: 'object', properties: {}, required: [] },
+    },
+    {
+      name: 'load_skill',
+      description:
+        '读取一个 1Shell 技能（SKILL.md）的完整说明。' +
+        '\n系统提示里的「可用技能目录」只给出名称和简述；当某个技能与当前目标相关时，用本工具读取它的完整指令后再遵循。' +
+        '\n若技能正文引用了额外相对文件，用 read_remote_file（hostId="local", path="data/skills/<skill_id>/<相对路径>"）按需读取。',
+      input_schema: {
+        type: 'object',
+        properties: {
+          skill_id: { type: 'string', description: '技能 ID（来自可用技能目录的 skill_id）' },
+        },
+        required: ['skill_id'],
+      },
     },
     {
       name: 'ask_user',
@@ -684,286 +698,34 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     return verificationToolResult({ type: type || 'unknown', ok: false, status: 'unsupported', taskStatus: 'unverified', reason: input.reason, reasons: ['unsupported_verifier_type'], evidence: `unsupported type: ${input.type || ''}` });
   }
 
-  const TASK_AUTHORING_NON_PRACTICE_TOOLS = new Set([
-    'preview_ai_task',
-    'create_ai_task',
-    'update_ai_task',
-    'get_ai_task',
-    'ask_user',
-    'request_secret',
-    'verify_outcome',
-    'list_hosts',
-    'list_artifacts',
-    'query_format',
-    'list_scripts',
-    'list_mcp_servers',
-    'query_audit',
-  ]);
-
-  function requireTaskAuthoringEvidence({ runId, sessionId, session, taskPayload }) {
-    if (!runId) return { ok: false, error: 'Cannot save AI task: missing AgentRun id for this /task session.' };
-    if (!agentRuntime?.getState) return { ok: false, error: 'Cannot save AI task: AgentRun trace is unavailable, so practice evidence cannot be verified.' };
-    const state = agentRuntime.getState(runId);
-    if (!state) return { ok: false, error: `Cannot save AI task: AgentRun trace not found (${runId}).` };
-
-    const verification = latestSuccessfulVerification(state);
-    if (!verification) {
-      return {
-        ok: false,
-        error: 'Cannot save AI task: no successful verify_outcome evidence was recorded in this /task AgentRun. Practice the workflow first, then verify it with command/http/file/port evidence.',
-      };
-    }
-
-    if (String(verification.type || '').toLowerCase() === 'manual') {
-      return {
-        ok: false,
-        error: 'Cannot save AI task: manual verification is not enough for task authoring. Use command/http/file_exists/port verification with external evidence.',
-      };
-    }
-
-    const practiceCalls = successfulPracticeToolCalls(state);
-    if (practiceCalls.length === 0) {
-      return {
-        ok: false,
-        error: 'Cannot save AI task: this /task run has verification, but no successful practice tool call before saving. Reading or writing the task record itself is not workflow practice.',
-      };
-    }
-
-    if (looksLikePersistenceOnlyVerification(verification)) {
-      return {
-        ok: false,
-        error: 'Cannot save AI task: DB/task persistence verification does not count as workflow verification.',
-      };
-    }
-
-    const scopeCheck = validateTaskPayloadAgainstPractice(taskPayload, verification, practiceCalls);
-    if (!scopeCheck.ok) return scopeCheck;
-
-    return {
-      ok: true,
-      evidence: {
-        mode: 'agent_run_practice',
-        verified: true,
-        sessionId,
-        agentRunId: runId,
-        summary: summarizeAuthoringEvidence(verification, practiceCalls),
-        validatedScope: inferValidatedScope(session, verification, practiceCalls),
-        actions: practiceCalls.map((call) => summarizePracticeToolCall(call)).filter(Boolean).slice(0, 30),
-        verification: [summarizeVerificationForEvidence(verification)],
-        limitations: ['Only the practiced path in this AgentRun is validated. Untested branches must be marked unverified.'],
-        cleanup: { required: false, status: 'not_recorded' },
-        payload: {
-          verification,
-          practiceToolCalls: practiceCalls.map((call) => ({
-            toolName: call.toolName || '',
-            hostId: inferPracticeHostId(call),
-            status: call.status || '',
-            ok: call.result?.ok === true,
-            startedAt: call.startedAt || '',
-            endedAt: call.endedAt || '',
-          })),
-        },
-      },
-    };
-  }
-
-  function latestSuccessfulVerification(state = {}) {
-    const candidates = [];
-    if (state.verification) candidates.push(state.verification);
-    if (state.memory?.verification) candidates.push(state.memory.verification);
-    if (state.runtimeState?.worldState?.verification) candidates.push(state.runtimeState.worldState.verification);
-    const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
-    for (const artifact of artifacts) {
-      if (artifact?.type === 'verification_result' && artifact.data) {
-        candidates.push({ ...artifact.data, evidence: artifact.content || artifact.data.evidence || '' });
-      }
-    }
-    return candidates
-      .reverse()
-      .find((item) => item?.ok === true || String(item?.status || '').toLowerCase() === 'passed') || null;
-  }
-
-  function successfulPracticeToolCalls(state = {}) {
-    const toolCalls = Array.isArray(state.toolCalls) ? state.toolCalls : [];
-    return toolCalls.filter((call) => {
-      const name = String(call?.toolName || '').trim();
-      if (!name || TASK_AUTHORING_NON_PRACTICE_TOOLS.has(name)) return false;
-      if (String(call.status || '') !== 'completed') return false;
-      if (call.result && call.result.ok !== true) return false;
-      return true;
-    });
-  }
-
-  function looksLikePersistenceOnlyVerification(verification = {}) {
-    const text = [
-      verification.type,
-      verification.target,
-      verification.reason,
-      verification.evidence,
-      Array.isArray(verification.reasons) ? verification.reasons.join(' ') : '',
-    ].map((item) => String(item || '').toLowerCase()).join('\n');
-    return /(get_ai_task|create_ai_task|update_ai_task|ai_task|ai task|sqlite|database|db persistence|saved task|task id)/i.test(text);
-  }
-
-  function summarizeAuthoringEvidence(verification, practiceCalls) {
-    const first = practiceCalls[0];
-    const last = practiceCalls[practiceCalls.length - 1];
-    return [
-      `Practiced ${practiceCalls.length} tool call(s) before saving.`,
-      first?.toolName ? `First practice tool: ${first.toolName}.` : '',
-      last?.toolName ? `Last practice tool: ${last.toolName}.` : '',
-      verification?.type ? `Verified by ${verification.type}.` : '',
-      verification?.target ? `Target: ${verification.target}.` : '',
-    ].filter(Boolean).join(' ');
-  }
-
-  function inferValidatedScope(session, verification, practiceCalls) {
-    const hostIds = [...new Set(practiceCalls.map(inferPracticeHostId).filter(Boolean))];
-    const scope = [];
-    if (hostIds.length) scope.push(`host(s): ${hostIds.join(', ')}`);
-    if (verification?.type) scope.push(`verification: ${verification.type}`);
-    if (verification?.target) scope.push(`target: ${verification.target}`);
-    if (session?.entry) scope.push(`entry: ${session.entry}`);
-    return scope.length ? scope : ['current /task AgentRun practice path'];
-  }
-
-  function summarizePracticeToolCall(call = {}) {
-    const input = call.args || {};
-    const hostId = inferPracticeHostId(call);
-    const detail = input.command || input.path || input.url || input.scriptId || '';
-    return [call.toolName || 'tool', hostId ? `host=${hostId}` : '', detail ? String(detail).slice(0, 500) : ''].filter(Boolean).join(' ');
-  }
-
-  function inferPracticeHostId(call = {}) {
-    const input = call.args || {};
-    return String(input.hostId || input.host_id || input.host || call.scope?.hostId || '').trim();
-  }
-
-  function validateTaskPayloadAgainstPractice(taskPayload, verification, practiceCalls) {
-    if (!taskPayload || typeof taskPayload !== 'object') return { ok: true };
-    const taskText = taskPayloadText(taskPayload);
-    if (!taskClaimsGithubDeployment(taskPayload, taskText)) return { ok: true };
-
-    const practiceText = practiceEvidenceText(practiceCalls, verification);
-    const repoUrls = extractGithubUrls(taskText);
-    const repoUrlWasUsed = repoUrls.length === 0 || repoUrls.some((url) => evidenceContainsUrl(practiceText, url));
-    const repoWorkflowWasPracticed = /(git\s+(clone|pull|fetch|checkout)|docker\s+build|docker\s+compose\s+build|\bbuild\s*:|https?:\/\/github\.com\/[^\s"'`),]+\.git)/i.test(practiceText);
-
-    if (repoUrlWasUsed && repoWorkflowWasPracticed) return { ok: true };
-
-    const imageOnlyHint = /(image\s*:|docker\s+pull|calciumion\/new-api|ghcr\.io\/|docker\.io\/)/i.test(practiceText);
-    return {
-      ok: false,
-      error: imageOnlyHint
-        ? 'Cannot save AI task: the task claims GitHub repository deployment, but the practiced path used a prebuilt Docker image. Practice cloning/building the GitHub repo first, or package this as an image-based deployment task without repo_url/GitHub-project claims.'
-        : 'Cannot save AI task: the task claims GitHub repository deployment, but the AgentRun has no successful git clone/build/repository-use evidence. Practice the repository workflow first, then save only that verified path.',
-    };
-  }
-
-  function taskPayloadText(payload = {}) {
-    const parts = [payload.name, payload.description];
-    for (const input of Array.isArray(payload.inputs) ? payload.inputs : []) {
-      if (!input || typeof input !== 'object') continue;
-      parts.push(input.key, input.label, input.type, input.default, input.placeholder, input.help);
-      if (Array.isArray(input.options)) {
-        for (const option of input.options) parts.push(option?.value, option?.label);
-      }
-    }
-    for (const step of Array.isArray(payload.steps) ? payload.steps : []) {
-      if (!step || typeof step !== 'object') continue;
-      parts.push(step.title, step.instruction);
-    }
-    return parts.map((part) => String(part || '')).join('\n');
-  }
-
-  function taskClaimsGithubDeployment(payload = {}, taskText = '') {
-    const inputs = Array.isArray(payload.inputs) ? payload.inputs : [];
-    const hasRepoInput = inputs.some((input) => {
-      const text = [input?.key, input?.label, input?.help, input?.default].map((part) => String(part || '')).join(' ');
-      return /(^|[_\s-])(repo|repository|repo_url)([_\s-]|$)|github|仓库/i.test(text);
-    });
-    const textClaimsDeployment = /(github|github\.com|仓库|repo|repository)/i.test(taskText)
-      && /(deploy|deployment|部署|发布|上线|clone|build|构建|运行)/i.test(taskText);
-    return hasRepoInput || textClaimsDeployment;
-  }
-
-  function practiceEvidenceText(practiceCalls = [], verification = {}) {
-    const parts = [];
-    for (const call of practiceCalls) {
-      parts.push(call?.toolName);
-      parts.push(safeStringify(call?.args));
-      parts.push(safeStringify(call?.result));
-      parts.push(call?.content, call?.stdout, call?.stderr);
-    }
-    parts.push(safeStringify(verification));
-    return parts.map((part) => String(part || '')).join('\n');
-  }
-
-  function safeStringify(value) {
-    if (value == null) return '';
-    if (typeof value === 'string') return value;
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return String(value);
-    }
-  }
-
-  function extractGithubUrls(text) {
-    const matches = String(text || '').match(/https?:\/\/github\.com\/[^\s"'`),]+/ig) || [];
-    return [...new Set(matches.map(normalizeEvidenceUrl).filter(Boolean))];
-  }
-
-  function evidenceContainsUrl(evidenceText, url) {
-    const normalizedEvidence = normalizeEvidenceUrl(evidenceText);
-    const normalizedUrl = normalizeEvidenceUrl(url);
-    return Boolean(normalizedUrl && normalizedEvidence.includes(normalizedUrl));
-  }
-
-  function normalizeEvidenceUrl(value) {
-    return String(value || '')
-      .trim()
-      .toLowerCase()
-      .replace(/\.git\b/g, '')
-      .replace(/[\\/#?&]+$/g, '');
-  }
-
-  function summarizeVerificationForEvidence(verification = {}) {
-    return [
-      verification.type ? `type=${verification.type}` : '',
-      verification.target ? `target=${verification.target}` : '',
-      verification.status ? `status=${verification.status}` : 'status=passed',
-      verification.evidence ? `evidence=${String(verification.evidence).slice(0, 2000)}` : '',
-    ].filter(Boolean).join('\n');
-  }
-
-  function publicAuthoringEvidence(evidence = {}) {
-    return {
-      verified: evidence.verified === true,
-      mode: evidence.mode || '',
-      agentRunId: evidence.agentRunId || '',
-      summary: evidence.summary || '',
-      validatedScope: Array.isArray(evidence.validatedScope) ? evidence.validatedScope : [],
-      limitations: Array.isArray(evidence.limitations) ? evidence.limitations : [],
-    };
-  }
-
   function emitTaskSaved(socket, payload = {}) {
     if (!socket?.emit) return;
     emitIdeEvent(socket, 'ide:task-saved', payload);
   }
 
   async function handle(name, input, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta }) {
-    const authoringBlocked = null;
-    if (authoringBlocked) return authoringBlocked;
-
     if (CORE_DELEGATED_TOOL_NAMES.has(name)) {
       return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta, source: 'ide' });
     }
 
     switch (name) {
+      case 'load_skill': {
+        if (!skillRegistry?.getSkill) return err('Skill registry 未初始化');
+        const skillId = String(input?.skill_id || input?.id || '').trim();
+        if (!skillId) return err('skill_id 为必填');
+        const skill = skillRegistry.getSkill(skillId);
+        if (!skill) return err(`技能不存在: ${skillId}`);
+        const body = skillRegistry.getSkillBody?.(skillId) || '';
+        const header = [
+          `# Skill: ${skill.name || skill.id} (${skill.id})`,
+          skill.description ? `Description: ${skill.description}` : '',
+          Array.isArray(skill.tags) && skill.tags.length ? `Tags: ${skill.tags.join(', ')}` : '',
+        ].filter(Boolean).join('\n');
+        return ok(`${header}\n\n${body}`.trim() || `技能 ${skillId} 没有正文内容。`);
+      }
+
       case 'preview_ai_task': {
-        const blocked = requireTaskAuthoringSession(session);
+        const blocked = requireTaskAuthoringSession(session, name, input);
         if (blocked) return blocked;
         if (!aiTaskService?.previewTask) return err('AI 任务服务未初始化');
         try {
@@ -971,9 +733,8 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
           return ok(formatJson({
             ok: true,
             status: 'draft',
-            saveStatus: 'cannot_save_until_practiced',
             task,
-            message: 'Preview only. Practice the workflow and record successful verify_outcome evidence before saving.',
+            message: 'Preview only. Call create_ai_task to save.',
           }));
         } catch (e) {
           return err(e.message);
@@ -981,35 +742,30 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       }
 
       case 'create_ai_task': {
-        const blocked = requireTaskAuthoringSession(session);
+        const blocked = requireTaskAuthoringSession(session, name, input);
         if (blocked) return blocked;
         if (!aiTaskService?.createTask) return err('AI 任务服务未初始化');
         try {
-          const evidenceGate = requireTaskAuthoringEvidence({ runId, sessionId, session, taskPayload: input || {} });
-          if (!evidenceGate.ok) return err(evidenceGate.error);
-          const createdTask = aiTaskService.createTask(input || {}, { authoringEvidence: evidenceGate.evidence });
+          const createdTask = aiTaskService.createTask(input || {});
           emitTaskSaved(socket, {
             sessionId,
             runId,
             action: 'created',
             taskId: createdTask.id,
             task: createdTask,
-            authoringEvidence: publicAuthoringEvidence(evidenceGate.evidence),
           });
           return ok(formatJson({
             ok: true,
             task: createdTask,
-            authoringEvidence: publicAuthoringEvidence(evidenceGate.evidence),
-            message: 'AI task saved from a practiced and verified AgentRun.',
+            message: 'AI 任务已保存。可在 功能 / AI 任务 中继续编辑或执行；执行失败时也可让 AI 直接修改该任务。',
           }));
-          return ok(formatJson({ ok: true, task, message: 'AI 任务已创建。用户可以在 功能 / AI 任务 中继续编辑或执行。' }));
         } catch (e) {
           return err(e.message);
         }
       }
 
       case 'update_ai_task': {
-        const blocked = requireTaskAuthoringSession(session);
+        const blocked = requireTaskAuthoringSession(session, name, input);
         if (blocked) return blocked;
         if (!aiTaskService?.updateTask) return err('AI 任务服务未初始化');
         const id = String(input?.id || '').trim();
@@ -1023,9 +779,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
             inputs: input?.inputs ?? existing.inputs,
             steps: input?.steps ?? existing.steps,
           };
-          const evidenceGate = requireTaskAuthoringEvidence({ runId, sessionId, session, taskPayload: payload });
-          if (!evidenceGate.ok) return err(evidenceGate.error);
-          const task = aiTaskService.updateTask(id, payload, { authoringEvidence: evidenceGate.evidence });
+          const task = aiTaskService.updateTask(id, payload);
           if (!task) return err(`AI 任务不存在: ${id}`);
           emitTaskSaved(socket, {
             sessionId,
@@ -1033,7 +787,6 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
             action: 'updated',
             taskId: task.id,
             task,
-            authoringEvidence: publicAuthoringEvidence(evidenceGate.evidence),
           });
           return ok(formatJson({ ok: true, task, message: 'AI 任务已更新。' }));
         } catch (e) {
@@ -1042,7 +795,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       }
 
       case 'get_ai_task': {
-        const blocked = requireTaskAuthoringSession(session);
+        const blocked = requireTaskAuthoringSession(session, name, input);
         if (blocked) return blocked;
         if (!aiTaskService?.getTask) return err('AI 任务服务未初始化');
         const id = String(input?.id || '').trim();
@@ -1373,8 +1126,24 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     return result;
   }
 
-  function requireTaskAuthoringSession(session) {
+  function requireTaskAuthoringSession(session, toolName = '', input = {}) {
     if (String(session?.entry || '') === 'task') return null;
+    const repair = session?.taskRepair && typeof session.taskRepair === 'object' ? session.taskRepair : {};
+    const repairAuthorized = String(session?.entry || '') === 'task_run' && repair.authorized === true;
+    if (repairAuthorized) {
+      const name = String(toolName || '').trim();
+      if (name === 'create_ai_task') return err('任务执行修复模式只能修订当前任务，不能创建新任务');
+      if (!['preview_ai_task', 'update_ai_task', 'get_ai_task'].includes(name)) {
+        return err('任务执行修复模式只允许预览、读取或更新当前任务');
+      }
+      const expectedTaskId = String(repair.taskId || '').trim();
+      if (!expectedTaskId) return err('任务执行修复模式缺少当前任务 ID，已拒绝修改任务');
+      const requestedTaskId = String(input?.id || input?.taskId || '').trim();
+      if ((name === 'update_ai_task' || name === 'get_ai_task') && expectedTaskId && requestedTaskId && requestedTaskId !== expectedTaskId) {
+        return err(`任务执行修复模式只能修改当前任务：${expectedTaskId}`);
+      }
+      return null;
+    }
     return err('AI 任务创作工具只能在 IDE 的 /task 模式中使用');
   }
 

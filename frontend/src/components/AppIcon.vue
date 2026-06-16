@@ -273,6 +273,24 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M12 19V5M6 11l6-6 6 6" />
     </template>
 
+    <!-- 发送 -->
+    <template v-else-if="name === 'send'">
+      <path d="M21 3L10 14" />
+      <path d="M21 3l-7 18-4-7-7-4 18-7z" />
+    </template>
+
+    <!-- 附件 -->
+    <template v-else-if="name === 'paperclip'">
+      <path d="M21 11.5l-8.5 8.5a5 5 0 0 1-7.1-7.1l9-9a3.2 3.2 0 0 1 4.5 4.5l-9 9a1.5 1.5 0 0 1-2.1-2.1l8.3-8.3" />
+    </template>
+
+    <!-- 图片 -->
+    <template v-else-if="name === 'image'">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8.5" cy="10" r="1.5" />
+      <path d="M21 15l-4.5-4.5L7 19" />
+    </template>
+
     <!-- 关闭 X -->
     <template v-else-if="name === 'close'">
       <path d="M6 6l12 12M18 6l-6 6-6 6" />

@@ -7,7 +7,7 @@ import { createStreamDeltaBuffer } from '@/utils/streaming';
 
 type IdeChatRole = 'user' | 'assistant';
 type IdeChatStatus = 'streaming' | 'done' | 'error' | 'cancelled';
-type IdeTimelineKind = 'user' | 'assistant' | 'thinking' | 'tool';
+type IdeTimelineKind = 'user' | 'assistant' | 'thinking' | 'tool' | 'system';
 export type IdeApprovalMode = 'manual' | 'delegated' | 'full_access';
 export type IdeToolStatus = 'preparing' | 'running' | 'done' | 'error';
 export type IdeToolLogStream = 'stdout' | 'stderr';
@@ -32,6 +32,14 @@ export interface IdeThinkingTimelineItem {
   text: string;
 }
 
+export interface IdeSystemTimelineItem {
+  id: string;
+  kind: 'system';
+  title: string;
+  text: string;
+  tone?: 'info' | 'success' | 'warning';
+}
+
 export interface IdeToolTimelineItem {
   id: string;
   kind: 'tool';
@@ -47,7 +55,7 @@ export interface IdeToolTimelineItem {
   logs: IdeToolLogEntry[];
 }
 
-export type IdeTimelineItem = IdeChatMessage | IdeThinkingTimelineItem | IdeToolTimelineItem;
+export type IdeTimelineItem = IdeChatMessage | IdeThinkingTimelineItem | IdeToolTimelineItem | IdeSystemTimelineItem;
 
 export interface IdeApprovalFacts {
   schemaVersion?: number;
@@ -101,6 +109,12 @@ export interface IdeChatOptions {
   context?: () => Record<string, unknown>;
   messagePayload?: () => Record<string, unknown>;
   onTaskSaved?: (payload: IdeTaskSavedMessage) => void;
+  onRunComplete?: () => void;
+}
+
+export interface IdeLoadableSession {
+  id: string;
+  timeline: IdeTimelineItem[];
 }
 
 export interface IdeTaskSavedMessage extends StreamMessage {
@@ -108,6 +122,16 @@ export interface IdeTaskSavedMessage extends StreamMessage {
   taskId?: string;
   task?: unknown;
   authoringEvidence?: unknown;
+}
+
+export interface IdeRewindPoint {
+  id: string;
+  ordinal: number;
+  text: string;
+  createdAt: string;
+  undoCount: number;
+  hostId?: string;
+  messageLength?: number;
 }
 
 export interface IdeChatApi {
@@ -118,13 +142,17 @@ export interface IdeChatApi {
   readonly approveRequest: Ref<IdeApprovalRequest | null>;
   readonly approveCustomText: Ref<string>;
   readonly hasMessages: ComputedRef<boolean>;
+  readonly currentSessionId: Ref<string>;
   sendMessage(): void;
   prefillAndSend(message: string, onOpen?: () => void): void;
+  listRewindPoints(): Promise<IdeRewindPoint[]>;
+  loadSession(session: IdeLoadableSession): void;
   stop(): void;
   resetChat(): void;
   approveAllow(): void;
   approveDeny(): void;
   approveCustom(): void;
+  pushSystemEvent(title: string, text: string, tone?: IdeSystemTimelineItem['tone']): void;
   dispose(): void;
 }
 
@@ -331,6 +359,11 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
   const hasMessages = computed(() => timeline.value.length > 0);
 
   let sessionId = makeId(options.sessionPrefix || 'ide-page');
+  const currentSessionId = ref(sessionId);
+  function setSessionId(id: string): void {
+    sessionId = id;
+    currentSessionId.value = id;
+  }
   let socket: Socket | null = null;
   let cleanupHandlers: (() => void) | null = null;
   let currentAssistant: IdeChatMessage | null = null;
@@ -380,6 +413,19 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
       kind: 'user',
       role: 'user',
       text,
+    });
+  }
+
+  function pushSystemEvent(title: string, text: string, tone: IdeSystemTimelineItem['tone'] = 'info'): void {
+    const cleanTitle = messageText(title) || '系统事件';
+    const cleanText = messageText(text);
+    if (!cleanText) return;
+    timeline.value.push({
+      id: makeId('system'),
+      kind: 'system',
+      title: cleanTitle,
+      text: cleanText,
+      tone,
     });
   }
 
@@ -547,6 +593,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     approveCustomText.value = '';
     clearApproveTick();
     clearSendTimers();
+    options.onRunComplete?.();
   }
 
   function clearSendTimers(): void {
@@ -669,6 +716,17 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         const msg = raw as IdeTaskSavedMessage;
         if (!matchesCurrentRun(msg)) return;
         options.onTaskSaved?.(msg);
+      }],
+      ['ide:rewind', (raw: unknown) => {
+        const msg = raw as StreamMessage & { timeline?: IdeTimelineItem[] };
+        if (!matchesCurrentRun(msg)) return;
+        deltaBuffer.clear();
+        currentAssistant = null;
+        timeline.value = Array.isArray(msg.timeline) ? [...msg.timeline] : [];
+        approveRequest.value = null;
+        approveCustomText.value = '';
+        clearApproveTick();
+        setStatus('已回溯');
       }],
       ['ide:done', (raw: unknown) => {
         const msg = raw as StreamMessage & { taskStatus?: string };
@@ -850,6 +908,45 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     }, 8000);
   }
 
+  function listRewindPoints(): Promise<IdeRewindPoint[]> {
+    const sock = bindSocket();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timeoutHandle: number | null = null;
+
+      const finish = (err: Error | null, points: IdeRewindPoint[] = []) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutHandle !== null) window.clearTimeout(timeoutHandle);
+        sock.off('connect', emitRequest);
+        if (err) reject(err);
+        else resolve(points);
+      };
+
+      const emitRequest = () => {
+        sock.emit('ide:rewind-list', { sessionId }, (ack: { ok?: boolean; error?: string; points?: IdeRewindPoint[] } | undefined) => {
+          if (!ack?.ok) {
+            finish(new Error(ack?.error || 'failed to load rewind points'));
+            return;
+          }
+          finish(null, Array.isArray(ack.points) ? ack.points : []);
+        });
+      };
+
+      timeoutHandle = window.setTimeout(() => {
+        finish(new Error('rewind list request timed out'));
+      }, 8000);
+
+      if (sock.connected) {
+        emitRequest();
+        return;
+      }
+
+      sock.once('connect', emitRequest);
+      sock.connect();
+    });
+  }
+
   function sendMessage(): void {
     const text = messageText(inputText.value);
     if (!text || isRunning.value) return;
@@ -899,7 +996,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
   function resetChat(): void {
     if (isRunning.value) return;
     if (socket && sessionId) socket.emit('ide:clear', { sessionId });
-    sessionId = makeId(options.sessionPrefix || 'ide-page');
+    setSessionId(makeId(options.sessionPrefix || 'ide-page'));
     timeline.value = [];
     currentAssistant = null;
     activeRunId = null;
@@ -907,6 +1004,27 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     stopRequested = false;
     currentTextHadDelta = false;
     deltaBuffer.clear();
+    approveRequest.value = null;
+    approveCustomText.value = '';
+    clearApproveTick();
+    setStatus('待命');
+  }
+
+  // Resume a persisted conversation: swap the active session id and rebuild the
+  // timeline from the server projection. Does NOT emit ide:clear — the previous
+  // session stays in history. The backend rehydrates model context (from its
+  // in-memory map or DB) on the next ide:message for this id.
+  function loadSession(session: IdeLoadableSession): void {
+    if (isRunning.value || !session?.id) return;
+    deltaBuffer.clear();
+    setSessionId(session.id);
+    timeline.value = Array.isArray(session.timeline) ? [...session.timeline] : [];
+    currentAssistant = null;
+    activeRunId = null;
+    stoppedRunId = null;
+    stopRequested = false;
+    currentTextHadDelta = false;
+    completedRunIds.clear();
     approveRequest.value = null;
     approveCustomText.value = '';
     clearApproveTick();
@@ -929,13 +1047,17 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     approveRequest,
     approveCustomText,
     hasMessages,
+    currentSessionId,
     sendMessage,
     prefillAndSend,
+    listRewindPoints,
+    loadSession,
     stop,
     resetChat,
     approveAllow,
     approveDeny,
     approveCustom,
+    pushSystemEvent,
     dispose,
   };
 }

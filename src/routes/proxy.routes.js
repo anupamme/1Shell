@@ -330,7 +330,7 @@ function convertAnthropicUserMsg(msg) {
 
   const result = [];
   const toolResults = msg.content.filter(b => b.type === 'tool_result');
-  const textParts = msg.content.filter(b => b.type === 'text');
+  const userBlocks = [];
 
   for (const tr of toolResults) {
     const content = typeof tr.content === 'string' ? tr.content
@@ -338,8 +338,28 @@ function convertAnthropicUserMsg(msg) {
     result.push({ role: 'tool', tool_call_id: tr.tool_use_id || 'unknown', content: content || '' });
   }
 
-  const textContent = textParts.map(b => b.text || '').join('\n');
-  if (textContent) result.push({ role: 'user', content: textContent });
+  for (const block of msg.content) {
+    if (!block || block.type === 'tool_result') continue;
+    if (block.type === 'text' && block.text) {
+      userBlocks.push({ type: 'text', text: block.text });
+      continue;
+    }
+    if (block.type === 'image' && block.source?.type === 'base64' && block.source?.data) {
+      const mediaType = block.source.media_type || 'image/png';
+      userBlocks.push({
+        type: 'image_url',
+        image_url: { url: `data:${mediaType};base64,${block.source.data}` },
+      });
+      continue;
+    }
+    if (block.type === 'document') {
+      const title = block.title || block.name || 'document';
+      userBlocks.push({ type: 'text', text: `[Document attachment: ${title}. This OpenAI-compatible upstream cannot receive the raw document block through the 1Shell proxy yet.]` });
+    }
+  }
+
+  if (userBlocks.length === 1 && userBlocks[0].type === 'text') result.push({ role: 'user', content: userBlocks[0].text });
+  else if (userBlocks.length > 0) result.push({ role: 'user', content: userBlocks });
 
   return result;
 }
@@ -1064,6 +1084,7 @@ function createProxyConfigStore(dataDir) {
       apiKeySet: Boolean(p.apiKey),
       model: p.model || '',
       upstreamProtocol: p.upstreamProtocol || 'openai',
+      enabled: p.enabled !== false,
     };
   }
 
@@ -1097,6 +1118,7 @@ function createProxyConfigStore(dataDir) {
       apiKey: (data.apiKey || '').trim(),
       model: (data.model || '').trim(),
       upstreamProtocol: data.upstreamProtocol || 'openai',
+      enabled: true,
     };
     cli.providers.push(provider);
     if (!cli.activeProviderId) cli.activeProviderId = id;
@@ -1115,6 +1137,7 @@ function createProxyConfigStore(dataDir) {
     if (typeof partial.apiKey === 'string') p.apiKey = partial.apiKey.trim();
     if (typeof partial.model === 'string') p.model = partial.model.trim();
     if (typeof partial.upstreamProtocol === 'string') p.upstreamProtocol = partial.upstreamProtocol;
+    if (typeof partial.enabled === 'boolean') { p.enabled = partial.enabled; }
     _writeAll(all);
     return true;
   }

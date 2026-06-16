@@ -66,6 +66,46 @@ function createSkillRouter({ libraryService, skillRunner, claudeCodeSkillRegistr
     }
   });
 
+  // 一气导入：从 GitHub clone → 转换成 1Shell 标准 SKILL.md → 落进唯一的 skill 库。
+  // 中转区（claude-code-skills）只作为 clone 暂存的实现细节，导入成功后清理。
+  router.post('/skills/import', async (req, res) => {
+    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Skill 导入功能未启用' });
+    let stagedId = null;
+    try {
+      const pkg = await claudeCodeSkillRegistry.register(req.body || {});
+      stagedId = pkg?.id || null;
+      if (!Array.isArray(pkg?.skills) || pkg.skills.length === 0) {
+        if (stagedId) { try { claudeCodeSkillRegistry.deleteSkill(stagedId); } catch { /* ignore */ } }
+        return res.status(400).json({ ok: false, error: '未在仓库中发现标准 SKILL.md，无法导入。' });
+      }
+      const result = convertClaudeCodeSkillPackage({
+        packageInfo: pkg,
+        skillsDir: path.join(ROOT_DIR, 'data', 'skills'),
+      });
+      libraryService.reload();
+      // 已落 native 库，清理中转暂存（builtin 不可删，导入的都不是 builtin）。
+      try { claudeCodeSkillRegistry.deleteSkill(stagedId); } catch { /* ignore */ }
+      return res.status(201).json({ ok: true, imported: result.converted || [] });
+    } catch (err) {
+      if (stagedId) { try { claudeCodeSkillRegistry.deleteSkill(stagedId); } catch { /* ignore */ } }
+      return res.status(err.statusCode || 400).json({ ok: false, error: err.message });
+    }
+  });
+
+  // 启用/禁用 skill（控制它是否进 1Shell AI 的可用技能目录；默认全关，由用户手动开启）
+  router.patch('/skills/:id', (req, res) => {
+    try {
+      if (typeof req.body?.enabled !== 'boolean') {
+        return res.status(400).json({ ok: false, error: 'enabled 必须是布尔值' });
+      }
+      const skill = libraryService.setSkillEnabled(req.params.id, req.body.enabled);
+      if (!skill) return res.status(404).json({ ok: false, error: 'Skill 不存在' });
+      return res.json({ ok: true, skill: stripDir(skill) });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   // ── Claude Code Skill 托管仓库 ─────────────────────
   router.get('/claude-code-skills', (_req, res) => {
     if (!claudeCodeSkillRegistry) return res.json({ ok: true, skills: [] });

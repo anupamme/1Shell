@@ -13,10 +13,5 @@ assert(source.includes('isEmptyModelResult(lastResult)'), 'IDE loop must disting
 assert(source.includes('empty_model_response'), 'IDE loop must trace empty model responses');
 assert(source.includes('Cannot continue IDE agent run: provider returned empty assistant responses repeatedly.'), 'repeated empty responses must surface as an error');
 assert(!source.includes('if (toolCalls.length === 0) break; // model produced a final answer (end_turn)'), 'empty no-tool responses must not be treated as final answers');
-assert(source.includes('TASK_AUTHORING_PACKAGING_RETRY_LIMIT'), '/task mode must cap packaging continuation retries');
-assert(source.includes('shouldContinueTaskAuthoringPackaging'), '/task mode must prevent finalizing after verified practice before saving a task');
-assert(source.includes('RUNTIME_TASK_PACKAGING_REQUIRED'), '/task mode must inject a packaging-required observation');
-assert(source.includes('task_packaging_required'), '/task packaging guard must be traced');
-assert(source.includes('Cannot complete /task authoring: the workflow was practiced and verified, but no AI task was saved.'), '/task mode must error visibly if packaging is repeatedly skipped');
 
 console.log('ide empty response guard checks passed');

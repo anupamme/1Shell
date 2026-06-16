@@ -2,6 +2,7 @@
 import AppIcon from '@/components/AppIcon.vue';
 import {
   type IdeChatMessage,
+  type IdeSystemTimelineItem,
   type IdeThinkingTimelineItem,
   type IdeTimelineItem,
   type IdeToolTimelineItem,
@@ -23,6 +24,10 @@ function isThinkingItem(item: IdeTimelineItem): item is IdeThinkingTimelineItem 
   return item.kind === 'thinking';
 }
 
+function isSystemItem(item: IdeTimelineItem): item is IdeSystemTimelineItem {
+  return item.kind === 'system';
+}
+
 function isToolItem(item: IdeTimelineItem): item is IdeToolTimelineItem {
   return item.kind === 'tool';
 }
@@ -33,6 +38,12 @@ function messageIcon(item: IdeChatMessage): string {
 
 function messageLabel(item: IdeChatMessage): string {
   return item.role === 'user' ? '你' : '1Shell AI';
+}
+
+function systemIcon(item: IdeSystemTimelineItem): string {
+  if (item.tone === 'success') return 'check';
+  if (item.tone === 'warning') return 'alert';
+  return 'terminal';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -244,6 +255,22 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
       </article>
 
       <article
+        v-else-if="isSystemItem(item)"
+        class="ide-agent-system"
+        :class="item.tone ? `ide-agent-system--${item.tone}` : ''"
+      >
+        <div class="ide-agent-system-card">
+          <span class="ide-agent-system-icon">
+            <AppIcon :name="systemIcon(item)" :size="14" />
+          </span>
+          <span class="ide-agent-system-copy">
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.text }}</span>
+          </span>
+        </div>
+      </article>
+
+      <article
         v-else-if="isToolItem(item)"
         class="ide-agent-tool"
         :class="`ide-agent-tool--${item.status}`"
@@ -316,6 +343,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 
 .ide-agent-message,
 .ide-agent-thinking,
+.ide-agent-system,
 .ide-agent-tool {
   max-width: min(900px, 100%);
 }
@@ -332,9 +360,99 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 
 .ide-agent-message--assistant,
 .ide-agent-thinking,
+.ide-agent-system,
 .ide-agent-tool {
   margin-right: auto;
   justify-items: start;
+}
+
+.ide-agent-system-card {
+  min-height: 42px;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 8px;
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  background: rgba(241, 245, 249, 0.76);
+  color: #334155;
+}
+
+:global(.dark) .ide-agent-system-card {
+  border-color: rgba(71, 85, 105, 0.72);
+  background: rgba(15, 23, 42, 0.64);
+  color: #cbd5e1;
+}
+
+.ide-agent-system-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #0369a1;
+  background: rgba(224, 242, 254, 0.72);
+  border: 1px solid rgba(186, 230, 253, 0.9);
+}
+
+.ide-agent-system--success .ide-agent-system-icon {
+  color: #047857;
+  background: #d1fae5;
+  border-color: #a7f3d0;
+}
+
+.ide-agent-system--warning .ide-agent-system-icon {
+  color: #b45309;
+  background: #fef3c7;
+  border-color: #fde68a;
+}
+
+:global(.dark) .ide-agent-system-icon {
+  color: #7dd3fc;
+  background: rgba(14, 165, 233, 0.12);
+  border-color: rgba(56, 189, 248, 0.22);
+}
+
+:global(.dark) .ide-agent-system--success .ide-agent-system-icon {
+  color: #86efac;
+  background: rgba(22, 101, 52, 0.24);
+  border-color: rgba(74, 222, 128, 0.28);
+}
+
+:global(.dark) .ide-agent-system--warning .ide-agent-system-icon {
+  color: #fcd34d;
+  background: rgba(120, 53, 15, 0.28);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
+.ide-agent-system-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.ide-agent-system-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.3;
+  font-weight: 760;
+}
+
+.ide-agent-system-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+:global(.dark) .ide-agent-system-copy span {
+  color: #94a3b8;
 }
 
 .ide-agent-message-meta {

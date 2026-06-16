@@ -1,6 +1,7 @@
 'use strict';
 
-const DEFAULT_MAX_ACTIVE_SKILLS = 3;
+// 渐进式披露后，目录项只占 name+description，可以列更多 skill 而几乎不增加 token。
+const DEFAULT_MAX_ACTIVE_SKILLS = 12;
 const DEFAULT_MAX_SKILL_BODY_CHARS = 18000;
 const DEFAULT_MAX_TOTAL_CHARS = 36000;
 
@@ -59,8 +60,20 @@ function selectAiSkills({
     const full = skillRegistry.getSkill?.(listed.id) || listed;
     if (!full?.id) continue;
     const score = scoreSkill(full, requestText, explicitIds);
-    if (score.explicit) requested.push({ skill: full, score });
-    else if (score.value > 0) scored.push({ skill: full, score });
+    if (score.explicit) {
+      requested.push({ skill: full, score });
+      continue;
+    }
+    // 渐进式披露 + 默认全关：用户在 Tools 面板手动开启的 skill 强制纳入可见目录，
+    // 不再依赖关键词评分。enabled === false 明确禁用则跳过。
+    // enabled 字段缺失（如纯函数单测的 mock）时保留旧的关键词自动匹配，向后兼容。
+    if (full.enabled === true) {
+      requested.push({ skill: full, score: { value: 50, explicit: false, reason: '已在 Tools 面板启用' } });
+    } else if (full.enabled === false) {
+      continue;
+    } else if (score.value > 0) {
+      scored.push({ skill: full, score });
+    }
   }
 
   requested.sort(sortSelection);
@@ -86,16 +99,36 @@ function buildAiSkillPrompt(skills = [], {
   const selected = Array.isArray(skills) ? skills.filter(Boolean) : [];
   if (!selected.length) return '';
 
+  // 渐进式披露（progressive disclosure）：
+  //   - inline：被显式点名 / 系统强制的 skill（如 task authoring 工作手册）直接给全文，立即可用。
+  //   - catalog：用户启用的其余 skill 只列 name + description + id，由 agent 自己判断是否需要，
+  //     再用 load_skill 读完整 SKILL.md。这与 Claude Code / Codex 的通用 skill 用法一致，
+  //     skill 文件跨 agent 通用，且只有 metadata 常驻上下文、正文按需加载。
+  const inline = selected.filter((s) => s?._match?.explicit);
+  const catalog = selected.filter((s) => !s?._match?.explicit);
+
   const lines = [
     '<oneshell_active_skills>',
-    '1Shell has selected the following SKILL.md instructions for this AI run.',
-    'These instructions are injected by 1Shell before the model call, so they apply regardless of the upstream model/provider.',
-    'Follow the active skills when they are relevant to the user goal. They augment the core 1Shell AI policy and do not override safety, approval, or verification requirements.',
-    'If a skill body refers to extra relative files, read them only when needed with read_remote_file using hostId="local" and path="data/skills/<skill-id>/<relative-path>".',
+    '1Shell 维护一组 SKILL.md 知识包。它们是跨 agent 通用的技能文件，由 1Shell 在调用模型前注入，与上游模型/provider 无关。',
+    '下面分两部分：已展开的技能（全文，可直接遵循）和可用技能目录（仅名称与说明）。',
+    '当某个目录中的技能与当前目标相关时，调用 load_skill 工具（参数 skill_id）读取它的完整说明后再遵循。',
+    '技能补充 1Shell AI 核心策略，不覆盖安全、审批或验证要求。',
   ];
 
   let used = lines.join('\n').length;
-  for (const skill of selected) {
+
+  if (catalog.length) {
+    lines.push('');
+    lines.push('## 可用技能目录（按需用 load_skill 展开）');
+    for (const skill of catalog) {
+      const entry = `- ${safeLine(skill.name || skill.id)} (skill_id=${safeLine(skill.id)})`
+        + (skill.description ? `: ${safeLine(skill.description)}` : '');
+      lines.push(entry);
+      used += entry.length;
+    }
+  }
+
+  for (const skill of inline) {
     const body = truncate(String(skill.body || ''), maxSkillBodyChars);
     const block = [
       '',

@@ -64,6 +64,7 @@ export interface ProviderInfo {
   apiKey?: string;
   apiKeySet: boolean;
   model?: string;
+  enabled?: boolean;
 }
 
 export interface ScanCounts {

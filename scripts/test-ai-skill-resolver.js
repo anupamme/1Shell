@@ -66,15 +66,28 @@ const registry = {
 }
 
 {
+  // 渐进式披露：关键词匹配（非显式）的 skill 进「可用技能目录」，只给 name+id+desc，不再注入全文。
   const context = resolveAiSkillContext({
     skillRegistry: registry,
     message: 'Build a polished frontend dashboard.',
   });
   assert.ok(context.prompt.includes('<oneshell_active_skills>'), 'active skill prompt should be generated');
-  assert.ok(context.prompt.includes('# UI/UX Pro Max'), 'active skill body should be included');
+  assert.ok(context.prompt.includes('skill_id=ui-ux-pro-max'), 'matched skill should appear in the catalog by id');
+  assert.ok(!context.prompt.includes('# UI/UX Pro Max'), 'catalog entries must not inline the full skill body');
+  assert.ok(context.prompt.includes('load_skill'), 'catalog must instruct the agent to load skills on demand');
   const composed = composeSystemPrompt('CORE SYSTEM', context);
   assert.ok(composed.startsWith('CORE SYSTEM'), 'core system prompt should remain first');
   assert.ok(composed.includes('<oneshell_active_skills>'), 'skill prompt should be appended to system prompt');
+}
+
+{
+  // 显式点名 / 强制注入（activeSkillIds）的 skill 直接展开全文，立即可用。
+  const context = resolveAiSkillContext({
+    skillRegistry: registry,
+    message: 'Unrelated wording.',
+    context: { activeSkillIds: ['ui-ux-pro-max'] },
+  });
+  assert.ok(context.prompt.includes('# UI/UX Pro Max'), 'explicitly requested skills should inline the full body');
 }
 
 {

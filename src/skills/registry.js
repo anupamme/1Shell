@@ -202,12 +202,26 @@ function createSkillRegistry(skillsDir, _options = {}) {
   let skills = scanSkills(skillsDir);
   let skillMap = new Map(skills.map(s => [s.id, s]));
 
+  // skill enabled 状态持久化（渐进式披露：只有 enabled 的 skill 进 agent 可见目录）。
+  // 默认全关 —— 符合 RFC「不默认注入 Skill」，由用户在 Tools 面板手动开启。
+  const stateFile = path.join(skillsDir, '.skill-state.json');
+  let enabledState = loadEnabledState(stateFile);
+
+  function isEnabled(id) {
+    return enabledState[id] === true;
+  }
+
+  function decorate(skill) {
+    return { ...skill, enabled: isEnabled(skill.id) };
+  }
+
   function listSkills() {
-    return skills.filter(s => !s.hidden).map(({ dir, body, ...rest }) => rest);
+    return skills.filter(s => !s.hidden).map(({ dir, body, ...rest }) => decorate(rest));
   }
 
   function getSkill(id) {
-    return skillMap.get(id) || null;
+    const skill = skillMap.get(id);
+    return skill ? decorate(skill) : null;
   }
 
   function getSkillBody(id) {
@@ -215,9 +229,17 @@ function createSkillRegistry(skillsDir, _options = {}) {
     return skill?.body || '';
   }
 
+  function setSkillEnabled(id, enabled) {
+    if (!skillMap.has(id)) return null;
+    enabledState = { ...enabledState, [id]: enabled !== false };
+    saveEnabledState(stateFile, enabledState);
+    return getSkill(id);
+  }
+
   function reload() {
     skills = scanSkills(skillsDir);
     skillMap = new Map(skills.map(s => [s.id, s]));
+    enabledState = loadEnabledState(stateFile);
     return skills.length;
   }
 
@@ -243,7 +265,25 @@ function createSkillRegistry(skillsDir, _options = {}) {
     return lines.join('\n');
   }
 
-  return { listSkills, getSkill, getSkillBody, renderInputsSummary, reload };
+  return { listSkills, getSkill, getSkillBody, setSkillEnabled, renderInputsSummary, reload };
+}
+
+function loadEnabledState(stateFile) {
+  try {
+    if (!fs.existsSync(stateFile)) return {};
+    const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveEnabledState(stateFile, state) {
+  try {
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
+  } catch {
+    // 状态文件写入失败不应中断 skill 调用；下次仍按内存值生效。
+  }
 }
 
 /**

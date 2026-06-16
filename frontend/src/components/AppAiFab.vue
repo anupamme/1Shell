@@ -38,7 +38,7 @@ const ide = useIdeChat({
   }),
 });
 
-const EXCLUDED_ROUTES = new Set(['ide']);
+const EXCLUDED_ROUTES = new Set(['ide', 'agent', 'terminal']);
 const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
 
 const MODULE_MAP: Record<string, ModuleContext> = {

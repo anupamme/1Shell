@@ -1,102 +1,55 @@
 ---
 name: OneShell Task Authoring
-description: Author reusable 1Shell AI tasks by practicing a real workflow first, verifying it with external evidence, and only then packaging the successful path as a lightweight task template.
+description: Author reusable 1Shell AI tasks by deducing, through read-only exploration, what inputs a goal needs, then saving a lightweight task (goal + inputs). No real execution, no evidence gate.
 category: ai-task
 tags:
   - task
   - authoring
-  - verification
-  - practice
+  - inputs
+  - deduction
 hidden: true
 ---
 # OneShell Task Authoring
 
-Use this skill only inside IDE `/task` mode.
+Use this skill only inside `/task` task-authoring mode.
 
-A 1Shell AI task is not a prompt split into step cards. A task is a lightweight package of a real successful agent workflow:
+A 1Shell AI task is lightweight: a goal plus the inputs a user must provide so 1Shell AI can complete it later on its own. It is not a workflow DSL, a scheduler, an approval layer, or a second agent.
 
-- fixed user-facing inputs
-- simple flow cards
-- a short description
-- evidence that the authoring workflow was practiced and verified
+## What authoring is
 
-Do not create a task immediately after writing a generic template. Practice first.
+Authoring is **deduction, not execution**. Your job is to work out what inputs the goal needs, not to actually perform it.
 
-## Required Authoring Flow
+- Explore read-only to ground your deduction: `list_hosts`, list directories, read files, check probes/ports, run read-only diagnostic commands.
+- Do **not** perform real changes (install, write, delete, restart, deploy). In `/task` mode the Harness rejects change/high-risk tools and non-read-only commands; that is expected, keep exploring read-only.
+- Don't just guess in a few seconds. Look at the real environment enough to name the right inputs and sensible defaults.
 
-1. Understand the task the user wants to create.
-2. Propose a practice plan before saving anything.
-3. Ask for required real or sandbox inputs:
-   - target host
-   - repo, branch, port, domain, service name, or other task-specific values
-   - secrets through `request_secret`
-   - cleanup preference if practice creates artifacts
-4. Execute the practice run with real tools.
-5. Iterate on failures until the practiced path succeeds or clearly report blocked.
-6. Verify success with `verify_outcome`.
-7. Extract only the successful practiced path.
-8. Use `preview_ai_task` to normalize the lightweight task structure.
-9. Use `create_ai_task` or `update_ai_task` only after successful practice evidence exists.
-10. After saving, `get_ai_task` may verify persistence, but persistence does not count as workflow verification.
+## What to save
 
-## Evidence Rules
+Save with `create_ai_task`:
 
-Valid workflow evidence is external to the task database, such as:
+- `name` — short, action-oriented.
+- `description` — one or two lines on what the task does and its validated scope.
+- `inputs` — the values that change per host/environment and must come from the user: target host, domain, port, repo URL, service name, secret refs, etc. Keep each input simple (key, label, type, required, default).
+- `steps` — optional. A few plain hints at most; the executing agent decides the real steps at run time. Do not freeze a rigid script.
 
-- command output proving a service is active
-- `ss` or `netstat` showing a listening port
-- `curl` or HTTP result showing a real response
-- `sing-box check`, `systemctl status`, logs, generated files, or similar task-specific checks
-- file existence or content checks where the task goal is file-oriented
+Use `preview_ai_task` to check the structure first. `create_ai_task` / `update_ai_task` are the only way to save; never paste task JSON to the user instead of saving.
 
-Invalid evidence:
+## Inputs are the point
 
-- "I think this should work"
-- a generic checklist with no execution
-- `get_ai_task` reading the saved task back
-- database persistence confirmation alone
-- unverified branches such as Docker/Python/static support when only one branch was practiced
+Good input detection is what makes a task reusable instead of one-off. For anything that would differ on another host or another run, make it an input. Use `request_secret` for tokens/passwords and store only a secret reference, never plaintext.
 
-## Packaging Rules
+## Don't aim for perfect
 
-Keep the saved task simple:
+A task does not have to be complete on the first try. When a saved task later fails during execution, that run's 1Shell AI can fix the task in place with `update_ai_task`. Tasks improve through use.
 
-- `name`
-- `description`
-- `inputs`
-- `steps`
+## Example: deducing inputs for a VLESS node task
 
-Do not design a DSL, scheduler, new approval framework, or second agent architecture inside the task.
+For "one-click VLESS node", don't try to build it here. Explore read-only and reason about what the user would need to provide, for example:
 
-State limitations honestly. If only one stack or host type was practiced, the saved task must only claim that validated scope.
+- target host (which VPS)
+- listen port
+- domain or SNI (if used)
+- the runtime to use (e.g. sing-box) and transport mode
+- any keys/UUIDs — generated at run time, or provided as secret refs
 
-For GitHub deployment tasks, the practice run must actually use the repository:
-
-- clone, checkout, pull, or otherwise consume the requested repo URL
-- build or run from the checked-out repository, or explicitly use `docker build` / Compose `build:` from that repo
-- verify the service created from that repo
-
-If the practice run only used a prebuilt Docker image, package the result as an image-based deployment task. Do not keep a `repo_url` input or claim "deploy a GitHub project" unless the repo workflow was truly practiced.
-
-## Example: VLESS Node Authoring
-
-For a "one-click VLESS node" task, do not save a template first.
-
-Practice on a real or sandbox VPS:
-
-1. Download the selected runtime, such as sing-box.
-2. Run its version/check command.
-3. Generate UUID, Reality keys, shortId, or other required keys.
-4. Write a real server config file.
-5. Run config validation.
-6. Install or write the systemd service.
-7. Start the service.
-8. Verify listening port, logs, and service state.
-9. Generate a real client config.
-10. If a client test environment is available, run a client-side proxy test and verify outbound connectivity.
-
-Only after this succeeds may the workflow be packaged. The task should claim only the practiced path, for example:
-
-`sing-box + VLESS Reality + systemd + tested VPS/OS family + tested port behavior`
-
-Untested transport modes, operating systems, reverse proxy modes, or client types must be listed as limitations or omitted.
+Save the task as goal + these inputs. State the validated scope honestly (e.g. "sing-box + VLESS Reality + systemd") and leave untested OS/transport variants out or marked as assumptions. The actual install, key generation, config write, and verification happen later when the task is executed, not during authoring.

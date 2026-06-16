@@ -14,6 +14,12 @@ function createLibraryService({ skillRegistry }) {
     return { skills: skillRegistry.reload() };
   }
 
+  function setSkillEnabled(id, enabled) {
+    if (!skillRegistry.setSkillEnabled) return null;
+    const skill = skillRegistry.setSkillEnabled(id, enabled);
+    return skill ? { ...skill, kind: 'skill' } : null;
+  }
+
   function getSkill(id) {
     return getItem(id);
   }
@@ -27,6 +33,7 @@ function createLibraryService({ skillRegistry }) {
     getSkill,
     listSkills,
     reload,
+    setSkillEnabled,
     renderInputsSummary,
   };
 }

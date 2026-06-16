@@ -98,9 +98,9 @@ async function importSkill(): Promise<void> {
   if (!fName.value.trim()) { notify.error('请填写名称'); return; }
 
   importing.value = true;
-  statusText.value = '正在登记到 data/claude-code-skills...';
+  statusText.value = '正在 clone、转换为 1Shell SKILL.md 并落入 Skill 库...';
   try {
-    const data = await requestJson<{ skill?: ClaudeCodeSkillInfo }>('/api/claude-code-skills/import/register', {
+    const data = await requestJson<{ imported?: Array<{ targetId: string; name?: string }> }>('/api/skills/import', {
       method: 'POST',
       body: JSON.stringify({
         repoUrl: fUrl.value.trim(),
@@ -110,8 +110,11 @@ async function importSkill(): Promise<void> {
         tags: parseTags(fTags.value),
       }),
     });
-    statusText.value = `导入成功：${data.skill?.name || fName.value}\n标准 Claude Code Skill 已托管，暂不直接进入 1Shell runner。`;
-    notify.success('Claude Code Skill 已导入');
+    const count = data.imported?.length || 0;
+    statusText.value = count
+      ? `导入成功：已将 ${count} 个 Skill 转换并加入 Skill 库（默认关闭，可在 Tools 面板或下方启用）。`
+      : '导入完成。';
+    notify.success(`已导入 ${count} 个 Skill`);
     emit('saved');
     phase.value = 'done';
   } catch (err) {

@@ -121,12 +121,13 @@ async function loadProviders(): Promise<void> {
 
 async function onSave(): Promise<void> {
   if (!props.cliId) return;
-  const body: Record<string, string | undefined> = {
+  const body: Record<string, string | boolean | undefined> = {
     name: fName.value.trim() || undefined,
     upstreamProtocol: fUpstream.value,
     apiBase: fApiBase.value.trim(),
     apiKey: fApiKey.value.trim() || undefined,
     model: fModel.value.trim() || undefined,
+    enabled: (editingPid.value ? providers.value.find(p => p.id === editingPid.value) : null)?.enabled,
   };
 
   if (!body.apiBase) {

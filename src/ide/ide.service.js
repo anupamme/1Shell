@@ -21,6 +21,7 @@ const {
   createIdeAgentGoalProfile,
   evaluateIdeAgentProfileToolUse,
   filterToolsForAgent,
+  isTaskRepairAuthorized,
   normalizeIdeApprovalMode,
   normalizeIdeAgentToolInput,
   shouldRequestAgentApproval,
@@ -296,8 +297,6 @@ const KEEP_RECENT = 40;
 const TRUNCATE_TO = 6000;
 const MAX_PROVIDER_TRANSIENT_RETRIES = 2;
 const EMPTY_MODEL_RESPONSE_RETRY_LIMIT = 2;
-const TASK_AUTHORING_PACKAGING_RETRY_LIMIT = 3;
-const TASK_AUTHORING_CONNECTION_FAILURE_LIMIT = 3;
 
 function toolContentPreview(content) {
   if (typeof content === 'string') return content;
@@ -475,37 +474,16 @@ function repairDanglingToolUseMessages(messages) {
 
 const TASK_AUTHORING_SYSTEM_PROMPT = [
   '',
-  '当前处于 IDE /task 任务创作模式。',
-  '你可以创建或更新 1Shell AI 任务模板，但任务模板必须保持轻量：输入项 + 流程步骤卡片。',
-  '不要设计新的权限系统、审批层、调度器、DSL 或第二套 Agent。',
-  '当用户想创建新任务时，必须先真实实践或沙箱实践可行流程，再把成功路径包装成任务；不要凭空猜，也不要只写通用模板。',
-  'list_hosts、list_scripts、read_remote_file 等发现类工具只算上下文收集，不算成功实践证据。',
-  '如果缺少目标主机、仓库地址、分支、端口、运行方式、密钥或清理偏好，先用 ask_user 或 request_secret 补齐，不要静默结束。',
-  '当用户想把上面对话打包成任务时，从当前会话历史提取成功路径，忽略失败分支；缺关键信息时先问用户。',
-  '需要密钥、token、密码时使用 request_secret，不要要求用户在普通文本里粘贴明文。',
-  'create_ai_task / update_ai_task have a hard evidence gate: practice first, record successful verify_outcome evidence, and never treat get_ai_task/database persistence as workflow verification.',
-  'For GitHub deployment tasks, the practice run must actually use the repository, such as git clone/checkout plus build/run or docker build from the repo URL. If practice only used a prebuilt Docker image, package it as image-based deployment and do not include repo_url or GitHub-project claims.',
-  '在 /task 模式中，preview_ai_task / create_ai_task / update_ai_task / get_ai_task 是保存任务的唯一入口；不要把任务 JSON 直接贴给用户来代替保存。',
-  '当任务模板已经可信，使用 preview_ai_task 检查结构，再用 create_ai_task 或 update_ai_task 保存。',
+  '当前处于 /task 任务创作模式。',
+  '你的目标不是把这件事真正做完，而是【推演】：要让 1Shell AI 以后自动完成这个目标，需要用户提供哪些输入。',
+  '用只读工具实地探索来把推演做扎实（list_hosts、列目录、读文件、查探针/端口、只读诊断命令等），不要凭空编输入项。',
+  '不要执行真正的变更操作（安装、写文件、删除、重启、部署等）；创作模式下这类变更/高危工具会被拒绝，这是正常的，继续用只读方式推演即可。',
+  '探索清楚后，用 create_ai_task 保存任务：name + description + inputs（关键）+ 可选的 steps 提示。',
+  'inputs 是会随主机或环境变化、需要用户填写的值，例如目标主机、域名、端口、仓库地址、服务名、密钥引用等；保持简单，不要设计 DSL、调度器、审批层或第二套 Agent。',
+  '需要密钥、token、密码时用 request_secret，只用 secret 引用，不要让用户在普通文本里粘贴明文。',
+  '不必追求一次就完美：任务以后执行失败时，可以让那次执行的 1Shell AI 直接用 update_ai_task 修正任务。',
+  'preview_ai_task 可先检查结构；create_ai_task / update_ai_task 是保存任务的唯一入口，不要把任务 JSON 直接贴给用户来代替保存。',
 ].join('\n');
-
-const TASK_AUTHORING_SAVE_TOOL_NAMES = new Set(['create_ai_task', 'update_ai_task']);
-const REQUIRED_TASK_AUTHORING_TOOL_NAMES = ['preview_ai_task', 'create_ai_task', 'update_ai_task', 'get_ai_task'];
-const TASK_AUTHORING_NON_PRACTICE_TOOL_NAMES = new Set([
-  'preview_ai_task',
-  'create_ai_task',
-  'update_ai_task',
-  'get_ai_task',
-  'ask_user',
-  'request_secret',
-  'verify_outcome',
-  'list_hosts',
-  'list_artifacts',
-  'query_format',
-  'list_scripts',
-  'list_mcp_servers',
-  'query_audit',
-]);
 
 function normalizePromptEntry(entry, context = null, message = '') {
   const value = String(entry || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
@@ -520,11 +498,122 @@ function normalizePromptEntry(entry, context = null, message = '') {
   return 'core';
 }
 
+function normalizeTaskRepairScope(context = null, entry = 'core') {
+  const normalizedEntry = normalizePromptEntry(entry, context);
+  const ctx = context && typeof context === 'object' && !Array.isArray(context) ? context : {};
+  const repair = {
+    authorized: ctx.taskRepairAuthorized === true
+      || ctx.task_repair_authorized === true
+      || ctx.taskRepair === true
+      || ctx.task_repair === true,
+    taskId: String(ctx.taskRepairTaskId || ctx.task_repair_task_id || ctx.taskId || ctx.task_id || '').trim(),
+    runId: String(ctx.taskRepairRunId || ctx.task_repair_run_id || ctx.taskRunId || ctx.task_run_id || '').trim(),
+  };
+  if (normalizedEntry !== 'task_run' || !isTaskRepairAuthorized(repair) || !repair.taskId) {
+    return { authorized: false, taskId: '', runId: '' };
+  }
+  return repair;
+}
+
 function promptForEntry(entry) {
   if (normalizePromptEntry(entry) === 'task') {
     return `${ONESHELL_CORE_SYSTEM_PROMPT}\n${TASK_AUTHORING_SYSTEM_PROMPT}`;
   }
   return ONESHELL_CORE_SYSTEM_PROMPT;
+}
+
+const AGENT_ATTACHMENT_MAX_COUNT = 8;
+const AGENT_ATTACHMENT_MAX_BINARY_BYTES = 6 * 1024 * 1024;
+const AGENT_ATTACHMENT_MAX_TEXT_CHARS = 80_000;
+
+function cleanAttachmentName(name) {
+  return String(name || 'attachment').replace(/[\\/\r\n\t]/g, ' ').trim().slice(0, 160) || 'attachment';
+}
+
+function cleanMime(mime) {
+  return String(mime || 'application/octet-stream').trim().toLowerCase().slice(0, 120) || 'application/octet-stream';
+}
+
+function byteLengthFromBase64(value) {
+  try {
+    const clean = String(value || '').replace(/^data:[^,]+,/i, '').replace(/\s+/g, '');
+    if (!clean) return 0;
+    return Buffer.byteLength(clean, 'base64');
+  } catch {
+    return 0;
+  }
+}
+
+function normalizeAgentAttachments(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, AGENT_ATTACHMENT_MAX_COUNT).map((raw) => {
+    const item = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const mime = cleanMime(item.mime || item.type);
+    const kind = ['image', 'text', 'document', 'file'].includes(String(item.kind || ''))
+      ? String(item.kind)
+      : (mime.startsWith('image/') ? 'image' : (mime === 'application/pdf' ? 'document' : 'file'));
+    const base64 = String(item.base64 || '').replace(/^data:[^,]+,/i, '').replace(/\s+/g, '');
+    const binaryBytes = byteLengthFromBase64(base64);
+    const text = typeof item.text === 'string' ? item.text.slice(0, AGENT_ATTACHMENT_MAX_TEXT_CHARS) : '';
+    const declaredSize = Number(item.size);
+    return {
+      name: cleanAttachmentName(item.name),
+      mime,
+      kind,
+      size: Number.isFinite(declaredSize) && declaredSize >= 0 ? declaredSize : binaryBytes,
+      base64: binaryBytes > 0 && binaryBytes <= AGENT_ATTACHMENT_MAX_BINARY_BYTES ? base64 : '',
+      text,
+      error: String(item.error || '').trim().slice(0, 240),
+      binaryBytes,
+    };
+  });
+}
+
+function attachmentSizeLabel(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function attachmentSummaryLine(att) {
+  const type = att.kind === 'image' ? '图片' : att.kind === 'text' ? '文本' : att.kind === 'document' ? '文档' : '文件';
+  return `- ${att.name} (${type}, ${att.mime}, ${attachmentSizeLabel(att.size || att.binaryBytes)})${att.error ? `: ${att.error}` : ''}`;
+}
+
+function buildAgentUserContent({ firstContextBlock = '', message = '', attachments = [] }) {
+  const normalized = normalizeAgentAttachments(attachments);
+  const text = `${firstContextBlock || ''}${message || ''}`.trim();
+  if (!normalized.length) return text;
+
+  const blocks = [{ type: 'text', text: text || '请分析附件。' }];
+  const summary = normalized.map(attachmentSummaryLine).join('\n');
+  blocks.push({ type: 'text', text: `\n\n用户随消息发送了以下附件：\n${summary}` });
+
+  for (const att of normalized) {
+    if (att.kind === 'text' && att.text) {
+      blocks.push({
+        type: 'text',
+        text: `\n\n<attachment name="${att.name}" mime="${att.mime}">\n${att.text}\n</attachment>`,
+      });
+      continue;
+    }
+    if (att.kind === 'image' && att.base64 && att.mime.startsWith('image/')) {
+      blocks.push({
+        type: 'image',
+        source: { type: 'base64', media_type: att.mime, data: att.base64 },
+      });
+      continue;
+    }
+    if (att.kind === 'document' && att.base64 && att.mime === 'application/pdf') {
+      blocks.push({
+        type: 'document',
+        title: att.name,
+        source: { type: 'base64', media_type: att.mime, data: att.base64 },
+      });
+    }
+  }
+  return blocks;
 }
 
 /**
@@ -535,7 +624,7 @@ function promptForEntry(entry) {
  *   - 工具集更广（list_artifacts / query_format 等）
  *   - 用户是对话主体，AI 响应用户指令而非自驱执行
  */
-function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry, harness, agentRuntime, secretService }) {
+function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry, harness, agentRuntime, secretService, ideSessionRepository }) {
 
   // sessionId → { messages[], system, hostId, abortController }
   const sessions = new Map();
@@ -563,6 +652,8 @@ const READONLY_TOOLS = new Set([
   ]);
 
 const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outcome']);
+const REWIND_FILE_TOOLS = new Set(['write_remote_file', 'upload_file', 'create_directory', 'delete_path', 'rename_path']);
+const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   function makeAbortError(message = 'Cancelled') {
     const err = new Error(message);
@@ -825,13 +916,233 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     });
   }
 
+  function createRewindId() {
+    return `rw-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function normalizeRemotePath(value) {
+    return String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/g, '');
+  }
+
+  function remoteBasename(value) {
+    const normalized = normalizeRemotePath(value);
+    return normalized.split('/').filter(Boolean).pop() || normalized;
+  }
+
+  function remoteParentDir(value) {
+    const raw = String(value || '').trim();
+    const normalized = raw.replace(/\\/g, '/').replace(/\/+$/g, '');
+    const idx = normalized.lastIndexOf('/');
+    if (idx <= 0) return normalized.startsWith('/') ? '/' : '';
+    return normalized.slice(0, idx);
+  }
+
+  function remoteJoin(dir, name) {
+    const left = String(dir || '').trim();
+    const right = String(name || '').trim();
+    if (!left) return right;
+    const sep = left.includes('\\') || /^[A-Za-z]:/.test(left) ? '\\' : '/';
+    return left.endsWith('/') || left.endsWith('\\') ? `${left}${right}` : `${left}${sep}${right}`;
+  }
+
+  function parseStructuredToolContent(result = {}) {
+    const text = String(result?.content || '').trim();
+    if (!text || !text.startsWith('{')) return null;
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function toolData(result = {}) {
+    const parsed = parseStructuredToolContent(result);
+    return parsed?.data && typeof parsed.data === 'object' ? parsed.data : {};
+  }
+
+  async function callRewindTool(toolName, input, session = {}, runId = '') {
+    return ideTools.handle(toolName, input || {}, {
+      socket: null,
+      sessionId: session.sessionId || '',
+      runId,
+      safeMode: false,
+      session,
+      approvalMode: 'full_access',
+      allowApproval: false,
+      preApproved: true,
+      source: 'agent_remind',
+    });
+  }
+
+  async function snapshotFileForRewind(hostId, filePath, session, runId) {
+    const result = await callRewindTool('download_file', {
+      hostId,
+      path: filePath,
+      maxBytes: REWIND_MAX_FILE_BYTES,
+    }, session, runId);
+    if (isIdeToolResultError(result)) {
+      const reason = toolContentPreview(result.content).slice(0, 400);
+      const missing = /not found|no such|不存在|路径不存在|path not found/i.test(reason);
+      return { exists: !missing, restorable: false, reason };
+    }
+    const data = toolData(result);
+    if (!data?.base64Content) {
+      return { exists: false, restorable: false, reason: 'download_file 未返回可恢复内容' };
+    }
+    return {
+      exists: true,
+      restorable: true,
+      hostId,
+      path: filePath,
+      base64Content: data.base64Content,
+      filename: data.filename || remoteBasename(filePath),
+      size: data.size || 0,
+    };
+  }
+
+  async function pathLooksExistingDirectory(hostId, dirPath, session, runId) {
+    if (!dirPath) return false;
+    const result = await callRewindTool('list_remote_dir', { hostId, path: dirPath }, session, runId);
+    return !isIdeToolResultError(result);
+  }
+
+  async function prepareRewindUndoRecord(session, toolName, input = {}, meta = {}) {
+    if (!session || !REWIND_FILE_TOOLS.has(toolName)) return null;
+    const hostId = String(input.hostId || session.hostId || 'local').trim() || 'local';
+    const runId = meta.runId || session.currentRunId || '';
+    try {
+      if (toolName === 'write_remote_file') {
+        const filePath = String(input.path || '').trim();
+        if (!filePath) return null;
+        const snap = await snapshotFileForRewind(hostId, filePath, session, runId);
+        if (snap.exists && snap.restorable) {
+          return { type: 'restore_file', hostId, path: filePath, snapshot: snap, reason: 'write_remote_file' };
+        }
+        if (snap.exists) {
+          return { type: 'unrestorable', hostId, path: filePath, reason: 'write_remote_file_snapshot_failed', note: snap.reason || '无法创建写入前快照' };
+        }
+        return { type: 'delete_path', hostId, path: filePath, reason: 'write_remote_file_created', note: snap.reason || '' };
+      }
+
+      if (toolName === 'upload_file') {
+        const dirPath = String(input.dirPath || '').trim();
+        const filename = String(input.filename || '').trim() || remoteBasename(input.localPath || '');
+        if (!dirPath || !filename) return null;
+        const filePath = remoteJoin(dirPath, filename);
+        const snap = await snapshotFileForRewind(hostId, filePath, session, runId);
+        if (snap.exists && snap.restorable) {
+          return { type: 'restore_file', hostId, path: filePath, snapshot: snap, reason: 'upload_file' };
+        }
+        if (snap.exists) {
+          return { type: 'unrestorable', hostId, path: filePath, reason: 'upload_file_snapshot_failed', note: snap.reason || '无法创建上传前快照' };
+        }
+        return { type: 'delete_path', hostId, path: filePath, reason: 'upload_file_created', note: snap.reason || '' };
+      }
+
+      if (toolName === 'delete_path') {
+        const targetPath = String(input.path || '').trim();
+        if (!targetPath) return null;
+        const snap = await snapshotFileForRewind(hostId, targetPath, session, runId);
+        if (snap.exists && snap.restorable) {
+          return { type: 'restore_file', hostId, path: targetPath, snapshot: snap, reason: 'delete_path' };
+        }
+        return { type: 'unrestorable', hostId, path: targetPath, reason: 'delete_path_snapshot_failed', note: snap.reason || '无法创建删除前快照' };
+      }
+
+      if (toolName === 'rename_path') {
+        const oldPath = String(input.path || '').trim();
+        const newPath = String(input.newPath || '').trim();
+        if (!oldPath || !newPath) return null;
+        return { type: 'rename_path', hostId, path: newPath, newPath: oldPath, reason: 'rename_path' };
+      }
+
+      if (toolName === 'create_directory') {
+        const dirPath = String(input.path || '').trim();
+        if (!dirPath) return null;
+        const existed = await pathLooksExistingDirectory(hostId, dirPath, session, runId);
+        if (existed) return null;
+        return { type: 'delete_path', hostId, path: dirPath, reason: 'create_directory' };
+      }
+    } catch (err) {
+      return {
+        type: 'unrestorable',
+        hostId,
+        path: String(input.path || input.dirPath || '').trim(),
+        reason: `${toolName}_snapshot_error`,
+        note: err.message || '创建回溯快照失败',
+      };
+    }
+    return null;
+  }
+
+  function recordRewindUndo(session, toolName, input, result, undoRecord, meta = {}) {
+    if (!session || !undoRecord || isIdeToolResultError(result)) return;
+    if (!Array.isArray(session.rewindUndoRecords)) session.rewindUndoRecords = [];
+    session.rewindUndoRecords.push({
+      id: createRewindId(),
+      toolName,
+      input: redactAgentTraceValue(input || {}),
+      record: undoRecord,
+      runId: meta.runId || '',
+      toolUseId: meta.toolUseId || '',
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  async function applyRewindUndoRecord(session, undoEntry, runId = '') {
+    const record = undoEntry?.record || {};
+    if (!record.type) return { ok: true, summary: '空回溯记录已跳过' };
+    if (record.type === 'unrestorable') {
+      return { ok: false, summary: `${record.path || '(unknown)'} 无法自动恢复：${record.note || record.reason || '没有可用快照'}` };
+    }
+    if (record.type === 'restore_file') {
+      const filePath = String(record.path || '').trim();
+      const result = await callRewindTool('upload_file', {
+        hostId: record.hostId || 'local',
+        dirPath: remoteParentDir(filePath),
+        filename: remoteBasename(filePath),
+        base64Content: record.snapshot?.base64Content || '',
+      }, session, runId);
+      return {
+        ok: !isIdeToolResultError(result),
+        summary: `恢复文件 ${record.hostId || 'local'}:${filePath}`,
+        detail: toolContentPreview(result.content).slice(0, 600),
+      };
+    }
+    if (record.type === 'delete_path') {
+      const result = await callRewindTool('delete_path', {
+        hostId: record.hostId || 'local',
+        path: record.path,
+      }, session, runId);
+      return {
+        ok: !isIdeToolResultError(result),
+        summary: `删除回溯产生的路径 ${record.hostId || 'local'}:${record.path}`,
+        detail: toolContentPreview(result.content).slice(0, 600),
+      };
+    }
+    if (record.type === 'rename_path') {
+      const result = await callRewindTool('rename_path', {
+        hostId: record.hostId || 'local',
+        path: record.path,
+        newPath: record.newPath,
+      }, session, runId);
+      return {
+        ok: !isIdeToolResultError(result),
+        summary: `重命名回 ${record.hostId || 'local'}:${record.newPath}`,
+        detail: toolContentPreview(result.content).slice(0, 600),
+      };
+    }
+    return { ok: false, summary: `未知回溯记录类型：${record.type}` };
+  }
+
   function startIdeAgentRun({ session, sessionId, runId, message, context, entry, approvalMode, tools = [], claudeCodeEnabled, legacyFlags = {}, goalProfile = null }) {
     if (!agentRuntime?.startRun) throw new Error('Agent runtime 未初始化，1Shell AI 无法启动 AgentRun');
     try {
       const source = 'ide';
       const normalizedEntry = normalizePromptEntry(entry);
       const normalizedApprovalMode = normalizeIdeApprovalMode(approvalMode || session?.approvalMode, { entry: normalizedEntry });
-      const policy = createIdeAgentPolicy({ tools, entry: normalizedEntry, approvalMode: normalizedApprovalMode, remotePolicy: session?.toolPolicy, goalProfile });
+      const policy = createIdeAgentPolicy({ tools, entry: normalizedEntry, approvalMode: normalizedApprovalMode, remotePolicy: session?.toolPolicy, goalProfile, taskRepair: session?.taskRepair });
       const state = agentRuntime.startRun({
         source,
         goal: String(message || '').trim(),
@@ -851,6 +1162,8 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
           sessionId,
           entry: normalizedEntry,
           approvalMode: normalizedApprovalMode,
+          taskRepairAuthorized: isTaskRepairAuthorized(session?.taskRepair),
+          taskRepairTaskId: session?.taskRepair?.taskId || '',
           claudeCodeEnabled: !!claudeCodeEnabled,
           legacySafeMode: legacyFlags.safeMode,
           legacyUnlimitedTurns: legacyFlags.unlimitedTurns,
@@ -1559,6 +1872,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
           }
 
           const mcpInfo = mcpToolMap?.get?.(toolName);
+          let rewindUndoRecord = null;
           if (mcpInfo && localMcpService) {
             try {
               result = await localMcpService.callTool(mcpInfo.mcpId, mcpInfo.mcpToolName, args || {}, {
@@ -1570,6 +1884,11 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
               result = { content: `[ERROR] ${err.message}`, is_error: true };
             }
           } else {
+            rewindUndoRecord = await prepareRewindUndoRecord(session, tc.name, tc.input, {
+              runId,
+              sessionId,
+              toolUseId: tc.id,
+            });
             result = await ideTools.handle(toolName, args || {}, {
               socket,
               sessionId,
@@ -1592,6 +1911,11 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
             });
           }
 
+          recordRewindUndo(session, tc.name, tc.input, result, rewindUndoRecord, {
+            runId,
+            sessionId,
+            toolUseId: tc.id,
+          });
           if (recordEffects) recordIdeAgentSideEffect(runId, tc, result, { ...session, sessionId });
           if (recordEffects && tc.name === 'verify_outcome') {
             recordIdeVerificationOutcome(runId, result, {
@@ -2039,126 +2363,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     };
   }
 
-  function shouldContinueTaskAuthoringPackaging({ session, runId }) {
-    if (normalizePromptEntry(session?.entry) !== 'task') return false;
-    const state = safeGetIdeAgentState(runId);
-    if (!state) return false;
-    if (hasSavedAiTaskInRun(state)) return false;
-    if (!latestSuccessfulTaskAuthoringVerification(state)) return false;
-    return successfulTaskAuthoringPracticeCalls(state).length > 0;
-  }
-
-  function hasSavedAiTaskInRun(state = {}) {
-    return (Array.isArray(state.toolCalls) ? state.toolCalls : []).some((call) => {
-      const name = String(call?.toolName || '').trim();
-      if (!TASK_AUTHORING_SAVE_TOOL_NAMES.has(name)) return false;
-      if (String(call.status || '') !== 'completed') return false;
-      return !call.result || call.result.ok === true;
-    });
-  }
-
-  function successfulTaskAuthoringPracticeCalls(state = {}) {
-    return (Array.isArray(state.toolCalls) ? state.toolCalls : []).filter((call) => {
-      const name = String(call?.toolName || '').trim();
-      if (!name || TASK_AUTHORING_NON_PRACTICE_TOOL_NAMES.has(name)) return false;
-      if (String(call.status || '') !== 'completed') return false;
-      return !call.result || call.result.ok === true;
-    });
-  }
-
-  function latestSuccessfulTaskAuthoringVerification(state = {}) {
-    const candidates = [];
-    if (state.verification) candidates.push(state.verification);
-    if (state.memory?.verification) candidates.push(state.memory.verification);
-    if (state.runtimeState?.worldState?.verification) candidates.push(state.runtimeState.worldState.verification);
-    const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
-    for (const artifact of artifacts) {
-      if (artifact?.type === 'verification_result' && artifact.data) {
-        candidates.push({ ...artifact.data, evidence: artifact.content || artifact.data.evidence || '' });
-      }
-    }
-    return candidates
-      .reverse()
-      .find((item) => {
-        const ok = item?.ok === true || String(item?.status || '').toLowerCase() === 'passed';
-        if (!ok) return false;
-        if (String(item?.type || '').toLowerCase() === 'manual') return false;
-        return !looksLikeTaskPersistenceVerification(item);
-      }) || null;
-  }
-
-  function looksLikeTaskPersistenceVerification(verification = {}) {
-    const text = [
-      verification.type,
-      verification.target,
-      verification.reason,
-      verification.evidence,
-      Array.isArray(verification.reasons) ? verification.reasons.join(' ') : '',
-    ].map((item) => String(item || '').toLowerCase()).join('\n');
-    return /(get_ai_task|create_ai_task|update_ai_task|ai_task|ai task|sqlite|database|db persistence|saved task|task id)/i.test(text);
-  }
-
-  function createTaskPackagingRequiredObservation({ attempt }) {
-    const content = [
-      'RUNTIME_TASK_PACKAGING_REQUIRED',
-      `attempt=${attempt}`,
-      'The /task practice path has successful tool execution and successful verify_outcome evidence, but no AI task has been saved yet.',
-      'Continue now by extracting only the successful practiced path, calling preview_ai_task, then calling create_ai_task or update_ai_task.',
-      'Do not finish with a report only. If task payload validation fails, fix the payload and call the save tool again.',
-    ].join('\n');
-    return {
-      id: `runtime-task-packaging-required-${Date.now()}-${attempt}`,
-      kind: 'runtime_task_packaging_required',
-      toolName: 'agent_controller',
-      content,
-      summary: content,
-      ok: false,
-      isError: true,
-    };
-  }
-
-  function taskAuthoringConnectionFailureText(observation = {}) {
-    const text = [
-      observation.error,
-      observation.summary,
-      observation.content,
-      observation.stderr,
-      observation.stdout,
-    ].map((item) => String(item || '')).join('\n');
-    return /(ssh\s+.*(handshake|timed out|timeout|connection)|timed out while waiting for handshake|shell connection closed|connection closed|连接失败|握手超时|连接断开|超时)/i.test(text)
-      ? text
-      : '';
-  }
-
-  function shouldBlockTaskAuthoringForConnectionFailures({ session, runId, observations, streak }) {
-    if (normalizePromptEntry(session?.entry) !== 'task') return { blocked: false, streak };
-    const failures = (Array.isArray(observations) ? observations : [])
-      .filter((observation) => observation?.isError === true || observation?.ok === false)
-      .map(taskAuthoringConnectionFailureText)
-      .filter(Boolean);
-    const nextStreak = failures.length > 0 ? streak + failures.length : 0;
-    if (nextStreak < TASK_AUTHORING_CONNECTION_FAILURE_LIMIT) return { blocked: false, streak: nextStreak };
-    const state = safeGetIdeAgentState(runId);
-    if (latestSuccessfulTaskAuthoringVerification(state || {})) return { blocked: false, streak: nextStreak };
-    return {
-      blocked: true,
-      streak: nextStreak,
-      reason: failures[failures.length - 1] || 'remote connection failed repeatedly',
-    };
-  }
-
-  function taskAuthoringConnectionBlockedMessage({ reason, streak }) {
-    return [
-      '这次 /task 实践已停止，原因是目标主机连续出现 SSH 握手超时或 shell 连接关闭。',
-      '',
-      `连续连接失败次数：${streak}`,
-      `最后一次失败：${String(reason || '').split(/\r?\n/).find(Boolean) || 'remote connection failed repeatedly'}`,
-      '',
-      '没有完成成功实践，也没有 verify_outcome 成功证据，所以不会保存 AI 任务。',
-      '请先恢复目标主机，或换成资源更充足/已准备构建缓存的测试环境后再重新创作这个任务。',
-    ].join('\n');
-  }
-
   function filteredHostsForPolicy(policy) {
     const hosts = hostService?.listHosts?.() || [];
     const allowedHosts = policy.allowedHosts || [];
@@ -2260,8 +2464,13 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       seenToolNames.add(t.name);
       allTools.push(t);
     }
-    if (session?.entry === 'task' && Array.isArray(ideTools.TASK_AUTHORING_TOOL_SCHEMAS)) {
+    const taskRepairAuthorized = isTaskRepairAuthorized(session?.taskRepair);
+    const repairToolNames = new Set(['preview_ai_task', 'update_ai_task', 'get_ai_task']);
+    // task 创作模式暴露完整任务工具；task_run 只有在用户确认失败改进后，
+    // 才临时暴露修订当前任务所需的最小工具集。
+    if ((session?.entry === 'task' || taskRepairAuthorized) && Array.isArray(ideTools.TASK_AUTHORING_TOOL_SCHEMAS)) {
       for (const t of ideTools.TASK_AUTHORING_TOOL_SCHEMAS) {
+        if (session?.entry !== 'task' && !repairToolNames.has(t.name)) continue;
         if (seenToolNames.has(t.name)) continue;
         seenToolNames.add(t.name);
         allTools.push(t);
@@ -2287,22 +2496,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       }
     }
     return { allTools, mcpToolMap };
-  }
-
-  function validateTaskAuthoringToolCatalog(session, allTools = [], agentTools = [], agentPolicy = {}) {
-    if (normalizePromptEntry(session?.entry) !== 'task') return '';
-    const allNames = new Set((Array.isArray(allTools) ? allTools : []).map((tool) => String(tool?.name || '').trim()).filter(Boolean));
-    const exposedNames = new Set((Array.isArray(agentTools) ? agentTools : []).map((tool) => String(tool?.name || '').trim()).filter(Boolean));
-    const missingFromCatalog = REQUIRED_TASK_AUTHORING_TOOL_NAMES.filter((name) => !allNames.has(name));
-    if (missingFromCatalog.length > 0) {
-      return `Internal /task tool catalog error: missing task authoring tool(s): ${missingFromCatalog.join(', ')}.`;
-    }
-    const missingFromModel = REQUIRED_TASK_AUTHORING_TOOL_NAMES.filter((name) => !exposedNames.has(name));
-    if (missingFromModel.length > 0) {
-      const allowed = Array.isArray(agentPolicy.allowedTools) ? agentPolicy.allowedTools : [];
-      return `Internal /task permission error: task authoring tool(s) were built but not exposed to the model: ${missingFromModel.join(', ')}. allowedTools=${allowed.join(',')}`;
-    }
-    return '';
   }
 
   function waitForApproval(socket, sessionId, tc, session, runId, options = {}) {
@@ -2429,7 +2622,10 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
       applyPromptEntry(session, entry, approvalMode);
+      session.taskRepair = normalizeTaskRepairScope(context, session.entry);
       if (context?.toolPolicy) session.toolPolicy = normalizeToolPolicy(context.toolPolicy);
+      if (context?.hosts?.[0]?.id) session.hostId = context.hosts[0].id;
+      ensureRewindState(session);
       return session;
     }
 
@@ -2462,7 +2658,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     const promptEntry = normalizePromptEntry(entry);
     const promptApprovalMode = normalizeIdeApprovalMode(approvalMode, { entry: promptEntry });
     const session = {
-      messages: [],
+      messages: restoreSessionMessages(sessionId),
       entry: promptEntry,
       approvalMode: promptApprovalMode,
       system: promptForEntry(promptEntry),
@@ -2482,16 +2678,313 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       legacyUnlimitedTurns: null,
       claudeCodeEnabled: false,
       toolPolicy: context?.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null,
+      taskRepair: normalizeTaskRepairScope(context, promptEntry),
       agentPolicy: null,
       agentGoalProfile: null,
       activeSkillContext: null,
       finalizationRepairRounds: 0,
+      rewindCheckpoints: [],
+      rewindUndoRecords: [],
+      rewindSeq: 0,
     };
     sessions.set(sessionId, session);
     return session;
   }
 
-  async function handleMessage({ socket, sessionId, message, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry, approvalMode }) {
+  function ensureRewindState(session) {
+    if (!Array.isArray(session.rewindCheckpoints)) session.rewindCheckpoints = [];
+    if (!Array.isArray(session.rewindUndoRecords)) session.rewindUndoRecords = [];
+    if (!Number.isFinite(Number(session.rewindSeq))) session.rewindSeq = session.rewindCheckpoints.length;
+  }
+
+  function createUserRewindCheckpoint(session, message) {
+    ensureRewindState(session);
+    session.rewindSeq += 1;
+    const checkpoint = {
+      id: createRewindId(),
+      ordinal: session.rewindSeq,
+      messageLength: Array.isArray(session.messages) ? session.messages.length : 0,
+      undoStart: session.rewindUndoRecords.length,
+      text: String(message || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+      hostId: session.hostId || '',
+      createdAt: new Date().toISOString(),
+    };
+    session.rewindCheckpoints.push(checkpoint);
+    if (session.rewindCheckpoints.length > 40) session.rewindCheckpoints.shift();
+    return checkpoint;
+  }
+
+  function parseRewindCommand(message) {
+    const text = String(message || '').trim();
+    const match = text.match(/^\/(?:remind|rewind)(?:\s+(.+))?$/i);
+    if (!match) return null;
+    const target = String(match[1] || '').trim();
+    return { target };
+  }
+
+  function resolveRewindCheckpoint(session, target = '') {
+    ensureRewindState(session);
+    const checkpoints = session.rewindCheckpoints;
+    if (!checkpoints.length) return null;
+    const value = String(target || '').trim();
+    if (!value) return null;
+    if (/^(last|latest|previous|prev|上次|最近)$/i.test(value)) return checkpoints[checkpoints.length - 1];
+    const ordinal = Number(value.replace(/^#/, ''));
+    if (Number.isInteger(ordinal)) {
+      const byOrdinal = checkpoints.find((checkpoint) => checkpoint.ordinal === ordinal);
+      if (byOrdinal) return byOrdinal;
+    }
+    return checkpoints.find((checkpoint) => checkpoint.id === value) || null;
+  }
+
+  function rewindListText(session) {
+    ensureRewindState(session);
+    if (!session.rewindCheckpoints.length) {
+      return '当前会话还没有可回溯的输入。发送一次 Agent 消息后，1Shell 会自动建立回溯点。';
+    }
+    const lines = session.rewindCheckpoints.slice(-12).map((checkpoint) => {
+      const undoCount = Math.max(0, session.rewindUndoRecords.length - checkpoint.undoStart);
+      return `- #${checkpoint.ordinal} ${checkpoint.id} · ${checkpoint.text || '(空输入)'} · 可撤销 ${undoCount} 个文件操作`;
+    });
+    return [
+      '可回溯输入：',
+      ...lines,
+      '',
+      '使用 `/remind #编号` 或 `/rewind #编号` 回到某次输入；使用 `/remind last` 回到最近一次输入。',
+      '当前只自动撤销 1Shell 结构化文件工具造成的改动；shell 命令、服务安装、数据库写入等系统级副作用会保留在报告里，需要下一步做主机级快照/补偿。',
+    ].join('\n');
+  }
+
+  function listRewindPoints(sessionId) {
+    const session = sessions.get(sessionId);
+    if (!session) return { ok: true, points: [] };
+    ensureRewindState(session);
+    const points = session.rewindCheckpoints.map((checkpoint) => ({
+      id: checkpoint.id,
+      ordinal: checkpoint.ordinal,
+      text: checkpoint.text || '',
+      createdAt: checkpoint.createdAt || '',
+      undoCount: Math.max(0, session.rewindUndoRecords.length - checkpoint.undoStart),
+      hostId: checkpoint.hostId || session.hostId || '',
+      messageLength: checkpoint.messageLength,
+    }));
+    return { ok: true, points };
+  }
+
+  async function handleRewindCommand({ socket, sessionId, session, command, modelLabel = '' }) {
+    const runId = newRunId();
+    session.socket = socket;
+    session.socketId = socket.id;
+    session.currentRunId = runId;
+    session.cancelled = false;
+    emitToSession(session, socket, 'ide:thinking', { sessionId, runId });
+
+    if (!command.target) {
+      emitToSession(session, socket, 'ide:text', { sessionId, runId, text: rewindListText(session) });
+      emitToSession(session, socket, 'ide:done', { sessionId, runId, taskStatus: 'done' });
+      session.currentRunId = null;
+      return;
+    }
+
+    const checkpoint = resolveRewindCheckpoint(session, command.target);
+    if (!checkpoint) {
+      emitToSession(session, socket, 'ide:text', {
+        sessionId,
+        runId,
+        text: `没有找到回溯点：${command.target}\n\n${rewindListText(session)}`,
+      });
+      emitToSession(session, socket, 'ide:done', { sessionId, runId, taskStatus: 'done' });
+      session.currentRunId = null;
+      return;
+    }
+
+    const checkpointIndex = session.rewindCheckpoints.findIndex((item) => item.id === checkpoint.id);
+    const undoEntries = session.rewindUndoRecords.slice(checkpoint.undoStart).reverse();
+    const results = [];
+    for (const entry of undoEntries) {
+      throwIfStopped(session, runId);
+      try {
+        results.push(await applyRewindUndoRecord(session, entry, runId));
+      } catch (err) {
+        results.push({ ok: false, summary: err.message || '回溯操作失败' });
+      }
+    }
+
+    session.messages = session.messages.slice(0, checkpoint.messageLength);
+    session.rewindUndoRecords = session.rewindUndoRecords.slice(0, checkpoint.undoStart);
+    session.rewindCheckpoints = session.rewindCheckpoints.slice(0, checkpointIndex + 1);
+    session.firstUserMessage = deriveSessionTitle(session.messages);
+    persistSessionSafe(sessionId, session, { modelLabel });
+    emitToSession(session, socket, 'ide:rewind', {
+      sessionId,
+      runId,
+      checkpoint: {
+        id: checkpoint.id,
+        ordinal: checkpoint.ordinal,
+        text: checkpoint.text,
+      },
+      timeline: projectMessagesToTimeline(session.messages),
+    });
+
+    const failed = results.filter((item) => !item.ok);
+    const lines = [
+      `已回到 #${checkpoint.ordinal}：${checkpoint.text || checkpoint.id}`,
+      `已撤销 ${results.length - failed.length}/${results.length} 个结构化文件操作。`,
+    ];
+    if (results.length) {
+      lines.push('', '撤销明细：');
+      for (const item of results) lines.push(`- ${item.ok ? 'OK' : 'WARN'} ${item.summary}`);
+    }
+    if (failed.length) {
+      lines.push('', '有些操作无法自动恢复，通常是删除了目录、文件超过快照大小，或变更来自 shell 命令。');
+    }
+    emitToSession(session, socket, 'ide:text', { sessionId, runId, text: lines.join('\n') });
+    emitToSession(session, socket, 'ide:done', { sessionId, runId, taskStatus: failed.length ? 'partial' : 'done' });
+    session.currentRunId = null;
+  }
+
+  // ── persisted session history (/agent rail) ──
+  // Headless MCP `ask` runs reuse handleMessage with an `mcp-ai-` session id and
+  // are deleted immediately afterwards; they must never enter the history rail.
+  function isPersistableSessionId(sessionId) {
+    return Boolean(sessionId) && !String(sessionId).startsWith('mcp-ai-');
+  }
+
+  function sessionTextFromContent(content) {
+    if (typeof content === 'string') return content.trim();
+    if (!Array.isArray(content)) return '';
+    const parts = [];
+    for (const blk of content) {
+      if (typeof blk === 'string') parts.push(blk);
+      else if (blk && blk.type === 'text' && blk.text) parts.push(blk.text);
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function stringifyToolResultContent(content) {
+    if (content === undefined || content === null) return '';
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      const parts = content.map((blk) => (typeof blk === 'string' ? blk : (blk?.text ?? JSON.stringify(blk))));
+      return parts.join('\n');
+    }
+    return JSON.stringify(content);
+  }
+
+  function deriveSessionTitle(messages) {
+    for (const msg of messages) {
+      if (msg?.role !== 'user') continue;
+      const text = sessionTextFromContent(msg.content);
+      if (text) return text.slice(0, 60);
+    }
+    return '新对话';
+  }
+
+  function deriveSessionPreview(messages) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const text = sessionTextFromContent(messages[i]?.content);
+      if (text) return text.slice(0, 160);
+    }
+    return '';
+  }
+
+  function persistSessionSafe(sessionId, session, { modelLabel } = {}) {
+    try {
+      if (!ideSessionRepository?.upsertSession || !isPersistableSessionId(sessionId)) return;
+      const messages = Array.isArray(session?.messages) ? session.messages : [];
+      if (messages.length === 0) return;
+      ideSessionRepository.upsertSession({
+        id: sessionId,
+        title: session.firstUserMessage ? session.firstUserMessage.slice(0, 60) : deriveSessionTitle(messages),
+        entry: session.entry || 'core',
+        hostId: session.hostId || '',
+        modelLabel: modelLabel || '',
+        messages,
+        preview: deriveSessionPreview(messages),
+      });
+    } catch (err) {
+      logger?.warn?.(`[ide] persist session failed: ${err.message}`);
+    }
+  }
+
+  function restoreSessionMessages(sessionId) {
+    try {
+      if (!ideSessionRepository?.getSession || !isPersistableSessionId(sessionId)) return [];
+      const record = ideSessionRepository.getSession(sessionId);
+      if (record && Array.isArray(record.messages) && record.messages.length) return record.messages;
+    } catch (err) {
+      logger?.warn?.(`[ide] restore session failed: ${err.message}`);
+    }
+    return [];
+  }
+
+  // Project the stored model conversation into frontend timeline items so a
+  // resumed session shows its tool calls, not just the final text.
+  function projectMessagesToTimeline(messages) {
+    const items = [];
+    const toolIndex = new Map();
+    let seq = 0;
+    const nextId = (prefix) => `${prefix}-${seq++}`;
+    for (const msg of (Array.isArray(messages) ? messages : [])) {
+      const { role, content } = msg || {};
+      if (role === 'user') {
+        if (Array.isArray(content)) {
+          for (const blk of content) {
+            if (blk?.type !== 'tool_result') continue;
+            const item = toolIndex.get(blk.tool_use_id);
+            if (!item) continue;
+            item.result = stringifyToolResultContent(blk.content);
+            item.isError = Boolean(blk.is_error);
+            item.status = blk.is_error ? 'error' : 'done';
+          }
+        }
+        const text = sessionTextFromContent(content);
+        if (text) items.push({ id: nextId('user'), kind: 'user', role: 'user', text });
+      } else if (role === 'assistant') {
+        const blocks = Array.isArray(content) ? content : [{ type: 'text', text: String(content || '') }];
+        const text = sessionTextFromContent(blocks);
+        if (text) items.push({ id: nextId('assistant'), kind: 'assistant', role: 'assistant', text, status: 'done' });
+        for (const blk of blocks) {
+          if (blk?.type !== 'tool_use') continue;
+          const item = { id: `tool-${blk.id}`, kind: 'tool', toolUseId: blk.id, name: blk.name || 'unknown', status: 'done', startedAt: 0, input: blk.input, logs: [] };
+          items.push(item);
+          toolIndex.set(blk.id, item);
+        }
+      }
+    }
+    return items;
+  }
+
+  function listSessions(opts) {
+    return ideSessionRepository?.listSessions ? ideSessionRepository.listSessions(opts) : { sessions: [], total: 0 };
+  }
+
+  function getSessionDetail(id) {
+    const record = ideSessionRepository?.getSession?.(id);
+    if (!record) return null;
+    return {
+      id: record.id,
+      title: record.title,
+      entry: record.entry,
+      hostId: record.hostId,
+      modelLabel: record.modelLabel,
+      messageCount: record.messageCount,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      timeline: projectMessagesToTimeline(record.messages),
+    };
+  }
+
+  function renameSessionRecord(id, title) {
+    return ideSessionRepository?.renameSession ? ideSessionRepository.renameSession(id, title) : false;
+  }
+
+  function removeSessionRecord(id) {
+    deleteSession(id); // cancel + drop any in-memory session
+    return ideSessionRepository?.deleteSession ? ideSessionRepository.deleteSession(id) : false;
+  }
+
+  async function handleMessage({ socket, sessionId, message, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry, approvalMode, attachments = [] }) {
     if (!agentRuntime?.startRun || !agentRuntime?.getState) {
       emitToSession(null, socket, 'ide:error', { sessionId, error: 'Agent runtime 未初始化，1Shell AI 已停止旧聊天降级路径。' });
       return;
@@ -2506,6 +2999,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     session.currentRunId = runId;
     session.cancelled = false;
     session.cancelNotified = false;
+    session.sessionId = sessionId;
     session.socket = socket;
     session.socketId = socket.id;
     session.detachedAt = null;
@@ -2517,6 +3011,12 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     };
     if (claudeCodeEnabled !== undefined) {
       session.claudeCodeEnabled = !!claudeCodeEnabled;
+    }
+
+    const rewindCommand = parseRewindCommand(message);
+    if (rewindCommand) {
+      await handleRewindCommand({ socket, sessionId, session, command: rewindCommand });
+      return;
     }
 
     const agentGoalProfile = createIdeAgentGoalProfile({ message, context, entry: session.entry });
@@ -2544,22 +3044,18 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       legacyFlags: ignoredLegacyFlags,
     });
     recordActiveSkills(runId, sessionId, session, activeSkillContext);
-    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry: session.entry, approvalMode: session.approvalMode, remotePolicy: session.toolPolicy, goalProfile: agentGoalProfile });
+    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry: session.entry, approvalMode: session.approvalMode, remotePolicy: session.toolPolicy, goalProfile: agentGoalProfile, taskRepair: session.taskRepair });
     const agentTools = filterToolsForAgent(allTools, agentPolicy);
-    const taskToolCatalogError = validateTaskAuthoringToolCatalog(session, allTools, agentTools, agentPolicy);
-    if (taskToolCatalogError) {
-      emitToSession(session, socket, 'ide:error', { sessionId, runId, error: taskToolCatalogError });
-      endIdeAgentRun(runId, { runnerStatus: 'failed', taskStatus: 'blocked', error: taskToolCatalogError });
-      return;
-    }
 
     sanitizeProviderMessageHistory(session.messages);
     repairDanglingToolUseMessages(session.messages);
 
     const firstContextBlock = session.messages.length === 0 && session.contextBlock ? session.contextBlock : '';
-    const userContent = firstContextBlock + message;
+    const userContent = buildAgentUserContent({ firstContextBlock, message, attachments });
 
     session.messages.push({ role: 'user', content: userContent });
+    if (!session.firstUserMessage) session.firstUserMessage = String(message || '').trim();
+    createUserRewindCheckpoint(session, message);
     recordTraceEvent('instruction', 'instruction_received', {
       source: 'ide',
       runId,
@@ -2595,8 +3091,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       let observations = [];
       let lastResult = null;
       let emptyModelResponseRetries = 0;
-      let taskPackagingRetries = 0;
-      let taskConnectionFailureStreak = 0;
       let round = 0;
       for (; round < MAX_TOOL_ROUNDS; round++) {
         throwIfStopped(session, runId);
@@ -2621,23 +3115,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
             }
             throw new Error('Cannot continue IDE agent run: provider returned empty assistant responses repeatedly.');
           }
-          if (shouldContinueTaskAuthoringPackaging({ session, runId })) {
-            taskPackagingRetries += 1;
-            recordTraceEvent('task_authoring', 'task_packaging_required', {
-              source: 'ide',
-              runId,
-              sessionId,
-              hostId: session.hostId,
-              toolName: 'agent_controller',
-              summary: `task authoring packaging required (${taskPackagingRetries}/${TASK_AUTHORING_PACKAGING_RETRY_LIMIT})`,
-              data: { round: round + 1, retry: taskPackagingRetries },
-            });
-            if (taskPackagingRetries <= TASK_AUTHORING_PACKAGING_RETRY_LIMIT) {
-              observations = [createTaskPackagingRequiredObservation({ attempt: taskPackagingRetries })];
-              continue;
-            }
-            throw new Error('Cannot complete /task authoring: the workflow was practiced and verified, but no AI task was saved.');
-          }
           break; // model produced a visible final answer
         }
         emptyModelResponseRetries = 0;
@@ -2647,33 +3124,6 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
           const extra = dispatchOptionsForAction({ action: { id: tc.id, toolName: tc.toolName, args: tc.args, options: {} } });
           const dispatched = await agentRuntime.dispatchTool(runId, tc.toolName, tc.args || {}, extra);
           observations.push(normalizeIdeToolObservation(tc, dispatched));
-        }
-        const connectionBlock = shouldBlockTaskAuthoringForConnectionFailures({
-          session,
-          runId,
-          observations,
-          streak: taskConnectionFailureStreak,
-        });
-        taskConnectionFailureStreak = connectionBlock.streak;
-        if (connectionBlock.blocked) {
-          const message = taskAuthoringConnectionBlockedMessage(connectionBlock);
-          recordTraceEvent('task_authoring', 'connection_failure_blocked', {
-            source: 'ide',
-            runId,
-            sessionId,
-            hostId: session.hostId,
-            toolName: 'agent_controller',
-            summary: `task authoring blocked after ${connectionBlock.streak} connection failures`,
-            data: { round: round + 1, reason: connectionBlock.reason || '' },
-          });
-          if (isRunCurrent(session, runId)) {
-            emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: message });
-            emitToSession(session, socket, 'ide:text', { sessionId, runId, text: message });
-            emitToSession(session, socket, 'ide:done', { sessionId, runId, round: round + 1, taskStatus: 'blocked' });
-          }
-          recordIdeAgentPhase(runId, 'blocked', 'Task authoring blocked by repeated remote connection failures', { status: 'blocked', evidence: [connectionBlock.reason || ''] });
-          endIdeAgentRun(runId, { runnerStatus: 'blocked', taskStatus: 'blocked', error: message });
-          return;
         }
       }
 
@@ -2716,6 +3166,8 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
       if (isRunCurrent(session, runId)) emitToSession(session, socket, 'ide:error', { sessionId, runId, error: err.message });
       endIdeAgentRun(runId, { runnerStatus: 'failed', taskStatus: 'failed', error: err.message });
       return;
+    } finally {
+      persistSessionSafe(sessionId, session, { modelLabel: model });
     }
 
   }
@@ -2918,7 +3370,7 @@ const AGENT_CONTROL_TOOLS = new Set(['ask_user', 'request_secret', 'verify_outco
     return { ok: true, running: !!session.currentRunId && !session.cancelled, runId: session.currentRunId };
   }
 
-  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession };
+  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, removeSessionRecord };
 }
 
 module.exports = { createIdeService };
