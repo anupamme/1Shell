@@ -16,6 +16,15 @@ log()  { echo -e "${GREEN}[1Shell]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+NODE_EXE="node"
+if [[ -x "$ROOT_DIR/runtime/node/bin/node" ]]; then
+  NODE_EXE="$ROOT_DIR/runtime/node/bin/node"
+  export PATH="$ROOT_DIR/runtime/node/bin:$PATH"
+fi
+
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║         1Shell v4.2.0                          ║${NC}"
@@ -24,13 +33,13 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 
 # 检查 Node.js
-if ! command -v node &>/dev/null; then
+if ! "$NODE_EXE" -v &>/dev/null; then
   err "未检测到 Node.js，请先安装 Node.js 20 或 22"
   err "安装方式: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt install -y nodejs"
   exit 1
 fi
 
-NODE_VER=$(node -v | tr -d 'v')
+NODE_VER=$("$NODE_EXE" -v | tr -d 'v')
 NODE_MAJOR=$(echo "$NODE_VER" | cut -d. -f1)
 if [[ "$NODE_MAJOR" -lt 20 || "$NODE_MAJOR" -ge 23 ]]; then
   err "Node.js 版本不受支持 (v${NODE_VER})，需要 v20 或 v22"
@@ -76,4 +85,4 @@ log "启动后访问: http://localhost:3301"
 log "默认账号: admin / admin（请在设置中修改）"
 log "按 Ctrl+C 停止服务"
 echo ""
-exec node server.js
+exec "$NODE_EXE" server.js
