@@ -297,6 +297,12 @@ const KEEP_RECENT = 40;
 const TRUNCATE_TO = 6000;
 const MAX_PROVIDER_TRANSIENT_RETRIES = 2;
 const EMPTY_MODEL_RESPONSE_RETRY_LIMIT = 2;
+const COMPACT_KEEP_RECENT_MESSAGES = 8;
+const COMPACT_MIN_MESSAGES = 3;
+const COMPACT_MAX_SOURCE_CHARS = 60000;
+const COMPACT_MAX_SUMMARY_CHARS = 12000;
+const COMPACT_SUMMARY_PREFIX = '[1Shell compact summary]';
+const DETACHED_TOOL_RESULT_TEXT_PREFIX = 'Previous tool result was detached from its tool call.';
 
 function toolContentPreview(content) {
   if (typeof content === 'string') return content;
@@ -388,6 +394,178 @@ function compactMessages(messages) {
   });
 }
 
+function parseCompactCommand(message) {
+  const text = String(message || '').trim();
+  const match = text.match(/^\/compact(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  return { instruction: String(match[1] || '').trim() };
+}
+
+function compactKeepCount(totalMessages) {
+  const total = Number(totalMessages || 0);
+  if (total <= COMPACT_MIN_MESSAGES) return total;
+  if (total <= 10) return 2;
+  return Math.min(COMPACT_KEEP_RECENT_MESSAGES, Math.max(2, Math.floor(total / 4)));
+}
+
+function splitMessagesForCompact(messages = []) {
+  const all = Array.isArray(messages) ? messages.filter(Boolean) : [];
+  const keepCount = compactKeepCount(all.length);
+  const splitIndex = compactSplitIndex(all, Math.max(0, all.length - keepCount));
+  return {
+    all,
+    older: all.slice(0, splitIndex),
+    recent: all.slice(splitIndex),
+    keepCount,
+  };
+}
+
+function compactSplitIndex(messages = [], desiredIndex = 0) {
+  let index = Math.max(0, Math.min(Number(desiredIndex) || 0, messages.length));
+  while (index > 0) {
+    const resultIds = toolResultIds(messages[index]);
+    if (!resultIds.size) break;
+    let matchingToolUseIndex = -1;
+    for (let i = index - 1; i >= 0; i -= 1) {
+      if (toolUseIds(messages[i]).some((id) => resultIds.has(id))) {
+        matchingToolUseIndex = i;
+        break;
+      }
+    }
+    if (matchingToolUseIndex < 0) break;
+    index = matchingToolUseIndex;
+  }
+  return index;
+}
+
+function providerMessageTextForCompact(message = {}, index = 0) {
+  const role = String(message.role || 'unknown');
+  const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: String(message.content || '') }];
+  const parts = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue;
+    if (block.type === 'text') {
+      const text = String(block.text || '').trim();
+      if (text) parts.push(text);
+      continue;
+    }
+    if (block.type === 'tool_use') {
+      const name = String(block.name || 'unknown_tool');
+      const input = safeJsonStringify(block.input || {});
+      parts.push(`[tool_use:${name}] ${input}`);
+      continue;
+    }
+    if (block.type === 'tool_result') {
+      const content = compactTerminalOutputForModel(toolContentPreview(block.content || block.text || ''), 4000, 80);
+      parts.push(`[tool_result${block.is_error ? ':error' : ''}] ${content}`);
+      continue;
+    }
+    parts.push(`[${block.type || 'block'}] ${safeJsonStringify(block).slice(0, 2000)}`);
+  }
+  const body = parts.join('\n').trim();
+  return body ? `#${index + 1} ${role}\n${body}` : '';
+}
+
+function buildCompactSource(messages = [], maxChars = COMPACT_MAX_SOURCE_CHARS) {
+  const lines = [];
+  let length = 0;
+  for (let i = 0; i < messages.length; i += 1) {
+    const item = providerMessageTextForCompact(messages[i], i);
+    if (!item) continue;
+    const nextLength = length + item.length + 2;
+    if (nextLength > maxChars) {
+      const remaining = Math.max(0, maxChars - length - 80);
+      if (remaining > 400) lines.push(`${item.slice(0, remaining)}\n...[compact source truncated]`);
+      break;
+    }
+    lines.push(item);
+    length = nextLength;
+  }
+  return lines.join('\n\n');
+}
+
+function buildCompactPrompt({ source = '', instruction = '', recentCount = 0 } = {}) {
+  return [
+    'You are compacting an agent conversation for 1Shell.',
+    'Write a concise but complete continuation summary. Preserve information needed for future model calls.',
+    '',
+    'Include:',
+    '- user goal, constraints, preferences, selected host/project/session context',
+    '- important files, commands, tool calls, results, failures, approvals, and safety notes',
+    '- current plan, pending tasks, blockers, and verification status',
+    '- facts that must not be rediscovered',
+    '',
+    'Do not invent facts. Do not include irrelevant chatter. Keep the summary in Chinese when the conversation is Chinese.',
+    `The newest ${recentCount} message(s) will remain in full after this summary, so focus on older context.`,
+    instruction ? `Extra user instruction for compaction: ${instruction}` : '',
+    '',
+    '<conversation_to_compact>',
+    source,
+    '</conversation_to_compact>',
+  ].filter(Boolean).join('\n');
+}
+
+function createCompactSummaryMessage(summary, { compactedAt, compactedCount, keptCount } = {}) {
+  const safeSummary = String(summary || '').trim().slice(0, COMPACT_MAX_SUMMARY_CHARS);
+  const text = [
+    COMPACT_SUMMARY_PREFIX,
+    `compactedAt=${compactedAt || new Date().toISOString()}`,
+    `compactedMessages=${Number(compactedCount || 0)}`,
+    `keptRecentMessages=${Number(keptCount || 0)}`,
+    '',
+    safeSummary,
+  ].join('\n');
+  return { role: 'user', content: [{ type: 'text', text }] };
+}
+
+function isCompactSummaryText(text = '') {
+  return String(text || '').trimStart().startsWith(COMPACT_SUMMARY_PREFIX);
+}
+
+function isDetachedToolResultText(text = '') {
+  return String(text || '').trimStart().startsWith(DETACHED_TOOL_RESULT_TEXT_PREFIX);
+}
+
+function compactSummaryTimelineText(text = '') {
+  const source = String(text || '').replace(COMPACT_SUMMARY_PREFIX, '').trim();
+  const lines = source.split('\n');
+  const meta = [];
+  const body = [];
+  for (const line of lines) {
+    if (/^(compactedAt|compactedMessages|keptRecentMessages)=/.test(line)) meta.push(line);
+    else body.push(line);
+  }
+  const compacted = meta.join(' · ');
+  const preview = body.join('\n').trim().slice(0, 1200);
+  return [compacted ? `已压缩历史上下文：${compacted}` : '已压缩历史上下文。', preview].filter(Boolean).join('\n\n');
+}
+
+function extractProviderTextContent(data) {
+  if (!data) return '';
+  if (typeof data === 'string') return data.trim();
+  if (Array.isArray(data.content)) {
+    return data.content.map((block) => {
+      if (typeof block === 'string') return block;
+      if (block?.type === 'text') return block.text || '';
+      return '';
+    }).join('').trim();
+  }
+  const choice = data.choices?.[0]?.message?.content;
+  if (typeof choice === 'string') return choice.trim();
+  if (Array.isArray(choice)) {
+    return choice.map((block) => block?.text || block?.content || '').join('').trim();
+  }
+  return '';
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value || '');
+  }
+}
+
 function toolUseIds(message) {
   if (message?.role !== 'assistant' || !Array.isArray(message.content)) return [];
   return message.content.filter((block) => block?.type === 'tool_use' && block.id).map((block) => block.id);
@@ -440,7 +618,7 @@ function formatOrphanToolResultAsText(block = {}) {
   const id = String(block.tool_use_id || '').trim();
   const content = toolContentPreview(block.content || block.text || '').trim();
   return [
-    'Previous tool result was detached from its tool call.',
+    DETACHED_TOOL_RESULT_TEXT_PREFIX,
     id ? `tool_result_id=${id}` : '',
     content || '(empty result)',
   ].filter(Boolean).join('\n');
@@ -2125,7 +2303,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   function clientToolResultForFrontend(toolName, result = {}) {
     const contentText = toolContentPreview(result?.content || '');
-    if (String(toolName || '') === 'list_hosts') {
+    if (['list_hosts', 'list_probes'].includes(String(toolName || ''))) {
       const parsed = parseToolResultJson(contentText);
       if (parsed) return parsed;
     }
@@ -2160,6 +2338,21 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
           'structured_result=list_hosts',
           `host_count=${hosts.length}`,
           'display_note=The UI renders exact host fields from this structured result. In final prose, summarize the count and refer to the rendered list instead of rewriting ID/IP/address tables.',
+        );
+      }
+    }
+    if (observation.toolName === 'list_probes') {
+      const parsed = parseToolResultJson(body);
+      const probes = Array.isArray(parsed?.probes)
+        ? parsed.probes
+        : (Array.isArray(parsed?.data?.probes) ? parsed.data.probes : []);
+      if (probes.length > 0) {
+        const onlineCount = probes.filter((probe) => probe?.online === true && !probe?.error).length;
+        lines.push(
+          'structured_result=list_probes',
+          `probe_count=${probes.length}`,
+          `online_count=${onlineCount}`,
+          'display_note=The UI renders exact probe fields from this structured result. In final prose, summarize status and refer to the rendered probe card instead of rewriting CPU/memory/disk/platform data as Markdown tables.',
         );
       }
     }
@@ -2805,6 +2998,17 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return { target };
   }
 
+  function resolveIdeProviderConfig() {
+    const provider = proxyConfigStore.getActiveProvider('skills')
+                  || proxyConfigStore.getActiveProvider('claude-code');
+    if (!provider?.apiBase || !provider?.apiKey) return null;
+    return {
+      provider,
+      model: provider.model || 'claude-sonnet-4-20250514',
+      proxyUrl: `http://127.0.0.1:${port}/api/proxy/skills/v1/messages`,
+    };
+  }
+
   function resolveRewindCheckpoint(session, target = '') {
     ensureRewindState(session);
     const checkpoints = session.rewindCheckpoints;
@@ -2926,6 +3130,169 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     session.currentRunId = null;
   }
 
+  async function requestCompactSummary({ session, sessionId, runId, providerConfig, source, instruction, recentCount }) {
+    const prompt = buildCompactPrompt({ source, instruction, recentCount });
+    const body = JSON.stringify({
+      model: providerConfig.model,
+      max_tokens: 4096,
+      stream: false,
+      system: 'You summarize conversation history for a long-running agent. Return only the compact summary.',
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      temperature: 0.1,
+    });
+
+    let lastError = null;
+    for (let attempt = 0; attempt <= MAX_PROVIDER_TRANSIENT_RETRIES; attempt += 1) {
+      throwIfStopped(session, runId);
+      const ac = new AbortController();
+      session.abortController = ac;
+      const timeout = setTimeout(() => {
+        try { ac.abort(); } catch { /* ignore */ }
+      }, 240000);
+      try {
+        recordTraceEvent('provider', 'compact_request_started', {
+          source: 'ide',
+          runId,
+          sessionId,
+          hostId: session.hostId,
+          toolName: 'model_provider',
+          summary: `compact attempt=${attempt}`,
+          data: { attempt, sourceChars: source.length },
+        });
+        const resp = await fetch(providerConfig.proxyUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          signal: ac.signal,
+        });
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          throw new Error(`Provider 返回 ${resp.status}: ${errText.substring(0, 300)}`);
+        }
+        const data = await resp.json();
+        const text = extractProviderTextContent(data);
+        if (!text) throw new Error('Provider 没有返回 compact 摘要');
+        recordTraceEvent('provider', 'compact_request_completed', {
+          source: 'ide',
+          runId,
+          sessionId,
+          hostId: session.hostId,
+          toolName: 'model_provider',
+          summary: `compact summary chars=${text.length}`,
+          data: { attempt, summaryChars: text.length },
+        });
+        return text;
+      } catch (err) {
+        lastError = ac.signal.aborted && !session.cancelled
+          ? new Error('compact 请求超过 240 秒未返回')
+          : err;
+        const retryable = !isAbortError(lastError) && isTransientProviderError(lastError);
+        recordTraceEvent('provider', 'compact_request_failed', {
+          source: 'ide',
+          runId,
+          sessionId,
+          hostId: session.hostId,
+          toolName: 'model_provider',
+          summary: lastError.message || 'compact request failed',
+          data: { attempt, retryable },
+        });
+        if (session.cancelled || isAbortError(lastError) || !retryable || attempt >= MAX_PROVIDER_TRANSIENT_RETRIES) throw lastError;
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+      } finally {
+        clearTimeout(timeout);
+        if (session.abortController === ac) session.abortController = null;
+      }
+    }
+    throw lastError || new Error('compact 请求失败');
+  }
+
+  async function handleCompactCommand({ socket, sessionId, session, command }) {
+    const runId = newRunId();
+    session.socket = socket;
+    session.socketId = socket.id;
+    session.currentRunId = runId;
+    session.cancelled = false;
+    session.cancelNotified = false;
+    emitToSession(session, socket, 'ide:thinking', { sessionId, runId, phase: 'compact' });
+
+    try {
+      sanitizeProviderMessageHistory(session.messages);
+      repairDanglingToolUseMessages(session.messages);
+      const split = splitMessagesForCompact(session.messages);
+      if (split.all.length < COMPACT_MIN_MESSAGES) {
+        emitToSession(session, socket, 'ide:text', {
+          sessionId,
+          runId,
+          text: '当前会话还很短，不需要 compact。继续聊就好。',
+        });
+        emitToSession(session, socket, 'ide:done', { sessionId, runId, taskStatus: 'done' });
+        return;
+      }
+
+      const providerConfig = resolveIdeProviderConfig();
+      if (!providerConfig) {
+        emitToSession(session, socket, 'ide:error', { sessionId, runId, error: 'AI Provider 未配置，无法执行 /compact。' });
+        return;
+      }
+
+      const source = buildCompactSource(split.older);
+      if (!source) {
+        emitToSession(session, socket, 'ide:text', {
+          sessionId,
+          runId,
+          text: '没有可压缩的旧上下文。最近消息会继续完整保留。',
+        });
+        emitToSession(session, socket, 'ide:done', { sessionId, runId, taskStatus: 'done' });
+        return;
+      }
+
+      const summary = await requestCompactSummary({
+        session,
+        sessionId,
+        runId,
+        providerConfig,
+        source,
+        instruction: command.instruction,
+        recentCount: split.recent.length,
+      });
+      throwIfStopped(session, runId);
+
+      const compactedAt = new Date().toISOString();
+      session.messages = [
+        createCompactSummaryMessage(summary, {
+          compactedAt,
+          compactedCount: split.older.length,
+          keptCount: split.recent.length,
+        }),
+        ...split.recent,
+      ];
+      sanitizeProviderMessageHistory(session.messages);
+      repairDanglingToolUseMessages(session.messages);
+      session.updatedAt = compactedAt;
+      if (!session.firstUserMessage) session.firstUserMessage = deriveSessionTitle(session.messages);
+      persistSessionSafe(sessionId, session, { modelLabel: providerConfig.model });
+
+      emitToSession(session, socket, 'ide:compact', {
+        sessionId,
+        runId,
+        compactedCount: split.older.length,
+        keptCount: split.recent.length,
+        summaryChars: summary.length,
+        timeline: projectMessagesToTimeline(session.messages),
+      });
+      emitToSession(session, socket, 'ide:done', { sessionId, runId, taskStatus: 'done' });
+    } catch (err) {
+      if (isAbortError(err)) {
+        emitCancelledOnce(session, sessionId, socket, runId);
+      } else {
+        logger?.warn?.(`[ide] compact failed: ${err.message}`);
+        emitToSession(session, socket, 'ide:error', { sessionId, runId, error: err.message || 'compact 失败' });
+      }
+    } finally {
+      if (session.currentRunId === runId) session.currentRunId = null;
+    }
+  }
+
   // ── persisted session history (/agent rail) ──
   // Headless MCP `ask` runs reuse handleMessage with an `mcp-ai-` session id and
   // are deleted immediately afterwards; they must never enter the history rail.
@@ -2941,7 +3308,10 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       if (typeof blk === 'string') parts.push(blk);
       else if (blk && blk.type === 'text' && blk.text) parts.push(blk.text);
     }
-    return parts.join(' ').replace(/\s+/g, ' ').trim();
+    const raw = parts.join('\n').trim();
+    if (isCompactSummaryText(raw)) return raw;
+    if (isDetachedToolResultText(raw)) return '';
+    return raw.replace(/\s+/g, ' ').trim();
   }
 
   function stringifyToolResultContent(content) {
@@ -2958,6 +3328,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     for (const msg of messages) {
       if (msg?.role !== 'user') continue;
       const text = sessionTextFromContent(msg.content);
+      if (isCompactSummaryText(text)) continue;
       if (text) return text.slice(0, 60);
     }
     return '新对话';
@@ -3023,7 +3394,11 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
           }
         }
         const text = sessionTextFromContent(content);
-        if (text) items.push({ id: nextId('user'), kind: 'user', role: 'user', text });
+        if (text && isCompactSummaryText(text)) {
+          items.push({ id: nextId('system'), kind: 'system', title: '/compact', text: compactSummaryTimelineText(text), tone: 'success' });
+        } else if (text) {
+          items.push({ id: nextId('user'), kind: 'user', role: 'user', text });
+        }
       } else if (role === 'assistant') {
         const blocks = Array.isArray(content) ? content : [{ type: 'text', text: String(content || '') }];
         const text = sessionTextFromContent(blocks);
@@ -3170,6 +3545,12 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       return;
     }
 
+    const compactCommand = parseCompactCommand(message);
+    if (compactCommand) {
+      await handleCompactCommand({ socket, sessionId, session, command: compactCommand });
+      return;
+    }
+
     const agentGoalProfile = createIdeAgentGoalProfile({ message, context, entry: session.entry });
     session.agentGoalProfile = agentGoalProfile;
     session.finalizationRepairRounds = 0;
@@ -3219,16 +3600,14 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       summary: message,
     });
 
-    const provider = proxyConfigStore.getActiveProvider('skills')
-                  || proxyConfigStore.getActiveProvider('claude-code');
-    if (!provider?.apiBase || !provider?.apiKey) {
+    const providerConfig = resolveIdeProviderConfig();
+    if (!providerConfig) {
       emitToSession(session, socket, 'ide:error', { sessionId, runId, error: 'AI Provider 未配置。请先在"AI 配置"页添加 Provider。' });
       endIdeAgentRun(runId, { runnerStatus: 'failed', taskStatus: 'blocked', error: 'AI Provider 未配置' });
       return;
     }
 
-    const model = provider.model || 'claude-sonnet-4-20250514';
-    const proxyUrl = `http://127.0.0.1:${port}/api/proxy/skills/v1/messages`;
+    const { model, proxyUrl } = providerConfig;
 
     emitToSession(session, socket, 'ide:thinking', { sessionId, runId });
 

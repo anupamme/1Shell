@@ -13,6 +13,30 @@ export interface HostListResult {
   hosts: StructuredHost[];
 }
 
+export interface StructuredProbe {
+  hostId: string;
+  name: string;
+  hostname: string;
+  online: boolean | null;
+  stale: boolean;
+  error: string;
+  platform: string;
+  cpuUsage: number | null;
+  memoryUsage: number | null;
+  diskUsage: number | null;
+  load1: number | null;
+  latencyMs: number | null;
+  uptimeSec: number | null;
+}
+
+export interface ProbeListResult {
+  ok: boolean | null;
+  summary: string;
+  generatedAt: string;
+  sampleIntervalMs: number | null;
+  probes: StructuredProbe[];
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -70,6 +94,55 @@ function normalizeHost(value: unknown): StructuredHost | null {
   return { id, name, host, port, address, type };
 }
 
+function cleanNumber(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function cleanBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
+
+function platformText(record: Record<string, unknown>): string {
+  const direct = cleanString(record.platform);
+  if (direct) return direct;
+  const info = asRecord(record.platformInfo);
+  if (!info) return '';
+  const pretty = cleanString(info.prettyName);
+  if (pretty) return pretty;
+  return [cleanString(info.distroId), cleanString(info.versionId)].filter(Boolean).join(' ')
+    || cleanString(info.os);
+}
+
+function normalizeProbe(value: unknown): StructuredProbe | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const hostId = cleanString(record.hostId) || cleanString(record.id);
+  const name = cleanString(record.name) || hostId || cleanString(record.hostname);
+  const hostname = cleanString(record.hostname);
+  const error = cleanString(record.error);
+  if (!hostId && !name && !hostname && !error) return null;
+  return {
+    hostId,
+    name,
+    hostname,
+    online: cleanBoolean(record.online),
+    stale: cleanBoolean(record.stale) === true,
+    error,
+    platform: platformText(record),
+    cpuUsage: cleanNumber(record.cpuUsage),
+    memoryUsage: cleanNumber(record.memoryUsage),
+    diskUsage: cleanNumber(record.diskUsage),
+    load1: cleanNumber(record.load1),
+    latencyMs: cleanNumber(record.latencyMs),
+    uptimeSec: cleanNumber(record.uptimeSec),
+  };
+}
+
 export function parseHostListResult(value: unknown): HostListResult | null {
   const parsed = parseJsonLike(value);
   const root = asRecord(parsed);
@@ -91,6 +164,28 @@ export function parseHostListResult(value: unknown): HostListResult | null {
   };
 }
 
+export function parseProbeListResult(value: unknown): ProbeListResult | null {
+  const parsed = parseJsonLike(value);
+  const root = asRecord(parsed);
+  if (!root) return null;
+
+  const data = asRecord(root.data);
+  const source = data && Array.isArray(data.probes) ? data : root;
+  const probesValue = Array.isArray(source.probes) ? source.probes : null;
+  if (!probesValue) return null;
+
+  const probes = probesValue.map(normalizeProbe).filter((probe): probe is StructuredProbe => Boolean(probe));
+  if (!probes.length) return null;
+
+  return {
+    ok: typeof root.ok === 'boolean' ? root.ok : null,
+    summary: cleanString(root.summary),
+    generatedAt: cleanString(source.generatedAt),
+    sampleIntervalMs: cleanNumber(source.sampleIntervalMs),
+    probes,
+  };
+}
+
 export function hostAddressText(host: StructuredHost): string {
   return host.address || (host.port ? `${host.host}:${host.port}` : host.host);
 }
@@ -108,11 +203,24 @@ function hostListResultFromTimelineItem(value: unknown): HostListResult | null {
   return parseHostListResult(record.result);
 }
 
-function previousHostListResult(items: readonly unknown[], index: number): HostListResult | null {
+function probeListResultFromTimelineItem(value: unknown): ProbeListResult | null {
+  const record = asRecord(value);
+  const name = cleanString(record?.name);
+  if (!record || cleanString(record.kind) !== 'tool' || !['list_probes', 'query_probe'].includes(name)) return null;
+  return parseProbeListResult(record.result);
+}
+
+function previousToolResult(items: readonly unknown[], index: number): { kind: 'hosts'; result: HostListResult } | { kind: 'probes'; result: ProbeListResult } | null {
   for (let i = index - 1; i >= 0; i -= 1) {
     const item = items[i];
     if (hasKind(item, 'thinking') || hasKind(item, 'system')) continue;
-    if (hasKind(item, 'tool')) return hostListResultFromTimelineItem(item);
+    if (hasKind(item, 'tool')) {
+      const probes = probeListResultFromTimelineItem(item);
+      if (probes) return { kind: 'probes', result: probes };
+      const hosts = hostListResultFromTimelineItem(item);
+      if (hosts) return { kind: 'hosts', result: hosts };
+      return null;
+    }
     if (hasKind(item, 'assistant')) {
       const record = asRecord(item);
       if (!cleanString(record?.text)) continue;
@@ -144,13 +252,44 @@ function looksLikeHostListRestatement(text: string, hostList: HostListResult): b
     || (hostListWords && nameMentions >= 2);
 }
 
+function probeStatusSummary(probeList: ProbeListResult): string {
+  const total = probeList.probes.length;
+  const online = probeList.probes.filter((probe) => probe.online === true && !probe.error).length;
+  const errors = probeList.probes.filter((probe) => probe.error || probe.online === false).length;
+  if (errors > 0) return `探针数据已在上方工具结果中按原始字段显示。当前 ${online}/${total} 台在线，${errors} 台存在离线或错误。`;
+  if (online === total) return `探针数据已在上方工具结果中按原始字段显示。当前 ${total} 台全部在线。`;
+  return `探针数据已在上方工具结果中按原始字段显示。当前 ${online}/${total} 台在线。`;
+}
+
+function looksLikeProbeListRestatement(text: string, probeList: ProbeListResult): boolean {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+
+  if (/(^|\n)\s*\|/.test(text) && /(主机|状态|系统|CPU|内存|磁盘|运行中服务|探针)/i.test(text)) return true;
+  if (/(环境概况|探针|监控|状态).{0,16}(如下|表|列表)/i.test(normalized)) return true;
+
+  const metricWords = /(CPU|内存|磁盘|load|负载|在线|离线|Ubuntu|Debian|CentOS|Linux|Windows)/i.test(normalized);
+  const nameMentions = probeList.probes.filter((probe) => {
+    const name = probe.name.trim();
+    return name && name.length >= 2 && normalized.includes(name);
+  }).length;
+  const metricMentions = normalized.match(/\b\d+(?:\.\d+)?%/g)?.length || 0;
+
+  return metricWords && (nameMentions >= 2 || metricMentions >= 3);
+}
+
 export function displayAssistantTextAfterToolResult(items: readonly unknown[], index: number, text: string): string {
   const raw = cleanString(text);
   if (!raw) return text;
 
-  const hostList = previousHostListResult(items, index);
-  if (!hostList) return text;
-  if (!looksLikeHostListRestatement(text, hostList)) return text;
+  const previous = previousToolResult(items, index);
+  if (!previous) return text;
 
-  return HOST_LIST_ASSISTANT_REFERENCE;
+  if (previous.kind === 'hosts' && looksLikeHostListRestatement(text, previous.result)) {
+    return HOST_LIST_ASSISTANT_REFERENCE;
+  }
+  if (previous.kind === 'probes' && looksLikeProbeListRestatement(text, previous.result)) {
+    return probeStatusSummary(previous.result);
+  }
+  return text;
 }

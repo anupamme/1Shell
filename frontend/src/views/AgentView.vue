@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch,
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import AppIcon from '@/components/AppIcon.vue';
 import HostListToolResult from '@/components/ide/HostListToolResult.vue';
+import ProbeListToolResult from '@/components/ide/ProbeListToolResult.vue';
 import AgentSessionRail from '@/components/AgentSessionRail.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
@@ -19,7 +20,7 @@ import {
 } from '@/utils/agentGoal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { renderMarkdown } from '@/utils/markdown';
-import { displayAssistantTextAfterToolResult, parseHostListResult } from '@/utils/structuredToolResults';
+import { displayAssistantTextAfterToolResult, parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 import type { HostInfo, HostsListResponse } from '@/utils/scripts';
 
 // ── provider model ──
@@ -73,6 +74,10 @@ function fmtVal(v: unknown, max = 4000): string {
 
 function hasHostListResult(tool: IdeToolTimelineItem): boolean {
   return tool.name === 'list_hosts' && Boolean(parseHostListResult(tool.result));
+}
+
+function hasProbeListResult(tool: IdeToolTimelineItem): boolean {
+  return ['list_probes', 'query_probe'].includes(tool.name) && Boolean(parseProbeListResult(tool.result));
 }
 
 function assistantDisplayText(item: IdeChatMessage, index: number): string {
@@ -161,6 +166,7 @@ const SLASH_COMMANDS: SlashCmd[] = [
   { cmd: '/goal',  label: '设置目标', desc: '设定 Agent 工作目标', icon: 'target' },
   { cmd: '/host',  label: '选择主机', desc: '限定目标主机范围', icon: 'server' },
   { cmd: '/mode',  label: '审批模式', desc: '手动审批 / 委托 / 完全访问', icon: 'shield' },
+  { cmd: '/compact', label: '压缩上下文', desc: '总结旧消息并保留最近上下文', icon: 'history' },
   { cmd: '/remind', label: '回溯', desc: '列出或回到某次输入，并撤销之后的文件改动', icon: 'history' },
   { cmd: '/clear', label: '清空时间线', desc: '重置当前会话', icon: 'close' },
 ];
@@ -318,6 +324,7 @@ function selectSlashCmd(cmd: SlashCmd): void {
   if (cmd.cmd === '/goal') { openGoalComposer(); return; }
   if (cmd.cmd === '/host') { composerInput.value = ''; showHostDropdown.value = true; return; }
   if (cmd.cmd === '/mode') { composerInput.value = ''; showModeDropdown.value = true; return; }
+  if (cmd.cmd === '/compact') { composerInput.value = ''; sendSlash('/compact'); return; }
   if (cmd.cmd === '/remind') { composerInput.value = ''; void openRewindModal(); return; }
   if (cmd.cmd === '/clear') { composerInput.value = ''; void clearChat(); return; }
   composerInput.value = cmd.cmd + ' ';
@@ -1418,6 +1425,9 @@ function approveAction(action: 'allow' | 'deny'): void {
               <div v-if="hasHostListResult(item as IdeToolTimelineItem)" class="px-4 pb-4" @click.stop>
                 <HostListToolResult :result="(item as IdeToolTimelineItem).result" />
               </div>
+              <div v-else-if="hasProbeListResult(item as IdeToolTimelineItem)" class="px-4 pb-4" @click.stop>
+                <ProbeListToolResult :result="(item as IdeToolTimelineItem).result" />
+              </div>
               <div v-if="expandingToolId === (item as IdeToolTimelineItem).toolUseId" class="px-4 pb-4 space-y-3 border-t border-slate-100 dark:border-white/[0.04] pt-3">
                 <div v-if="(item as IdeToolTimelineItem).workNote" class="text-xs text-slate-500 dark:text-slate-400 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 leading-relaxed">{{ (item as IdeToolTimelineItem).workNote }}</div>
                 <div v-if="(item as IdeToolTimelineItem).input !== undefined && (item as IdeToolTimelineItem).input !== null" class="space-y-1">
@@ -1429,7 +1439,7 @@ function approveAction(action: 'allow' | 'deny'): void {
                   <pre v-for="(log, i) in (item as IdeToolTimelineItem).logs" :key="i" class="text-xs rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[260px] overflow-y-auto"
                     :class="log.stream === 'stderr' ? 'text-red-600 dark:text-red-300/80 bg-red-50 dark:bg-red-950/20' : 'text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19]'">{{ log.text }}</pre>
                 </div>
-                <div v-if="!hasHostListResult(item as IdeToolTimelineItem) && (item as IdeToolTimelineItem).result !== undefined && (item as IdeToolTimelineItem).result !== null" class="space-y-1">
+                <div v-if="!hasHostListResult(item as IdeToolTimelineItem) && !hasProbeListResult(item as IdeToolTimelineItem) && (item as IdeToolTimelineItem).result !== undefined && (item as IdeToolTimelineItem).result !== null" class="space-y-1">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">结果</div>
                   <pre class="text-xs text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[240px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).result) }}</pre>
                 </div>

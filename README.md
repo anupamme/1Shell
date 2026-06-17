@@ -40,6 +40,13 @@ Harness 安全边界 -> 执行与观察 -> 验证结果 -> 审计留痕
 
 在 4.2 中，1Shell AI 的核心执行单元收敛为 **AgentRun**：一次用户目标对应一次可追踪、可中断、可审计、可验证的运行过程。旧版重型 Program / Task runtime 不再作为默认产品路径；可复用能力会围绕真实成功的 AgentRun、Skill、Script 和轻量 AI Task 逐步沉淀。
 
+本次同步补齐了几处 agent 体验细节：
+
+- `/compact` 会压缩历史消息，并在前端显示独立的“正在压缩...”状态。
+- 主机列表、探针列表等工具结果支持结构化卡片展示，减少模型重新拼表格导致的格式漂移。
+- 1Shell AI 的工具结果会尽量把结构化数据交给前端渲染，最终回答只负责总结。
+- 清理了过度具体的 GitHub 部署提示，让模型根据目标和上下文自行判断是阅读网页还是拉取源码。
+
 ---
 
 ## 核心能力
@@ -85,6 +92,8 @@ user goal
 -> verify outcome
 -> publish a truthful final status
 ```
+
+IDE Agent 页面围绕这个循环提供会话侧栏、工具侧栏、时间线、审批卡片、结构化工具卡片、`/compact` 和 `/rewind`。模型仍然负责判断下一步，runtime 负责保存状态、传递事件、约束工具、压缩上下文和记录轨迹。
 
 4.2 的重点不是恢复旧工作流 DSL，而是让模型在清晰工具和安全边界内自主工作。可复用任务必须来自验证过的实践路径，而不是把一句目标直接拆成看起来完整的步骤卡片。
 
@@ -297,6 +306,10 @@ Browser / Desktop Shell
   │   ├─ Agentless SSH Probe
   │   ├─ probe-agent
   │   └─ probe-relay-agent
+  ├─ IDE Service
+  │   ├─ session persistence / streaming events
+  │   ├─ structured tool result normalization
+  │   └─ /compact / /rewind
   ├─ AgentRun Runtime
   │   ├─ state / interrupt / replay / final gate
   │   └─ tool policy / verifier / trajectory

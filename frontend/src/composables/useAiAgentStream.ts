@@ -14,6 +14,7 @@ import {
 export interface AiAgentSocketMessage {
   sessionId?: string;
   runId?: string;
+  phase?: string;
 }
 
 export interface AiAgentApprovePayload extends AiAgentSocketMessage {
@@ -163,7 +164,7 @@ export function bindAiAgentStreamHandlers(
       const m = msg as AiAgentSocketMessage;
       if (!controller.matchesCurrentRun(m)) return;
       controller.setCurrentTextHadDelta(false);
-      callbacks.setStatus('思考中...');
+      callbacks.setStatus(m.phase === 'compact' ? '正在压缩...' : '思考中...');
     }],
     ['ide:text', (msg: unknown) => {
       const m = msg as AiAgentSocketMessage & { text?: string };

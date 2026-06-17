@@ -167,8 +167,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       name: 'deploy_local_mcp',
       description:
         '从 GitHub 仓库部署一个本地 MCP Server。自动执行 git clone → npm install → 注册到仓库。' +
-        '\n部署完成后 MCP 会注册为 local 类型，用户在工具面板选中时自动启动。' +
-        '\n如果不确定启动命令，先 clone 后读 README 或 package.json 来确定。',
+        '\n部署完成后 MCP 会注册为 local 类型，用户在工具面板选中时自动启动。',
       input_schema: {
         type: 'object',
         properties: {

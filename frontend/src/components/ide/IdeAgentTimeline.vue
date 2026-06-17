@@ -1,6 +1,7 @@
 ﻿<script setup lang="ts">
 import AppIcon from '@/components/AppIcon.vue';
 import HostListToolResult from '@/components/ide/HostListToolResult.vue';
+import ProbeListToolResult from '@/components/ide/ProbeListToolResult.vue';
 import {
   type IdeChatMessage,
   type IdeSystemTimelineItem,
@@ -9,7 +10,7 @@ import {
   type IdeToolTimelineItem,
 } from '@/composables/useIdeChat';
 import { renderMarkdown } from '@/utils/markdown';
-import { displayAssistantTextAfterToolResult, parseHostListResult } from '@/utils/structuredToolResults';
+import { displayAssistantTextAfterToolResult, parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 
 const props = withDefaults(defineProps<{
   items: IdeTimelineItem[];
@@ -195,6 +196,10 @@ function hasHostListResult(tool: IdeToolTimelineItem): boolean {
   return tool.name === 'list_hosts' && Boolean(parseHostListResult(tool.result));
 }
 
+function hasProbeListResult(tool: IdeToolTimelineItem): boolean {
+  return ['list_probes', 'query_probe'].includes(tool.name) && Boolean(parseProbeListResult(tool.result));
+}
+
 function stripTerminalControl(value: string): string {
   return value
     .replace(/(?:\uFFFD|\?)\[/g, '\x1b[')
@@ -211,7 +216,7 @@ function formatToolValue(value: unknown, maxLength = props.density === 'compact'
 }
 
 function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
-  return tool.status === 'preparing' || tool.status === 'running' || tool.status === 'error' || hasHostListResult(tool);
+  return tool.status === 'preparing' || tool.status === 'running' || tool.status === 'error' || hasHostListResult(tool) || hasProbeListResult(tool);
 }
 
 function toolAriaLabel(tool: IdeToolTimelineItem): string {
@@ -334,6 +339,11 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
             <div v-if="hasHostListResult(item)" class="ide-agent-tool-section">
               <div class="ide-agent-tool-section-title">结果</div>
               <HostListToolResult :result="item.result" :compact="density === 'compact'" />
+            </div>
+
+            <div v-else-if="hasProbeListResult(item)" class="ide-agent-tool-section">
+              <div class="ide-agent-tool-section-title">结果</div>
+              <ProbeListToolResult :result="item.result" :compact="density === 'compact'" />
             </div>
 
             <details v-else-if="hasToolResult(item)" class="ide-agent-tool-section" :open="item.status === 'error'">

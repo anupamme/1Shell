@@ -163,6 +163,7 @@ export interface IdeChatApi {
 interface StreamMessage {
   sessionId?: string;
   runId?: string;
+  phase?: string;
 }
 
 type IdeOutgoingMessagePayload = Record<string, unknown> & {
@@ -175,6 +176,10 @@ function makeId(prefix: string): string {
 
 function messageText(value: unknown): string {
   return String(value ?? '').trim();
+}
+
+function isCompactCommandText(value: string): boolean {
+  return /^\/compact(?:\s|$)/i.test(value.trim());
 }
 
 const TOOL_LOG_MAX_ENTRIES = 12;
@@ -684,7 +689,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         const msg = raw as StreamMessage;
         if (!matchesCurrentRun(msg)) return;
         currentTextHadDelta = false;
-        setStatus('思考中...');
+        setStatus(msg.phase === 'compact' ? '正在压缩...' : '思考中...');
       }],
       ['ide:text-delta', (raw: unknown) => {
         const msg = raw as StreamMessage & { delta?: string };
@@ -735,6 +740,17 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         approveCustomText.value = '';
         clearApproveTick();
         setStatus('已回溯');
+      }],
+      ['ide:compact', (raw: unknown) => {
+        const msg = raw as StreamMessage & { timeline?: IdeTimelineItem[] };
+        if (!matchesCurrentRun(msg)) return;
+        deltaBuffer.clear();
+        currentAssistant = null;
+        timeline.value = Array.isArray(msg.timeline) ? [...msg.timeline] : timeline.value;
+        approveRequest.value = null;
+        approveCustomText.value = '';
+        clearApproveTick();
+        setStatus('已压缩');
       }],
       ['ide:done', (raw: unknown) => {
         const msg = raw as StreamMessage & { taskStatus?: string };
@@ -996,7 +1012,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     stopRequested = false;
     currentTextHadDelta = false;
     isRunning.value = true;
-    setStatus('启动中...');
+    setStatus(isCompactCommandText(text) ? '正在压缩...' : '启动中...');
     sendWhenSocketReady(sock, text, payload);
   }
 
