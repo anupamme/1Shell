@@ -74,6 +74,12 @@ fi
 if [[ ! -f ".env" ]] && [[ -f ".env.example" ]]; then
   cp .env.example .env
   chmod 600 .env
+  app_secret="$("$NODE_EXE" -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")"
+  {
+    echo ""
+    echo "APP_SECRET=$app_secret"
+  } >> .env
+  log "Generated APP_SECRET for credential encryption"
   log "已从 .env.example 创建 .env 配置文件"
   warn "请编辑 .env 设置登录密码和 API Key"
   echo ""

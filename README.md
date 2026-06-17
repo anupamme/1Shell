@@ -261,7 +261,7 @@ npm --prefix frontend run dev
 启动后建议完成以下配置：
 
 1. 修改默认登录账号和密码。
-2. 配置 `APP_SECRET`，用于加密存储 SSH 密码、私钥和 passphrase。
+2. 确认 `APP_SECRET` 已由启动脚本自动生成，或手动配置强随机密钥，用于加密存储 SSH 密码、私钥和 passphrase。
 3. 配置 AI Provider，例如 OpenAI 兼容 API。
 4. 添加第一台 SSH 主机。
 5. 按需启用 TOTP 2FA。
@@ -285,7 +285,7 @@ BRIDGE_TOKEN=
 PORT=3301
 ```
 
-生产环境请务必修改默认密码、设置 `APP_SECRET`，并通过 HTTPS 访问。
+生产环境请务必修改默认密码、保留或替换为强随机 `APP_SECRET`，并通过 HTTPS 访问。
 
 ---
 

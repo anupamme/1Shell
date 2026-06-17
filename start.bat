@@ -83,6 +83,10 @@ if not exist "frontend\dist\index.html" (
 if not exist ".env" (
     if exist ".env.example" (
         copy .env.example .env >nul
+        "%NODE_EXE%" -e "const fs=require('fs');const crypto=require('crypto');fs.appendFileSync('.env','\nAPP_SECRET='+crypto.randomBytes(32).toString('hex')+'\n')"
+        if not errorlevel 1 (
+            echo [1Shell] Generated APP_SECRET for credential encryption
+        )
         echo [1Shell] Created .env from .env.example
         echo [1Shell] Please edit .env to set password and API Key
         echo.

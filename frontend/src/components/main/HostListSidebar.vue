@@ -71,7 +71,7 @@ function osText(h: MainHost): string {
       v-if="showSecretWarning"
       class="text-xs text-amber-600 bg-amber-50 px-3 py-2 border-b border-amber-100 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-700/40"
     >
-      当前使用默认 APP_SECRET，上线前请配置强随机密钥。
+      当前未设置 APP_SECRET，仍可继续使用；上线前建议配置强随机密钥。
     </div>
 
     <!-- 主机卡片列表 -->
