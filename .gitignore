@@ -43,6 +43,8 @@ artifacts/
 __pycache__/
 
 # Local tooling and debug output
+.ace-tool/
+.agents/
 .playwright-mcp/
 .spec-workflow/
 .claude/
@@ -59,8 +61,8 @@ deploy.js
 evil.txt
 /*.png
 docs/sections/images/
+design-previews/
 
 # OS files
 .DS_Store
 Thumbs.db
-.ace-tool/

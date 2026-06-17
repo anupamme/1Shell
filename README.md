@@ -58,6 +58,8 @@ Future reusable automation should not be restored until the AgentRun loop is pro
 
 ## Development
 
+Use Node.js 20.18.3 by default; CI also verifies Node.js 22.x. Node.js 24 is not supported by the current native dependency set.
+
 ```bash
 npm install
 npm test
