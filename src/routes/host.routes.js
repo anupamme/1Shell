@@ -82,6 +82,24 @@ function createHostRouter({ hostRepository, hostService, auditService, isUsingFa
     }
   });
 
+  router.post('/hosts/repository-order', (req, res, next) => {
+    try {
+      const hosts = hostService.setRepositoryOrder(req.body?.hostIds, {
+        probeMap: buildProbeMap(),
+        alertCountMap: buildAlertCountMap(),
+      });
+      auditService?.log({
+        action: 'host_repository_order_update',
+        source: 'web_ui',
+        details: JSON.stringify({ count: Array.isArray(req.body?.hostIds) ? req.body.hostIds.length : 0 }),
+        clientIp: req.ip,
+      });
+      res.json({ hosts });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/hosts', (req, res, next) => {
     try {
       const hosts = hostRepository.readStoredHosts();

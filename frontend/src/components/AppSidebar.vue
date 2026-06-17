@@ -12,7 +12,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { to: '/panel/hosts',    label: '主机', icon: 'server',      title: 'VPS 仓库' },
   { to: '/panel/features', label: '程序', icon: 'wrench',      title: '任务与程序' },
-  { to: '/panel/skills',   label: '仓库', icon: 'package',     title: '技能仓库' },
+  { to: '/panel/skills',   label: '扩展', icon: 'package',     title: '扩展' },
   { to: '/panel/mcp',      label: 'MCP',  icon: 'plug',        title: 'MCP Hub' },
   { to: '/panel/ai',       label: 'AI',   icon: 'spark',       title: 'AI 配置' },
   { to: '/panel/probe',    label: '探针', icon: 'radio',       title: '探针' },

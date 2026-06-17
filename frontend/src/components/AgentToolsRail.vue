@@ -24,6 +24,12 @@ type ToolTab = 'skill' | 'mcp';
 const { requestJson } = useApiClient();
 const notify = useNotifyStore();
 
+const props = withDefaults(defineProps<{
+  embedded?: boolean;
+}>(), {
+  embedded: false,
+});
+
 const tab = ref<ToolTab>('skill');
 const skills = ref<SkillItem[]>([]);
 const servers = ref<McpServer[]>([]);
@@ -97,7 +103,11 @@ onMounted(() => { void loadAll(); });
 </script>
 
 <template>
-  <aside class="w-64 shrink-0 h-full flex flex-col border-l border-slate-200 dark:border-white/[0.05] bg-stone-50 dark:bg-[#0f1321]">
+  <aside
+    :class="props.embedded
+      ? 'flex-1 min-h-0 flex flex-col overflow-hidden bg-transparent'
+      : 'w-64 shrink-0 h-full flex flex-col border-l border-slate-200 dark:border-white/[0.05] bg-stone-50 dark:bg-[#0f1321]'"
+  >
     <div class="shrink-0 flex items-center gap-2 px-4 h-11 border-b border-slate-200 dark:border-white/[0.05]">
       <AppIcon name="wrench" :size="15" class="text-slate-400 dark:text-slate-500" />
       <span class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">Tools</span>

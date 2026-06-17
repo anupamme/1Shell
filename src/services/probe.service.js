@@ -523,6 +523,12 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
 
       hostService.connectToHost(host.id, { readyTimeout: timeout })
         .then(({ client, proxyClient: proxy }) => {
+          // 若已超时结束，连接迟到才建好：直接关掉，否则泄漏
+          if (settled) {
+            try { client?.end(); } catch { /* ignore */ }
+            try { proxy?.end(); } catch { /* ignore */ }
+            return;
+          }
           targetClient = client;
           proxyClient = proxy;
           latencyMs = Date.now() - startedAt;

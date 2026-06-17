@@ -5,6 +5,8 @@ import AppIcon from './AppIcon.vue';
 
 const route = useRoute();
 
+const GITHUB_URL = 'https://github.com/weidu12123/1Shell';
+
 interface NavItem {
   to: string;
   label: string;
@@ -69,8 +71,17 @@ onMounted(syncFromDom);
       </nav>
     </div>
 
-    <!-- 右侧：设置 + 主题 -->
+    <!-- 右侧：GitHub + 设置 + 主题 -->
     <div class="flex items-center gap-1 ml-auto">
+      <a
+        :href="GITHUB_URL"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="flex items-center justify-center w-9 h-9 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] rounded-md transition-colors duration-150"
+        title="GitHub 项目主页"
+      >
+        <AppIcon name="github" :size="20" />
+      </a>
       <RouterLink
         to="/settings"
         class="flex items-center justify-center w-9 h-9 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] rounded-md transition-colors duration-150"

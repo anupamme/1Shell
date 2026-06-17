@@ -61,48 +61,6 @@ function evaluateAgentRunReplay(state = {}, options = {}) {
   };
 }
 
-function evaluateAgentRunReplayForRuntime(runtime, runId = '', options = {}) {
-  if (!runtime?.getState) throw new Error('Agent runtime getState is not configured');
-  const id = String(runId || '').trim();
-  if (!id) throw new Error('runId is required');
-  const state = runtime.getState(id);
-  if (!state) throw new Error(`Agent run not found: ${id}`);
-  const evaluation = evaluateAgentRunReplay(state, options);
-  if (options.persist !== false && runtime.recordReplayEvaluation) {
-    runtime.recordReplayEvaluation(id, evaluation);
-  }
-  if (options.applyRecommendation === true || options.apply_recommendation === true) {
-    if (runtime.applyReplayRecommendation) {
-      const applied = runtime.applyReplayRecommendation(id, evaluation, {
-        source: options.recommendationSource || options.recommendation_source || 'replay',
-        reason: options.recommendationReason || options.recommendation_reason || 'replay_recommendation',
-        syncResult: options.syncResult,
-      });
-      if (applied) {
-        evaluation.appliedRecommendation = {
-          taskStatus: applied.taskStatus,
-          previousTaskStatus: applied.previousTaskStatus,
-          source: applied.source,
-          reason: applied.reason,
-        };
-      }
-    } else if (runtime.updateTaskStatus && evaluation.recommendedTaskStatus) {
-      const applied = runtime.updateTaskStatus(id, evaluation.recommendedTaskStatus, {
-        source: options.recommendationSource || options.recommendation_source || 'replay',
-        reason: options.recommendationReason || options.recommendation_reason || 'replay_recommendation',
-        syncResult: options.syncResult,
-      });
-      evaluation.appliedRecommendation = {
-        taskStatus: applied.taskStatus,
-        previousTaskStatus: applied.previousTaskStatus,
-        source: applied.source,
-        reason: applied.reason,
-      };
-    }
-  }
-  return evaluation;
-}
-
 function applyReplayEvaluationToState(state = {}, evaluation = {}) {
   const runtimeState = ensureRuntimeState(state);
   const now = evaluation.evaluatedAt || new Date().toISOString();
@@ -227,5 +185,4 @@ module.exports = {
   applyReplayEvaluationToState,
   createReplayEvaluationState,
   evaluateAgentRunReplay,
-  evaluateAgentRunReplayForRuntime,
 };

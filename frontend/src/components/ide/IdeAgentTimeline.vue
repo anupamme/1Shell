@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import AppIcon from '@/components/AppIcon.vue';
+import HostListToolResult from '@/components/ide/HostListToolResult.vue';
 import {
   type IdeChatMessage,
   type IdeSystemTimelineItem,
@@ -8,6 +9,7 @@ import {
   type IdeToolTimelineItem,
 } from '@/composables/useIdeChat';
 import { renderMarkdown } from '@/utils/markdown';
+import { displayAssistantTextAfterToolResult, parseHostListResult } from '@/utils/structuredToolResults';
 
 const props = withDefaults(defineProps<{
   items: IdeTimelineItem[];
@@ -38,6 +40,11 @@ function messageIcon(item: IdeChatMessage): string {
 
 function messageLabel(item: IdeChatMessage): string {
   return item.role === 'user' ? '你' : '1Shell AI';
+}
+
+function messageDisplayText(item: IdeChatMessage, index: number): string {
+  if (item.role !== 'assistant') return item.text;
+  return displayAssistantTextAfterToolResult(props.items, index, item.text);
 }
 
 function systemIcon(item: IdeSystemTimelineItem): string {
@@ -184,6 +191,10 @@ function hasToolResult(tool: IdeToolTimelineItem): boolean {
   return tool.result !== undefined && tool.result !== null && String(tool.result).trim() !== '';
 }
 
+function hasHostListResult(tool: IdeToolTimelineItem): boolean {
+  return tool.name === 'list_hosts' && Boolean(parseHostListResult(tool.result));
+}
+
 function stripTerminalControl(value: string): string {
   return value
     .replace(/(?:\uFFFD|\?)\[/g, '\x1b[')
@@ -200,7 +211,7 @@ function formatToolValue(value: unknown, maxLength = props.density === 'compact'
 }
 
 function toolDefaultOpen(tool: IdeToolTimelineItem): boolean {
-  return tool.status === 'preparing' || tool.status === 'running' || tool.status === 'error';
+  return tool.status === 'preparing' || tool.status === 'running' || tool.status === 'error' || hasHostListResult(tool);
 }
 
 function toolAriaLabel(tool: IdeToolTimelineItem): string {
@@ -211,7 +222,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 
 <template>
   <div class="ide-agent-timeline" :class="`ide-agent-timeline--${density}`">
-    <template v-for="item in items" :key="item.id">
+    <template v-for="(item, index) in items" :key="item.id">
       <article
         v-if="isChatMessage(item)"
         class="ide-agent-message"
@@ -223,9 +234,9 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
         </div>
         <div class="ide-agent-bubble">
           <div
-            v-if="item.text"
+            v-if="messageDisplayText(item, index)"
             class="markdown-body ide-agent-markdown"
-            v-html="renderMarkdown(item.text)"
+            v-html="renderMarkdown(messageDisplayText(item, index))"
           ></div>
           <div v-else class="ide-agent-pending" role="status" aria-label="生成中">
             <span></span>
@@ -320,7 +331,12 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
               </div>
             </div>
 
-            <details v-if="hasToolResult(item)" class="ide-agent-tool-section" :open="item.status === 'error'">
+            <div v-if="hasHostListResult(item)" class="ide-agent-tool-section">
+              <div class="ide-agent-tool-section-title">结果</div>
+              <HostListToolResult :result="item.result" :compact="density === 'compact'" />
+            </div>
+
+            <details v-else-if="hasToolResult(item)" class="ide-agent-tool-section" :open="item.status === 'error'">
               <summary>结果</summary>
               <pre>{{ formatToolValue(item.result) }}</pre>
             </details>

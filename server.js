@@ -29,7 +29,9 @@ const {
   PORT,
   PROXY_TOKEN,
   ROOT_DIR,
-  USING_DEFAULT_CREDENTIALS,
+  AUTH_ENABLED,
+  BIND_HOST,
+  isLoopbackBindHost,
 } = require('./src/config/env');
 const { createApp } = require('./src/app/createApp');
 const { createServer } = require('./src/app/createServer');
@@ -105,6 +107,8 @@ const { createExecRouter } = require('./src/routes/exec.routes');
 const { createAgentRuntime } = require('./src/agent-runtime');
 const { createSecretService } = require('./src/services/secret.service');
 const { createSecretRouter } = require('./src/routes/secret.routes');
+const { createUpdaterService } = require('./src/services/updater.service');
+const { createUpdaterRouter } = require('./src/routes/updater.routes');
 const { registerSkillSocketHandlers } = require('./src/sockets/registerSkillSocketHandlers');
 const { registerIdeSocketHandlers } = require('./src/sockets/registerIdeSocketHandlers');
 const { createIdeTools } = require('./src/ide/ide.tools');
@@ -120,9 +124,10 @@ const app = createApp(ROOT_DIR);
 const { io, server } = createServer(app);
 const hostRepository = createHostRepository(HOSTS_FILE, db);
 const aiTaskRepository = createAiTaskRepository(db);
-const ideSessionRepository = createIdeSessionRepository(db);
+const ideSessionRepository = createIdeSessionRepository(db, { dataDir });
 const scriptRepository = createScriptRepository(db);
 const secretService = createSecretService({ db });
+const updaterService = createUpdaterService({ rootDir: ROOT_DIR, dataDir, logger: log });
 const proxyConfigStore = createProxyConfigStore(dataDir);
 const skillRegistry = createSkillRegistry(path.join(dataDir, 'skills'), { kind: 'skill' });
 const claudeCodeSkillRegistry = createClaudeCodeSkillRegistry({ dataDir, logger: log });
@@ -293,6 +298,7 @@ app.use('/api', createSkillRouter({ libraryService, skillRunner, claudeCodeSkill
 app.use('/api', createMcpRegistryRouter({ mcpRegistry, localMcpService, localMcpDeployer }));
 app.use('/api', createExecRouter({ bridgeService, hostService }));
 app.use('/api', createSecretRouter({ secretService }));
+app.use('/api', createUpdaterRouter({ updaterService }));
 
 // ─── Socket.IO ──────────────────────────────────────────────────────────
 io.use(authService.authenticateSocket);
@@ -320,6 +326,7 @@ probeService.startScheduler({
 probeTrafficService.startScheduler();
 probeAlertService.ensureDefaults();
 probeAggregatorService.startScheduler();
+updaterService.startScheduler();
 
 // ─── 自动启动本地 MCP Server（不阻塞服务器启动）──────────────────────
 (async () => {
@@ -349,13 +356,36 @@ probeAggregatorService.startScheduler();
 hostRepository.ensureHostsFile();
 app.use(errorHandler);
 
-server.listen(PORT, () => {
-  log.info('1Shell 已启动', { port: PORT, url: `http://localhost:${PORT}`, db: db ? 'sqlite' : 'file' });
-  if (isUsingFallbackSecret()) {
-    log.warn('未设置 APP_SECRET，当前凭据加密使用默认开发密钥');
+// 监听地址决策（安全默认 fail-safe）：
+//  - 显式设置 HOST/BIND_HOST：尊重用户选择，但若是对外地址且未配置登录凭据，拒绝启动。
+//  - 未设置：配置了凭据则绑 0.0.0.0（对外），未配置则只绑 127.0.0.1（仅本机）。
+let bindHost;
+if (BIND_HOST) {
+  bindHost = BIND_HOST;
+  if (!AUTH_ENABLED && !isLoopbackBindHost(BIND_HOST)) {
+    log.error(
+      `❌ 拒绝启动：监听地址 ${BIND_HOST} 对外可达，但未配置登录凭据。\n` +
+      '   请在 .env 中设置 APP_LOGIN_USERNAME 和 APP_LOGIN_PASSWORD，\n' +
+      '   或将 HOST 设为 127.0.0.1 仅供本机访问。'
+    );
+    process.exit(1);
   }
-  if (USING_DEFAULT_CREDENTIALS) {
-    log.warn('⚠️  当前使用默认登录凭据 admin/admin，请在 .env 中设置 APP_LOGIN_USERNAME 和 APP_LOGIN_PASSWORD');
+} else {
+  bindHost = AUTH_ENABLED ? '0.0.0.0' : '127.0.0.1';
+}
+
+server.listen(PORT, bindHost, () => {
+  const exposed = !isLoopbackBindHost(bindHost);
+  log.info('1Shell 已启动', { host: bindHost, port: PORT, url: `http://localhost:${PORT}`, db: db ? 'sqlite' : 'file' });
+  if (isUsingFallbackSecret()) {
+    log.warn('未设置 APP_SECRET，凭据加密使用默认开发密钥——主机密码/私钥可被持有数据库者离线解密。请设置 APP_SECRET。');
+  }
+  if (!AUTH_ENABLED) {
+    if (exposed) {
+      log.warn('⚠️  鉴权已禁用（未配置 APP_LOGIN_USERNAME/PASSWORD），且监听地址对外可达——任何人可无需登录访问全部接口。');
+    } else {
+      log.warn('鉴权已禁用（未配置 APP_LOGIN_USERNAME/PASSWORD），仅绑定本机 127.0.0.1。如需对外开放请先设置登录凭据。');
+    }
   }
   const { syncGlobalClaudeMcp } = require('./src/agents/claude-config-sync');
   syncGlobalClaudeMcp({ port: PORT, bridgeToken: BRIDGE_TOKEN });
@@ -364,8 +394,10 @@ server.listen(PORT, () => {
 // ─── 优雅退出 ───────────────────────────────────────────────────────────
 function shutdown() {
   log.info('1Shell 正在关闭...');
+  probeService.stopScheduler();
   probeTrafficService.stopScheduler();
   probeAggregatorService.stopScheduler();
+  updaterService.stopScheduler();
   localMcpService.stopAll();
   sshPool.closeAll();
   sshShellPool.closeAll();

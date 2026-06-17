@@ -520,11 +520,13 @@ function createHostService({ hostRepository }) {
 
   function normalizePreference(hostId, raw = null, fallbackOrder = 0) {
     const consoleOrder = Number(raw?.consoleOrder);
+    const repositoryOrder = Number(raw?.repositoryOrder);
     const role = raw?.role && HOST_ROLES.has(raw.role) ? raw.role : null;
     return {
       hostId,
       showInConsole: raw?.showInConsole !== false,
       consoleOrder: Number.isFinite(consoleOrder) ? consoleOrder : fallbackOrder,
+      repositoryOrder: Number.isFinite(repositoryOrder) ? repositoryOrder : fallbackOrder,
       pinned: Boolean(raw?.pinned),
       role,
       tags: normalizeTags(raw?.tags),
@@ -574,6 +576,13 @@ function createHostService({ hostRepository }) {
     if (a.preference.pinned !== b.preference.pinned) return a.preference.pinned ? -1 : 1;
     if (a.preference.consoleOrder !== b.preference.consoleOrder) {
       return a.preference.consoleOrder - b.preference.consoleOrder;
+    }
+    return String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
+  }
+
+  function sortRepositoryHosts(a, b) {
+    if (a.preference.repositoryOrder !== b.preference.repositoryOrder) {
+      return a.preference.repositoryOrder - b.preference.repositoryOrder;
     }
     return String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
   }
@@ -676,7 +685,7 @@ function createHostService({ hostRepository }) {
   }
 
   function listRepositoryHosts(context = {}) {
-    const hosts = listHostsWithPreferences();
+    const hosts = listHostsWithPreferences().sort(sortRepositoryHosts);
     hosts.forEach(scheduleHostOsProbe);
     return hosts.map((host) => toRepositoryItem(host, context));
   }
@@ -690,6 +699,11 @@ function createHostService({ hostRepository }) {
       const order = Number(patch.consoleOrder);
       if (!Number.isFinite(order)) throw createValidationError('主控排序必须是数字');
       next.consoleOrder = order;
+    }
+    if (hasOwn(patch, 'repositoryOrder')) {
+      const order = Number(patch.repositoryOrder);
+      if (!Number.isFinite(order)) throw createValidationError('仓库排序必须是数字');
+      next.repositoryOrder = order;
     }
     if (hasOwn(patch, 'pinned')) next.pinned = Boolean(patch.pinned);
     if (hasOwn(patch, 'role')) {
@@ -739,6 +753,34 @@ function createHostService({ hostRepository }) {
     return listConsoleHosts();
   }
 
+  function setRepositoryOrder(hostIds, context = {}) {
+    if (!Array.isArray(hostIds)) throw createValidationError('hostIds 必须是数组');
+    const allHosts = listHosts();
+    const validIds = new Set(allHosts.map((host) => host.id));
+    const seen = new Set();
+    const uniqueIds = [];
+
+    for (const id of hostIds) {
+      const hostId = String(id || '').trim();
+      if (!hostId || seen.has(hostId)) continue;
+      if (!validIds.has(hostId)) throw createNotFoundError(`主机不存在: ${hostId}`);
+      seen.add(hostId);
+      uniqueIds.push(hostId);
+    }
+
+    ensureHostPreferences(allHosts);
+    uniqueIds.forEach((hostId, index) => {
+      updateHostPreference(hostId, { repositoryOrder: index });
+    });
+
+    let nextOrder = uniqueIds.length;
+    for (const host of allHosts) {
+      if (!seen.has(host.id)) updateHostPreference(host.id, { repositoryOrder: nextOrder++ });
+    }
+
+    return listRepositoryHosts(context);
+  }
+
   function ensureDefaultPreference(hostId) {
     const existing = hostRepository.readHostPreference(hostId);
     if (existing) return normalizePreference(hostId, existing, nextConsoleOrder());
@@ -770,6 +812,7 @@ function createHostService({ hostRepository }) {
     listRepositoryHosts,
     saveLocalHostConfig,
     setConsoleOrder,
+    setRepositoryOrder,
     toPublicHost,
     updateHostPreference,
     updateLocalHostManualLocation,

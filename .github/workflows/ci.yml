@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20]
+        node-version: [20, 22]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +29,7 @@ jobs:
         run: npm test
         env:
           APP_SECRET: ci-test-secret-key-for-testing
+          APP_LOGIN_USERNAME: ci-test-user
           APP_LOGIN_PASSWORD: ci-test-password
 
       - name: Install frontend dependencies
@@ -61,6 +62,7 @@ jobs:
         run: |
           docker run -d --name 1shell-test \
             -e APP_SECRET=ci-test-secret \
+            -e APP_LOGIN_USERNAME=ci-test-user \
             -e APP_LOGIN_PASSWORD=ci-test-pw \
             -p 3301:3301 \
             1shell:test

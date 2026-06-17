@@ -134,16 +134,12 @@ function hasValidProxyToken(req, proxyToken) {
 }
 
 function isLocalProxyRequest(req) {
+  // 只信任真实 socket 直连地址，不看 Host 头——反代后 Host 可被攻击者伪造成 localhost。
+  // 且仅当未配置可信代理时才认定为"本机直连用户"：一旦配置 TRUSTED_PROXY_IPS，
+  // 说明前面有反代，loopback peer 只是代理本身，必须走 PROXY_TOKEN。
+  if (TRUSTED_PROXY_IPS.length > 0) return false;
   const directIp = normalizeIp(req.socket?.remoteAddress || req.ip);
-  // 仅当直连方是受信任代理时，才读取 X-Forwarded-For / X-Real-IP 判定真实来源；
-  // 否则一律以直连 socket 地址为准，防止伪造转发头绕过 localhost 限制。
-  let clientIp = directIp;
-  if (TRUSTED_PROXY_IPS.includes(directIp)) {
-    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
-    const realIp = String(req.headers['x-real-ip'] || '').trim();
-    clientIp = realIp || forwarded[0] || directIp;
-  }
-  return isLocalHostname(req.headers.host) && isLoopbackIp(clientIp);
+  return isLoopbackIp(directIp);
 }
 
 function requireProxyAccess(proxyToken) {
@@ -891,6 +887,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       const upResp = await callOpenAIResponsesUpstream(provider.apiBase, provider.apiKey, body, requestAbort.signal);
       if (!upResp.ok) {
         const errText = await upResp.text().catch(() => '');
+        requestAbort.cleanup();
         return errResponse(res, upResp.status, `上游 API 返回 ${upResp.status}: ${errText.substring(0, 500)}`, 'openai');
       }
       if (isStream) {
@@ -901,6 +898,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
         res.json(data);
       }
     } catch (err) {
+      requestAbort.cleanup();
       log.error(`${cliLabel} Responses API 透传失败`, { error: err.message });
       errResponse(res, 502, `代理请求失败: ${err.message}`, 'openai');
     }

@@ -10,6 +10,15 @@ import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
 import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
 import { useNotifyStore } from '@/stores/notify';
+import {
+  agentGoalObjective,
+  emptyAgentGoalState,
+  formatAgentGoalLabel,
+  parseAgentGoalCommand,
+  reduceAgentGoalCommand,
+  serializeAgentGoal,
+  type AgentGoalCommand,
+} from '@/utils/agentGoal';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 import type { AiTaskInfo, AiTaskSaveResponse } from '@/utils/aiTasks';
 
@@ -19,37 +28,48 @@ const { requestJson } = useApiClient();
 const { confirm } = useConfirm();
 const notify = useNotifyStore();
 const chatEl = ref<HTMLElement | null>(null);
+const inputEl = ref<HTMLTextAreaElement | null>(null);
 const taskModalOpen = ref(false);
 const taskMode = ref<'new' | 'pack'>('new');
 const taskIntent = ref('');
 const savingTaskDraft = ref(false);
 const nextEntry = ref<'core' | 'task'>('core');
 const approvalMode = ref<IdeApprovalMode>('manual');
-const agentGoal = ref('');
+const agentGoal = ref(emptyAgentGoalState());
+const composerMode = ref<'chat' | 'goal'>('chat');
 const currentModel = ref('默认模型');
 const taskAuthoringContext = ref<Record<string, unknown> | null>(null);
 const ide = useIdeChat({
   approvalMode: () => outgoingApprovalMode(),
   context: () => ({
-    agentGoal: agentGoal.value || undefined,
+    agentGoal: agentGoalObjective(agentGoal.value) || undefined,
+    threadGoal: serializeAgentGoal(agentGoal.value),
     modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
     taskAuthoring: taskAuthoringContext.value,
   }),
   messagePayload: () => ({
     entry: nextEntry.value,
     approvalMode: outgoingApprovalMode(),
-    goal: agentGoal.value || undefined,
+    goal: agentGoalObjective(agentGoal.value) || undefined,
+    goalStatus: serializeAgentGoal(agentGoal.value)?.status,
+    threadGoal: serializeAgentGoal(agentGoal.value),
     modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
   }),
   onTaskSaved: handleTaskSaved,
 });
 let followOutput = true;
 
-const agentGoalLabel = computed(() => agentGoal.value || '未设置目标');
+const agentGoalLabel = computed(() => formatAgentGoalLabel(agentGoal.value));
 const modelLabel = computed(() => currentModel.value || '默认模型');
 const modeLabel = computed(() => approvalModeLabel(outgoingApprovalMode()));
+const isGoalComposerMode = computed(() => composerMode.value === 'goal');
+const inputPlaceholder = computed(() => isGoalComposerMode.value
+  ? '1Shell 应继续朝哪个目标努力？'
+  : '输入目标，或使用 /goal、/model 设置本会话上下文...'
+);
 
 const taskSuggestionVisible = computed(() => {
+  if (isGoalComposerMode.value) return false;
   if (ide.isRunning.value) return false;
   const text = ide.inputText.value.trimStart();
   return /^\/(?:t(?:a(?:s(?:k)?)?)?)?$/i.test(text);
@@ -82,6 +102,11 @@ function scrollToBottom(force = false): void {
 }
 
 function onInputKeydown(event: KeyboardEvent): void {
+  if (isGoalComposerMode.value && event.key === 'Escape') {
+    event.preventDefault();
+    closeGoalComposer();
+    return;
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     if (taskSuggestionVisible.value) {
@@ -111,28 +136,31 @@ function parseTaskCommand(value: string): string | null {
   return String(match[1] || '').trim();
 }
 
-function parseAgentShellCommand(value: string): { name: 'goal' | 'model'; arg: string } | null {
-  const match = String(value || '').trim().match(/^\/(goal|model)(?:\s+([\s\S]*))?$/i);
+function parseAgentShellCommand(value: string): { name: 'model'; arg: string } | null {
+  const match = String(value || '').trim().match(/^\/model(?:\s+([\s\S]*))?$/i);
   if (!match) return null;
-  const name = String(match[1] || '').toLowerCase();
-  if (name !== 'goal' && name !== 'model') return null;
-  return { name, arg: String(match[2] || '').trim() };
+  return { name: 'model', arg: String(match[1] || '').trim() };
 }
 
 function handleAgentShellCommand(value: string): boolean {
+  const goalCommand = parseAgentGoalCommand(value);
+  if (goalCommand) {
+    ide.inputText.value = '';
+    if (goalCommand.action === 'show') {
+      openGoalComposer();
+      return true;
+    }
+    if (goalCommand.action === 'edit') {
+      openGoalComposer(agentGoal.value.objective);
+      return true;
+    }
+    applyAgentGoalCommand(goalCommand);
+    return true;
+  }
+
   const command = parseAgentShellCommand(value);
   if (!command) return false;
   ide.inputText.value = '';
-
-  if (command.name === 'goal') {
-    if (!command.arg) {
-      ide.pushSystemEvent('/goal', agentGoal.value ? `当前目标：${agentGoal.value}` : '当前还没有设置目标。输入 /goal 加目标内容即可设置。');
-      return true;
-    }
-    agentGoal.value = command.arg;
-    ide.pushSystemEvent('/goal', `当前目标已设置为：${command.arg}`, 'success');
-    return true;
-  }
 
   if (!command.arg) {
     ide.pushSystemEvent('/model', `当前模型偏好：${currentModel.value}`);
@@ -141,6 +169,38 @@ function handleAgentShellCommand(value: string): boolean {
   currentModel.value = command.arg;
   ide.pushSystemEvent('/model', `已记录本会话模型偏好：${command.arg}。实际模型路由以当前后端配置为准。`, 'success');
   return true;
+}
+
+function applyAgentGoalCommand(command: AgentGoalCommand): void {
+  const result = reduceAgentGoalCommand(agentGoal.value, command);
+  if (result.needsEditor) {
+    openGoalComposer(agentGoal.value.objective);
+    return;
+  }
+  agentGoal.value = result.state;
+  ide.pushSystemEvent(result.title, result.text, result.tone);
+}
+
+function openGoalComposer(prefill = ''): void {
+  if (ide.isRunning.value) return;
+  composerMode.value = 'goal';
+  ide.inputText.value = prefill;
+  void nextTick(() => inputEl.value?.focus());
+}
+
+function closeGoalComposer(): void {
+  if (!isGoalComposerMode.value) return;
+  composerMode.value = 'chat';
+  ide.inputText.value = '';
+  void nextTick(() => inputEl.value?.focus());
+}
+
+function submitGoalComposer(): void {
+  const objective = ide.inputText.value.trim();
+  if (!objective || ide.isRunning.value) return;
+  applyAgentGoalCommand({ kind: 'goal', action: 'set', objective });
+  composerMode.value = 'chat';
+  ide.inputText.value = '';
 }
 
 function approvalModeLabel(mode: IdeApprovalMode): string {
@@ -179,6 +239,10 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
 }
 
 function sendOrOpenTask(): void {
+  if (isGoalComposerMode.value) {
+    submitGoalComposer();
+    return;
+  }
   if (handleAgentShellCommand(ide.inputText.value)) return;
   const commandIntent = parseTaskCommand(ide.inputText.value);
   if (commandIntent === null) {
@@ -199,6 +263,10 @@ function selectTaskSuggestion(): void {
 
 function prefillCommand(command: '/goal' | '/model' | '/task'): void {
   if (ide.isRunning.value) return;
+  if (command === '/goal') {
+    openGoalComposer();
+    return;
+  }
   ide.inputText.value = `${command} `;
 }
 
@@ -367,19 +435,36 @@ async function saveEmptyTaskDraft(): Promise<void> {
           </span>
           <AppIcon name="arrow-right" :size="14" />
         </button>
+        <div v-if="isGoalComposerMode" class="ide-goal-composer-banner">
+          <span class="ide-goal-composer-icon">
+            <AppIcon name="target" :size="14" />
+          </span>
+          <strong>目标</strong>
+          <span>下一条输入会保存为 Agent 工作目标</span>
+          <button type="button" title="退出目标输入" @click="closeGoalComposer">
+            <AppIcon name="close" :size="12" />
+          </button>
+        </div>
         <label class="sr-only" for="ide-chat-input">输入给 1Shell AI 的消息</label>
         <textarea
           id="ide-chat-input"
+          ref="inputEl"
           v-model="ide.inputText.value"
           rows="3"
           class="ide-chat-input"
-          placeholder="输入目标，或使用 /goal、/model 设置本会话上下文..."
+          :class="{ 'ide-chat-input--goal': isGoalComposerMode }"
+          :placeholder="inputPlaceholder"
           :disabled="ide.isRunning.value"
           spellcheck="false"
           @keydown="onInputKeydown"
         />
         <div class="ide-chat-command-row" aria-label="Agent Shell 快捷命令">
-          <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/goal')">
+          <button
+            type="button"
+            :class="{ 'ide-chat-command-active': isGoalComposerMode }"
+            :disabled="ide.isRunning.value"
+            @click="prefillCommand('/goal')"
+          >
             <strong>/goal</strong>
             <span>设置目标</span>
           </button>
@@ -831,6 +916,12 @@ async function saveEmptyTaskDraft(): Promise<void> {
   box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.18);
 }
 
+.ide-chat-input--goal,
+.ide-chat-input--goal:focus {
+  border-color: rgba(16, 185, 129, 0.72);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+}
+
 .ide-chat-input:disabled {
   opacity: 0.68;
   cursor: not-allowed;
@@ -840,6 +931,12 @@ async function saveEmptyTaskDraft(): Promise<void> {
   background: rgba(2, 6, 23, 0.72);
   border-color: rgba(71, 85, 105, 0.9);
   color: #e2e8f0;
+}
+
+:global(.dark) .ide-chat-input--goal,
+:global(.dark) .ide-chat-input--goal:focus {
+  border-color: rgba(52, 211, 153, 0.54);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 }
 
 .ide-command-suggestion {
@@ -926,6 +1023,83 @@ async function saveEmptyTaskDraft(): Promise<void> {
   color: #94a3b8;
 }
 
+.ide-goal-composer-banner {
+  min-height: 40px;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 9px;
+  background: rgba(236, 253, 245, 0.92);
+  color: #047857;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.ide-goal-composer-banner strong,
+.ide-goal-composer-banner span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ide-goal-composer-banner strong {
+  font-weight: 760;
+}
+
+.ide-goal-composer-banner span {
+  color: #059669;
+}
+
+.ide-goal-composer-banner button {
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 7px;
+  color: #059669;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.ide-goal-composer-banner button:hover,
+.ide-goal-composer-banner button:focus-visible {
+  color: #065f46;
+  background: rgba(16, 185, 129, 0.12);
+  outline: none;
+}
+
+.ide-goal-composer-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+:global(.dark) .ide-goal-composer-banner {
+  border-color: rgba(52, 211, 153, 0.24);
+  background: rgba(6, 78, 59, 0.22);
+  color: #a7f3d0;
+}
+
+:global(.dark) .ide-goal-composer-banner span,
+:global(.dark) .ide-goal-composer-banner button {
+  color: #6ee7b7;
+}
+
+:global(.dark) .ide-goal-composer-icon {
+  background: rgba(52, 211, 153, 0.1);
+}
+
 .ide-chat-command-row {
   display: flex;
   flex-wrap: wrap;
@@ -947,7 +1121,8 @@ async function saveEmptyTaskDraft(): Promise<void> {
 }
 
 .ide-chat-command-row button:hover:not(:disabled),
-.ide-chat-command-row button:focus-visible {
+.ide-chat-command-row button:focus-visible,
+.ide-chat-command-row .ide-chat-command-active {
   border-color: rgba(14, 165, 233, 0.48);
   color: #0369a1;
   background: #f0f9ff;
@@ -980,7 +1155,8 @@ async function saveEmptyTaskDraft(): Promise<void> {
 }
 
 :global(.dark) .ide-chat-command-row button:hover:not(:disabled),
-:global(.dark) .ide-chat-command-row button:focus-visible {
+:global(.dark) .ide-chat-command-row button:focus-visible,
+:global(.dark) .ide-chat-command-row .ide-chat-command-active {
   border-color: rgba(56, 189, 248, 0.34);
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);

@@ -94,9 +94,18 @@ function createMcpRouter({ mcpService, remoteMcpService }) {
     const batch = Array.isArray(msg) ? msg : [msg];
     const results = [];
 
-    for (const item of batch) {
-      const result = await mcpService.handleDirectRequest(item, req.mcpContext || {});
-      if (result) results.push(result);
+    try {
+      for (const item of batch) {
+        const result = await mcpService.handleDirectRequest(item, req.mcpContext || {});
+        if (result) results.push(result);
+      }
+    } catch (err) {
+      if (res.headersSent) return;
+      return res.status(500).json({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: err?.message || 'Internal error' },
+        id: (msg && !Array.isArray(msg) && msg.id != null) ? msg.id : null,
+      });
     }
 
     if (results.length === 0) {
@@ -144,7 +153,13 @@ function createMcpRouter({ mcpService, remoteMcpService }) {
       return res.status(400).json({ ok: false, error: '请求体必须为 JSON 对象', code: 'BAD_REQUEST' });
     }
 
-    const found = await mcpService.receiveMessage(sessionId, msg);
+    let found;
+    try {
+      found = await mcpService.receiveMessage(sessionId, msg);
+    } catch (err) {
+      if (res.headersSent) return;
+      return res.status(500).json({ ok: false, error: err?.message || 'Internal error', code: 'INTERNAL_ERROR' });
+    }
     if (!found) {
       return res.status(404).json({ ok: false, error: 'MCP session 不存在或已断开', code: 'SESSION_NOT_FOUND' });
     }

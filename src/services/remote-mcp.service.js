@@ -268,8 +268,12 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
     const protocol = String((trustForwarded && req.headers?.['x-forwarded-proto']) || req.protocol || '').split(',')[0].trim().toLowerCase() || 'http';
     const clientIp = getClientIp(req, trustForwarded);
     const origin = String(req.headers?.origin || '').trim();
-    const localHost = isLocalHostname(hostname);
+    // exposure='local'（免 token）只在真正本机直连时成立：socket peer 是 loopback
+    // 且未配置可信代理。配置了 TRUSTED_PROXY_IPS 说明前面有反代，loopback peer 只是代理，
+    // 且 Host/X-Forwarded-Host 都可被伪造，绝不能据此免 token。
+    const noProxyConfigured = TRUSTED_PROXY_IPS.length === 0;
     const localClient = isLocalIp(socketIp);
+    const exposure = noProxyConfigured && localClient && isLocalHostname(hostname) ? 'local' : 'remote';
     return {
       host,
       hostname,
@@ -277,7 +281,7 @@ function createRemoteMcpService({ dataDir, auditService, logger } = {}) {
       clientIp,
       origin,
       path: req.originalUrl || req.url || '',
-      exposure: localHost && localClient ? 'local' : 'remote',
+      exposure,
     };
   }
 

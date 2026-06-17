@@ -4,6 +4,7 @@ import type { Socket } from 'socket.io-client';
 import { useSocket } from '@/composables/useSocket';
 import { bindIdeStreamHandlers, type IdeLegacyHandler } from '@/utils/ideStreamEvents';
 import { createStreamDeltaBuffer } from '@/utils/streaming';
+import { displayAssistantTextAfterToolResult } from '@/utils/structuredToolResults';
 
 type IdeChatRole = 'user' | 'assistant';
 type IdeChatStatus = 'streaming' | 'done' | 'error' | 'cancelled';
@@ -115,6 +116,8 @@ export interface IdeChatOptions {
 export interface IdeLoadableSession {
   id: string;
   timeline: IdeTimelineItem[];
+  running?: boolean;
+  runId?: string;
 }
 
 export interface IdeTaskSavedMessage extends StreamMessage {
@@ -147,6 +150,7 @@ export interface IdeChatApi {
   prefillAndSend(message: string, onOpen?: () => void): void;
   listRewindPoints(): Promise<IdeRewindPoint[]>;
   loadSession(session: IdeLoadableSession): void;
+  reattachSession(): Promise<{ ok?: boolean; running?: boolean; runId?: string; error?: string }>;
   stop(): void;
   resetChat(): void;
   approveAllow(): void;
@@ -445,6 +449,10 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
   function closeCurrentAssistant(status?: IdeChatStatus): void {
     deltaBuffer.flushNow();
     if (!currentAssistant) return;
+    const assistantIndex = timeline.value.findIndex((item) => item.id === currentAssistant?.id);
+    if (assistantIndex >= 0) {
+      currentAssistant.text = displayAssistantTextAfterToolResult(timeline.value, assistantIndex, currentAssistant.text);
+    }
     if (currentAssistant.text.trim()) {
       if (status) currentAssistant.status = status;
       touchTimeline();
@@ -947,6 +955,32 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     });
   }
 
+  function reattachSession(): Promise<{ ok?: boolean; running?: boolean; runId?: string; error?: string }> {
+    const sock = bindSocket();
+    return new Promise((resolve) => {
+      const emitRequest = () => {
+        sock.emit('ide:reattach', { sessionId }, (ack: { ok?: boolean; running?: boolean; runId?: string; error?: string } | undefined) => {
+          const result = ack || { ok: false, error: 'reattach failed' };
+          if (result.ok && result.running) {
+            activeRunId = result.runId || activeRunId;
+            isRunning.value = true;
+            stopRequested = false;
+            stoppedRunId = null;
+            setStatus('思考中...');
+          }
+          resolve(result);
+        });
+      };
+
+      if (sock.connected) {
+        emitRequest();
+        return;
+      }
+      sock.once('connect', emitRequest);
+      sock.connect();
+    });
+  }
+
   function sendMessage(): void {
     const text = messageText(inputText.value);
     if (!text || isRunning.value) return;
@@ -1020,7 +1054,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     setSessionId(session.id);
     timeline.value = Array.isArray(session.timeline) ? [...session.timeline] : [];
     currentAssistant = null;
-    activeRunId = null;
+    activeRunId = session.runId || null;
     stoppedRunId = null;
     stopRequested = false;
     currentTextHadDelta = false;
@@ -1028,6 +1062,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     approveRequest.value = null;
     approveCustomText.value = '';
     clearApproveTick();
+    isRunning.value = Boolean(session.running);
     setStatus('待命');
   }
 
@@ -1052,6 +1087,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     prefillAndSend,
     listRewindPoints,
     loadSession,
+    reattachSession,
     stop,
     resetChat,
     approveAllow,

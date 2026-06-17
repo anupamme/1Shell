@@ -457,7 +457,8 @@ function create(): AgentPanelApi {
 
   function handleSocketLifecycle(type: string): void {
     if (type === 'socket-connect') {
-      socketBound = false;
+      // 不重置 socketBound：socket.io 重连复用同一 Socket 实例，监听器跨重连保留。
+      // 重置后再 bindSocketEvents 会重复注册 agent:status/agent:output，导致输出重复 + 泄漏。
       bindSocketEvents();
       void loadProviders();
     }

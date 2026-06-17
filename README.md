@@ -2,6 +2,10 @@
 
 1Shell is a local-first server operations console with an embedded AI agent.
 
+项目主页 / Project home: https://github.com/weidu12123/1Shell
+
+桌面版支持一键自动更新（GitHub Releases）；浏览器/开发模式下可在"设置 → 关于"前往 Releases 手动下载。
+
 It brings together:
 
 - multi-host terminal access

@@ -30,7 +30,9 @@ function createBridgeRouter({ bridgeService }) {
       });
     }
 
-    const token = req.headers['x-bridge-token'] || '';
+    // 头可能重复出现而成为数组，统一取首个并转字符串，避免 Buffer.from(array) 抛 RangeError
+    const rawToken = req.headers['x-bridge-token'];
+    const token = String(Array.isArray(rawToken) ? rawToken[0] : (rawToken || ''));
     if (!token || token.length !== BRIDGE_TOKEN.length
       || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(BRIDGE_TOKEN))) {
       return res.status(401).json({

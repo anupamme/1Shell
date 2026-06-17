@@ -25,6 +25,8 @@ function createSshShellPool({ hostService }) {
   // Map<hostId, ShellEntry>
   // ShellEntry: { client, proxyClient, shell, idleTimer, busy, buffer, pendingCmd }
   const pool = new Map();
+  // Map<hostId, Promise<ShellEntry>> — 正在建立中的连接，避免并发首次 acquire 重复建连
+  const pending = new Map();
 
   // ─── 内部工具 ────────────────────────────────────────────────────────────
 
@@ -227,8 +229,17 @@ function createSshShellPool({ hostService }) {
 
     let entry = pool.get(hostId);
 
-    // shell 正忙 → 排队等待，不销毁正在运行的命令
-    if (entry && entry.busy) {
+    // 没有可用 shell → 新建。并发首次 acquire 复用同一个 in-flight Promise，
+    // 否则两路都建连、互相覆盖，被孤立那条的 idleTimer 触发时会误杀 live 连接。
+    if (!entry) {
+      entry = await ensureShellEntry(hostId);
+      if (signal?.aborted) throw makeAbortError();
+    }
+
+    // shell 正忙 → 排队等待，不销毁正在运行的命令。
+    // 必须在拿到 entry 之后再判 busy：并发首次 acquire 拿到同一个新 entry 时，
+    // 第二路会在这里看到第一路已置 busy 而进入排队，不会覆盖对方的 pendingCmd。
+    if (entry.busy) {
       return new Promise((resolve, reject) => {
         const queued = { command, timeoutMs, startAt, resolve, reject, signal, onOutput };
         const onAbort = () => {
@@ -241,12 +252,19 @@ function createSshShellPool({ hostService }) {
       });
     }
 
-    // 没有可用 shell，新建
-    if (!entry) {
-      entry = await createShellEntry(hostId);
-    }
-
     return _execOnEntry(hostId, entry, command, timeoutMs, startAt, signal, onOutput);
+  }
+
+  function ensureShellEntry(hostId) {
+    const existing = pool.get(hostId);
+    if (existing) return Promise.resolve(existing);
+    let inflight = pending.get(hostId);
+    if (inflight) return inflight;
+    inflight = createShellEntry(hostId).finally(() => {
+      pending.delete(hostId);
+    });
+    pending.set(hostId, inflight);
+    return inflight;
   }
 
   function _execOnEntry(hostId, entry, command, timeoutMs, startAt, signal, onOutput) {

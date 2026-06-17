@@ -9,6 +9,15 @@ import { useConfirm } from '@/composables/useConfirm';
 import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useHostsStore } from '@/stores/hosts';
+import {
+  agentGoalObjective,
+  emptyAgentGoalState,
+  formatAgentGoalLabel,
+  parseAgentGoalCommand,
+  reduceAgentGoalCommand,
+  serializeAgentGoal,
+  type AgentGoalCommand,
+} from '@/utils/agentGoal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
@@ -19,9 +28,11 @@ const sessionTerminal = useSessionTerminal();
 const { confirm } = useConfirm();
 const claudeCodeEnabled = ref(false);
 const approvalMode = ref<IdeApprovalMode>('manual');
-const agentGoal = ref('');
+const agentGoal = ref(emptyAgentGoalState());
+const composerMode = ref<'chat' | 'goal'>('chat');
 const currentModel = ref('默认模型');
 const chatAreaEl = ref<HTMLElement | null>(null);
+const inputEl = ref<HTMLTextAreaElement | null>(null);
 let followOutput = true;
 
 const activeHostName = computed(() => {
@@ -29,9 +40,14 @@ const activeHostName = computed(() => {
   return host?.name || '本机';
 });
 
-const agentGoalLabel = computed(() => agentGoal.value || '未设置目标');
+const agentGoalLabel = computed(() => formatAgentGoalLabel(agentGoal.value));
 const modelLabel = computed(() => currentModel.value || '默认模型');
 const modeLabel = computed(() => approvalModeLabel(approvalMode.value));
+const isGoalComposerMode = computed(() => composerMode.value === 'goal');
+const inputPlaceholder = computed(() => isGoalComposerMode.value
+  ? '1Shell 应继续朝哪个目标努力？'
+  : '输入目标，或使用 /goal、/model 设置上下文...'
+);
 
 const ide = useIdeChat({
   sessionPrefix: 'console-ide',
@@ -42,7 +58,8 @@ const ide = useIdeChat({
     return {
       module: '主控',
       moduleHint: '当前在主控页面。可结合主机和终端上下文处理运维目标。',
-      agentGoal: agentGoal.value || undefined,
+      agentGoal: agentGoalObjective(agentGoal.value) || undefined,
+      threadGoal: serializeAgentGoal(agentGoal.value),
       modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
       activeSessionId: sessionTerminal.activeSessionId.value,
       terminalStatus: sessionTerminal.statusText.value,
@@ -58,7 +75,9 @@ const ide = useIdeChat({
   messagePayload: () => ({
     entry: 'console',
     approvalMode: approvalMode.value,
-    goal: agentGoal.value || undefined,
+    goal: agentGoalObjective(agentGoal.value) || undefined,
+    goalStatus: serializeAgentGoal(agentGoal.value)?.status,
+    threadGoal: serializeAgentGoal(agentGoal.value),
     modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
     claudeCodeEnabled: claudeCodeEnabled.value,
   }),
@@ -84,6 +103,11 @@ function scrollToBottom(force = false): void {
 }
 
 function onInputKeydown(event: KeyboardEvent): void {
+  if (isGoalComposerMode.value && event.key === 'Escape') {
+    event.preventDefault();
+    closeGoalComposer();
+    return;
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     sendOrHandleCommand();
@@ -109,28 +133,31 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
   approvalMode.value = mode;
 }
 
-function parseAgentShellCommand(value: string): { name: 'goal' | 'model'; arg: string } | null {
-  const match = String(value || '').trim().match(/^\/(goal|model)(?:\s+([\s\S]*))?$/i);
+function parseAgentShellCommand(value: string): { name: 'model'; arg: string } | null {
+  const match = String(value || '').trim().match(/^\/model(?:\s+([\s\S]*))?$/i);
   if (!match) return null;
-  const name = String(match[1] || '').toLowerCase();
-  if (name !== 'goal' && name !== 'model') return null;
-  return { name, arg: String(match[2] || '').trim() };
+  return { name: 'model', arg: String(match[1] || '').trim() };
 }
 
 function handleAgentShellCommand(value: string): boolean {
+  const goalCommand = parseAgentGoalCommand(value);
+  if (goalCommand) {
+    ide.inputText.value = '';
+    if (goalCommand.action === 'show') {
+      openGoalComposer();
+      return true;
+    }
+    if (goalCommand.action === 'edit') {
+      openGoalComposer(agentGoal.value.objective);
+      return true;
+    }
+    applyAgentGoalCommand(goalCommand);
+    return true;
+  }
+
   const command = parseAgentShellCommand(value);
   if (!command) return false;
   ide.inputText.value = '';
-
-  if (command.name === 'goal') {
-    if (!command.arg) {
-      ide.pushSystemEvent('/goal', agentGoal.value ? `当前目标：${agentGoal.value}` : '当前还没有设置目标。输入 /goal 加目标内容即可设置。');
-      return true;
-    }
-    agentGoal.value = command.arg;
-    ide.pushSystemEvent('/goal', `当前目标已设置为：${command.arg}`, 'success');
-    return true;
-  }
 
   if (!command.arg) {
     ide.pushSystemEvent('/model', `当前模型偏好：${currentModel.value}`);
@@ -141,6 +168,38 @@ function handleAgentShellCommand(value: string): boolean {
   return true;
 }
 
+function applyAgentGoalCommand(command: AgentGoalCommand): void {
+  const result = reduceAgentGoalCommand(agentGoal.value, command);
+  if (result.needsEditor) {
+    openGoalComposer(agentGoal.value.objective);
+    return;
+  }
+  agentGoal.value = result.state;
+  ide.pushSystemEvent(result.title, result.text, result.tone);
+}
+
+function openGoalComposer(prefill = ''): void {
+  if (ide.isRunning.value) return;
+  composerMode.value = 'goal';
+  ide.inputText.value = prefill;
+  void nextTick(() => inputEl.value?.focus());
+}
+
+function closeGoalComposer(): void {
+  if (!isGoalComposerMode.value) return;
+  composerMode.value = 'chat';
+  ide.inputText.value = '';
+  void nextTick(() => inputEl.value?.focus());
+}
+
+function submitGoalComposer(): void {
+  const objective = ide.inputText.value.trim();
+  if (!objective || ide.isRunning.value) return;
+  applyAgentGoalCommand({ kind: 'goal', action: 'set', objective });
+  composerMode.value = 'chat';
+  ide.inputText.value = '';
+}
+
 function approvalModeLabel(mode: IdeApprovalMode): string {
   if (mode === 'full_access') return '完全权限';
   if (mode === 'delegated') return '委托审批';
@@ -148,12 +207,20 @@ function approvalModeLabel(mode: IdeApprovalMode): string {
 }
 
 function sendOrHandleCommand(): void {
+  if (isGoalComposerMode.value) {
+    submitGoalComposer();
+    return;
+  }
   if (handleAgentShellCommand(ide.inputText.value)) return;
   ide.sendMessage();
 }
 
 function prefillCommand(command: '/goal' | '/model'): void {
   if (ide.isRunning.value) return;
+  if (command === '/goal') {
+    openGoalComposer();
+    return;
+  }
   ide.inputText.value = `${command} `;
 }
 </script>
@@ -230,19 +297,36 @@ function prefillCommand(command: '/goal' | '/model'): void {
         @custom="ide.approveCustom"
         @secret-submit="onSecretRefSubmit"
       />
+      <div v-if="isGoalComposerMode" class="console-ide-goal-banner">
+        <span class="console-ide-goal-icon">
+          <AppIcon name="target" :size="13" />
+        </span>
+        <strong>目标</strong>
+        <span>下一条输入会保存为 Agent 工作目标</span>
+        <button type="button" title="退出目标输入" @click="closeGoalComposer">
+          <AppIcon name="close" :size="11" />
+        </button>
+      </div>
       <label class="sr-only" for="console-ide-input">输入给 1Shell AI 的消息</label>
       <textarea
         id="console-ide-input"
+        ref="inputEl"
         v-model="ide.inputText.value"
         rows="3"
         class="console-ide-input"
-        placeholder="输入目标，或使用 /goal、/model 设置上下文..."
+        :class="{ 'console-ide-input--goal': isGoalComposerMode }"
+        :placeholder="inputPlaceholder"
         :disabled="ide.isRunning.value"
         spellcheck="false"
         @keydown="onInputKeydown"
       />
       <div class="console-ide-command-row" aria-label="Agent Shell 快捷命令">
-        <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/goal')">
+        <button
+          type="button"
+          :class="{ 'console-ide-command-active': isGoalComposerMode }"
+          :disabled="ide.isRunning.value"
+          @click="prefillCommand('/goal')"
+        >
           <strong>/goal</strong>
           <span>目标</span>
         </button>
@@ -517,6 +601,12 @@ function prefillCommand(command: '/goal' | '/model'): void {
   box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.16);
 }
 
+.console-ide-input--goal,
+.console-ide-input--goal:focus {
+  border-color: rgba(16, 185, 129, 0.72);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.14);
+}
+
 .console-ide-input:disabled {
   opacity: 0.68;
   cursor: not-allowed;
@@ -526,6 +616,154 @@ function prefillCommand(command: '/goal' | '/model'): void {
   background: rgba(2, 6, 23, 0.72);
   border-color: rgba(71, 85, 105, 0.9);
   color: #e2e8f0;
+}
+
+:global(.dark) .console-ide-input--goal,
+:global(.dark) .console-ide-input--goal:focus {
+  border-color: rgba(52, 211, 153, 0.54);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+}
+
+.console-ide-goal-banner {
+  min-height: 36px;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 8px;
+  background: rgba(236, 253, 245, 0.92);
+  color: #047857;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  font-size: 12px;
+}
+
+.console-ide-goal-banner strong,
+.console-ide-goal-banner span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-ide-goal-banner strong {
+  font-weight: 760;
+}
+
+.console-ide-goal-banner span {
+  color: #059669;
+}
+
+.console-ide-goal-banner button {
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 7px;
+  color: #059669;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.console-ide-goal-banner button:hover,
+.console-ide-goal-banner button:focus-visible {
+  color: #065f46;
+  background: rgba(16, 185, 129, 0.12);
+  outline: none;
+}
+
+.console-ide-goal-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: rgba(16, 185, 129, 0.1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+:global(.dark) .console-ide-goal-banner {
+  border-color: rgba(52, 211, 153, 0.24);
+  background: rgba(6, 78, 59, 0.22);
+  color: #a7f3d0;
+}
+
+:global(.dark) .console-ide-goal-banner span,
+:global(.dark) .console-ide-goal-banner button {
+  color: #6ee7b7;
+}
+
+:global(.dark) .console-ide-goal-icon {
+  background: rgba(52, 211, 153, 0.1);
+}
+
+.console-ide-command-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.console-ide-command-row button {
+  min-height: 32px;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: #334155;
+  background: rgba(248, 250, 252, 0.82);
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.console-ide-command-row button:hover:not(:disabled),
+.console-ide-command-row button:focus-visible,
+.console-ide-command-row .console-ide-command-active {
+  border-color: rgba(14, 165, 233, 0.48);
+  color: #0369a1;
+  background: #f0f9ff;
+  outline: none;
+}
+
+.console-ide-command-row button:focus-visible {
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.16);
+}
+
+.console-ide-command-row button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.console-ide-command-row strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+}
+
+.console-ide-command-row span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+:global(.dark) .console-ide-command-row button {
+  border-color: rgba(71, 85, 105, 0.76);
+  color: #cbd5e1;
+  background: rgba(2, 6, 23, 0.42);
+}
+
+:global(.dark) .console-ide-command-row button:hover:not(:disabled),
+:global(.dark) .console-ide-command-row button:focus-visible,
+:global(.dark) .console-ide-command-row .console-ide-command-active {
+  border-color: rgba(56, 189, 248, 0.34);
+  color: #7dd3fc;
+  background: rgba(14, 165, 233, 0.12);
+}
+
+:global(.dark) .console-ide-command-row span {
+  color: #94a3b8;
 }
 
 .console-ide-composer-row {

@@ -52,6 +52,7 @@ function createHostRepository(hostsFile, db) {
       hostId: row.host_id,
       showInConsole: Boolean(row.show_in_console),
       consoleOrder: Number(row.console_order) || 0,
+      repositoryOrder: Number(row.repository_order) || 0,
       pinned: Boolean(row.pinned),
       role: row.role || null,
       tags: Array.isArray(tags) ? tags : [],
@@ -95,11 +96,12 @@ function createHostRepository(hostsFile, db) {
     selectPreference: db.prepare('SELECT * FROM host_preferences WHERE host_id = ?'),
     upsertPreference: db.prepare(`
       INSERT INTO host_preferences (
-        host_id, show_in_console, console_order, pinned, role, tags_json, archived, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        host_id, show_in_console, console_order, repository_order, pinned, role, tags_json, archived, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(host_id) DO UPDATE SET
         show_in_console = excluded.show_in_console,
         console_order = excluded.console_order,
+        repository_order = excluded.repository_order,
         pinned = excluded.pinned,
         role = excluded.role,
         tags_json = excluded.tags_json,
@@ -168,6 +170,7 @@ function createHostRepository(hostsFile, db) {
       preference.hostId,
       preference.showInConsole ? 1 : 0,
       Number(preference.consoleOrder) || 0,
+      Number(preference.repositoryOrder) || 0,
       preference.pinned ? 1 : 0,
       preference.role || null,
       JSON.stringify(Array.isArray(preference.tags) ? preference.tags : []),

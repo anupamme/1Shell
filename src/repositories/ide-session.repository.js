@@ -1,20 +1,17 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 // Persisted 1Shell Agent conversations (the /agent session history rail).
 // One row per session; the model conversation is snapshotted as a JSON blob
 // each time a run completes, because the in-memory messages array is compacted
 // and sanitized in place during a run (see ide.service.js), so appending rows
 // per message would not match how the conversation actually mutates.
 
-function createIdeSessionRepository(db) {
+function createIdeSessionRepository(db, { dataDir } = {}) {
   if (!db) {
-    return {
-      listSessions: () => ({ sessions: [], total: 0 }),
-      getSession: () => null,
-      upsertSession: () => null,
-      renameSession: () => false,
-      deleteSession: () => false,
-    };
+    return createFileIdeSessionRepository(dataDir);
   }
 
   const stmts = {
@@ -125,6 +122,125 @@ function safeParseArray(value) {
   } catch {
     return [];
   }
+}
+
+function createFileIdeSessionRepository(dataDir) {
+  const root = dataDir ? path.resolve(dataDir) : path.join(process.cwd(), 'data');
+  const filePath = path.join(root, 'ide-sessions.json');
+  let cache = null;
+
+  function load() {
+    if (cache) return cache;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const rows = Array.isArray(parsed?.sessions) ? parsed.sessions : (Array.isArray(parsed) ? parsed : []);
+      cache = rows.map(normalizeFileRow).filter((row) => row.id);
+    } catch {
+      cache = [];
+    }
+    return cache;
+  }
+
+  function save(rows = load()) {
+    fs.mkdirSync(root, { recursive: true });
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ sessions: rows }, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+  }
+
+  function listSessions({ keyword, limit = 200, offset = 0 } = {}) {
+    let rows = load().slice().sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''));
+    const kw = String(keyword || '').trim().toLowerCase();
+    if (kw) rows = rows.filter((row) => `${row.title || ''} ${row.preview || ''}`.toLowerCase().includes(kw));
+    const total = rows.length;
+    const start = Math.max(offset, 0);
+    const end = start + Math.min(Math.max(limit, 1), 500);
+    return { sessions: rows.slice(start, end).map(fileRowToMeta), total };
+  }
+
+  function getSession(id) {
+    const row = load().find((item) => item.id === id);
+    return row ? { ...fileRowToMeta(row), messages: Array.isArray(row.messages) ? row.messages : [] } : null;
+  }
+
+  function upsertSession(payload) {
+    if (!payload?.id) return null;
+    const rows = load();
+    const now = new Date().toISOString();
+    const index = rows.findIndex((item) => item.id === payload.id);
+    const existing = index >= 0 ? rows[index] : null;
+    const row = normalizeFileRow({
+      id: payload.id,
+      title: existing?.title || String(payload.title || '').slice(0, 200),
+      entry: payload.entry || existing?.entry || 'core',
+      hostId: payload.hostId || existing?.hostId || '',
+      modelLabel: payload.modelLabel || existing?.modelLabel || '',
+      messageCount: Number.isFinite(payload.messageCount)
+        ? payload.messageCount
+        : (Array.isArray(payload.messages) ? payload.messages.length : (existing?.messageCount || 0)),
+      messages: Array.isArray(payload.messages) ? payload.messages : (existing?.messages || []),
+      preview: String(payload.preview || existing?.preview || '').slice(0, 400),
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    });
+    if (index >= 0) rows[index] = row;
+    else rows.push(row);
+    save(rows);
+    return getSession(payload.id);
+  }
+
+  function renameSession(id, title) {
+    const rows = load();
+    const row = rows.find((item) => item.id === id);
+    if (!row) return false;
+    row.title = String(title || '').slice(0, 200);
+    save(rows);
+    return true;
+  }
+
+  function deleteSession(id) {
+    const rows = load();
+    const next = rows.filter((item) => item.id !== id);
+    if (next.length === rows.length) return false;
+    cache = next;
+    save(cache);
+    return true;
+  }
+
+  return { listSessions, getSession, upsertSession, renameSession, deleteSession };
+}
+
+function normalizeFileRow(value) {
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const messages = Array.isArray(row.messages) ? row.messages : safeParseArray(row.messages_json);
+  return {
+    id: String(row.id || '').trim(),
+    title: String(row.title || '').slice(0, 200),
+    entry: String(row.entry || 'core'),
+    hostId: String(row.hostId || row.host_id || ''),
+    modelLabel: String(row.modelLabel || row.model_label || ''),
+    messageCount: Number.isFinite(Number(row.messageCount ?? row.message_count))
+      ? Number(row.messageCount ?? row.message_count)
+      : messages.length,
+    messages,
+    preview: String(row.preview || '').slice(0, 400),
+    createdAt: String(row.createdAt || row.created_at || row.updatedAt || row.updated_at || new Date().toISOString()),
+    updatedAt: String(row.updatedAt || row.updated_at || row.createdAt || row.created_at || new Date().toISOString()),
+  };
+}
+
+function fileRowToMeta(row) {
+  return {
+    id: row.id,
+    title: row.title || '',
+    entry: row.entry || 'core',
+    hostId: row.hostId || '',
+    modelLabel: row.modelLabel || '',
+    messageCount: row.messageCount || 0,
+    preview: row.preview || '',
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 module.exports = { createIdeSessionRepository };

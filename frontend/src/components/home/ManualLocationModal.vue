@@ -3,7 +3,7 @@
 // - 国家可搜索（中文名/英文代码两种命中）
 // - 可选填城市
 // - 已有手动定位时支持「清除」恢复自动解析
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useApiClient, ApiError } from '@/composables/useApiClient';
 import { COUNTRIES, getCountry, type CountryInfo } from '@/data/countries';
 
@@ -112,6 +112,10 @@ onMounted(async () => {
   await nextTick();
   searchInput.value?.focus();
   window.addEventListener('keydown', onKey);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey);
 });
 
 watch(

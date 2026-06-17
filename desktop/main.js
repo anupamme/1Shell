@@ -6,7 +6,16 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
+// electron-updater 仅在打包环境可用；开发模式下 require 可能失败，做容错。
+let autoUpdater = null;
+try {
+  ({ autoUpdater } = require('electron-updater'));
+} catch {
+  autoUpdater = null;
+}
+
 const APP_NAME = '1Shell';
+const GITHUB_URL = 'https://github.com/weidu12123/1Shell';
 const DEFAULT_PORT = 3301;
 const DEFAULT_SETTINGS = {
   startAtLogin: false,
@@ -21,6 +30,16 @@ let serverReadyPromise = null;
 let usingExternalServer = false;
 let isQuitting = false;
 let serverExitReason = '';
+
+// 自动更新状态：通过 IPC 推送给渲染进程的"关于"面板
+let updateState = {
+  status: 'idle', // idle | checking | available | not-available | downloading | downloaded | error | unsupported
+  version: '',
+  releaseNotes: '',
+  percent: 0,
+  error: '',
+};
+let updaterWired = false;
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -480,6 +499,96 @@ async function quitApp() {
   app.quit();
 }
 
+// ─── 自动更新 ───────────────────────────────────────────────────────────
+function broadcastUpdateState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('desktop:update-state', getUpdatePayload());
+  }
+}
+
+function setUpdateState(patch) {
+  updateState = { ...updateState, ...patch };
+  broadcastUpdateState();
+}
+
+// Linux 下 electron-updater 只能在以 AppImage 方式运行时工作（依赖 APPIMAGE 环境变量）。
+// 解压直跑 / 包管理器安装的版本无法自更新，需要给出明确提示而非抛原始错误。
+function linuxAppImageUnavailable() {
+  return process.platform === 'linux' && app.isPackaged && !process.env.APPIMAGE;
+}
+
+function getUpdatePayload() {
+  const supported = Boolean(autoUpdater) && app.isPackaged && !linuxAppImageUnavailable();
+  return {
+    supported,
+    currentVersion: app.getVersion(),
+    githubUrl: GITHUB_URL,
+    releasesUrl: `${GITHUB_URL}/releases`,
+    ...updateState,
+  };
+}
+
+function wireAutoUpdater() {
+  if (updaterWired || !autoUpdater) return;
+  updaterWired = true;
+  autoUpdater.autoDownload = false;          // 由用户在"关于"里点"下载更新"
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => setUpdateState({ status: 'checking', error: '' }));
+  autoUpdater.on('update-available', (info) => setUpdateState({
+    status: 'available', version: info?.version || '', releaseNotes: normalizeReleaseNotes(info?.releaseNotes), error: '',
+  }));
+  autoUpdater.on('update-not-available', () => setUpdateState({ status: 'not-available', error: '' }));
+  autoUpdater.on('download-progress', (p) => setUpdateState({ status: 'downloading', percent: Math.round(p?.percent || 0) }));
+  autoUpdater.on('update-downloaded', (info) => setUpdateState({ status: 'downloaded', version: info?.version || updateState.version, percent: 100 }));
+  autoUpdater.on('error', (err) => setUpdateState({ status: 'error', error: err?.message || String(err) }));
+}
+
+function normalizeReleaseNotes(notes) {
+  if (!notes) return '';
+  if (typeof notes === 'string') return notes.slice(0, 4000);
+  if (Array.isArray(notes)) return notes.map((n) => n?.note || '').filter(Boolean).join('\n\n').slice(0, 4000);
+  return '';
+}
+
+async function checkForUpdates() {
+  if (!autoUpdater || !app.isPackaged) {
+    setUpdateState({ status: 'unsupported', error: '' });
+    return getUpdatePayload();
+  }
+  if (linuxAppImageUnavailable()) {
+    setUpdateState({ status: 'unsupported', error: '当前不是以 AppImage 方式运行，无法自动更新，请前往 GitHub Releases 下载最新 AppImage。' });
+    return getUpdatePayload();
+  }
+  wireAutoUpdater();
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (err) {
+    setUpdateState({ status: 'error', error: err?.message || String(err) });
+  }
+  return getUpdatePayload();
+}
+
+async function downloadUpdate() {
+  if (!autoUpdater || !app.isPackaged) return getUpdatePayload();
+  wireAutoUpdater();
+  try {
+    setUpdateState({ status: 'downloading', percent: 0, error: '' });
+    await autoUpdater.downloadUpdate();
+  } catch (err) {
+    setUpdateState({ status: 'error', error: err?.message || String(err) });
+  }
+  return getUpdatePayload();
+}
+
+function quitAndInstall() {
+  if (!autoUpdater || updateState.status !== 'downloaded') return false;
+  isQuitting = true;
+  stopServer().catch(() => {}).finally(() => {
+    try { autoUpdater.quitAndInstall(); } catch { app.quit(); }
+  });
+  return true;
+}
+
 ipcMain.handle('desktop:get-settings', () => getSettingsPayload());
 ipcMain.handle('desktop:update-settings', (_event, patch) => updateDesktopSettings(patch));
 ipcMain.handle('desktop:open-window', () => {
@@ -487,6 +596,10 @@ ipcMain.handle('desktop:open-window', () => {
   return getSettingsPayload();
 });
 ipcMain.handle('desktop:quit', () => quitApp());
+ipcMain.handle('desktop:get-update-state', () => getUpdatePayload());
+ipcMain.handle('desktop:check-update', () => checkForUpdates());
+ipcMain.handle('desktop:download-update', () => downloadUpdate());
+ipcMain.handle('desktop:install-update', () => quitAndInstall());
 
 app.on('second-instance', () => showMainWindow());
 
@@ -515,6 +628,10 @@ app.whenReady().then(() => {
   const trayCreated = createTray();
   const hiddenLaunch = process.argv.includes('--hidden') && settings.backgroundOnClose && Boolean(trayCreated);
   openMainWindow({ show: !hiddenLaunch }).catch(showSettingsError);
+  // 启动后静默检查更新（仅打包环境；不自动下载，发现新版本时在"关于"里提示）
+  if (autoUpdater && app.isPackaged) {
+    setTimeout(() => { checkForUpdates().catch(() => {}); }, 8000);
+  }
 }).catch((error) => {
   appendBackendLog(`[desktop] fatal startup error: ${error.stack || error.message}\n`);
   app.quit();

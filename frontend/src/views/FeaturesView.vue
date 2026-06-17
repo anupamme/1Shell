@@ -193,7 +193,7 @@ function defaultRunValue(input: AiTaskInput): RunValue {
 }
 
 function startTaskAuthoring(): void {
-  void router.push({ path: '/ide', query: { taskAuthoring: '1' } });
+  void router.push({ path: '/agent', query: { taskAuthoring: '1' } });
 }
 
 async function deleteCurrentTask(): Promise<void> {
@@ -417,7 +417,7 @@ onBeforeUnmount(() => {
         v-if="activeTab === 'tasks'"
         type="button"
         class="h-9 px-4 rounded-lg bg-sky-600 text-white text-xs font-semibold shadow-sm hover:bg-sky-700 transition-colors cursor-pointer flex items-center gap-1.5"
-        title="到 Panel 中使用 /task 创作新任务"
+        title="到 Agent 中使用 /task 创作新任务"
         @click="startTaskAuthoring"
       >
         <AppIcon name="spark" :size="14" />
@@ -470,8 +470,21 @@ onBeforeUnmount(() => {
             </div>
           </button>
 
-          <div v-if="!loading && filteredTasks.length === 0" class="p-6 text-center text-xs text-slate-400">
-            暂无 AI 任务
+          <div v-if="!loading && filteredTasks.length === 0" class="p-3 text-xs text-slate-400">
+            <template v-if="tasks.length === 0">
+              <div class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#0b1324] p-4 text-center">
+                <div class="mx-auto w-10 h-10 rounded-xl bg-sky-100 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300 flex items-center justify-center">
+                  <AppIcon name="spark" :size="20" />
+                </div>
+                <div class="mt-3 font-semibold text-slate-700 dark:text-slate-200">暂无 AI 任务</div>
+                <div class="mt-1 leading-5 text-slate-500 dark:text-slate-400">
+                  创建后会在这里显示名称、输入、步骤和运行次数。
+                </div>
+              </div>
+            </template>
+            <div v-else class="p-6 text-center">
+              没有匹配的任务
+            </div>
           </div>
         </div>
         <div class="shrink-0 px-3 py-2 border-t border-slate-100 dark:border-[#1e293b] text-[10px] text-slate-400">
@@ -480,19 +493,54 @@ onBeforeUnmount(() => {
       </aside>
 
       <main class="w-[44%] min-w-[31rem] shrink-0 flex flex-col bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm overflow-hidden">
-        <div v-if="!currentTask" class="flex-1 grid place-items-center text-center p-8">
-          <div>
-            <div class="mx-auto w-12 h-12 rounded-xl bg-sky-100 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300 flex items-center justify-center">
-              <AppIcon name="spark" :size="24" />
-            </div>
-            <div class="mt-3 text-sm font-semibold text-slate-700 dark:text-slate-200">还没有可运行任务</div>
-            <button
-              type="button"
-              class="mt-4 h-9 px-4 rounded-lg bg-sky-600 text-white text-xs font-semibold hover:bg-sky-700 transition-colors cursor-pointer"
-              @click="startTaskAuthoring"
-            >
-              到 Panel 创作
-            </button>
+        <div v-if="!currentTask" class="flex-1 min-h-0 p-6">
+          <div class="h-full min-h-[32rem] rounded-2xl border border-dashed border-slate-300 dark:border-[#334155] bg-white/55 dark:bg-[#0b1324] flex items-center justify-center p-6">
+            <section class="w-full max-w-3xl">
+              <div class="flex flex-col items-center text-center">
+                <div class="w-14 h-14 rounded-2xl bg-sky-100 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300 flex items-center justify-center">
+                  <AppIcon name="spark" :size="28" />
+                </div>
+                <div class="mt-4 text-xl font-bold text-slate-800 dark:text-slate-100">还没有可运行的 AI 任务</div>
+                <div class="mt-2 max-w-xl text-sm leading-6 text-slate-500 dark:text-slate-400">
+                  用 Panel 把常用运维流程固化成任务定义；创建后这里会变成输入表单、执行按钮和流程卡片。
+                </div>
+                <button
+                  type="button"
+                  class="mt-5 h-9 px-4 rounded-lg bg-sky-600 text-white text-xs font-semibold hover:bg-sky-700 transition-colors cursor-pointer inline-flex items-center gap-1.5"
+                  @click="startTaskAuthoring"
+                >
+                  <AppIcon name="pen" :size="14" />
+                  <span>AI 创作任务</span>
+                </button>
+              </div>
+
+              <div class="mt-7 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827] p-3 flex items-start gap-3">
+                  <span class="w-8 h-8 rounded-lg bg-sky-50 text-sky-600 dark:bg-sky-500/10 dark:text-sky-300 flex items-center justify-center shrink-0">
+                    <AppIcon name="server" :size="16" />
+                  </span>
+                  <div>
+                    <div class="text-xs font-bold text-slate-700 dark:text-slate-200">目标与输入</div>
+                    <div class="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">主机、端口、服务名、密钥引用等参数会在运行前填写。</div>
+                  </div>
+                </div>
+                <div class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827] p-3 flex items-start gap-3">
+                  <span class="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300 flex items-center justify-center shrink-0">
+                    <AppIcon name="clipboard" :size="16" />
+                  </span>
+                  <div>
+                    <div class="text-xs font-bold text-slate-700 dark:text-slate-200">流程与记录</div>
+                    <div class="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">步骤、审批、工具调用和最近运行会随着任务执行自动沉淀。</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-4 flex flex-wrap justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                <span class="px-2.5 py-1 rounded-full border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827]">适合：主机巡检</span>
+                <span class="px-2.5 py-1 rounded-full border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827]">发布前检查</span>
+                <span class="px-2.5 py-1 rounded-full border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827]">日志定位</span>
+              </div>
+            </section>
           </div>
         </div>
 
@@ -676,10 +724,15 @@ onBeforeUnmount(() => {
           <div v-if="taskAi.hasMessages.value">
             <IdeAgentTimeline :items="taskAi.timeline.value" density="compact" />
           </div>
-          <div v-else class="h-full min-h-[360px] grid place-items-center text-center text-xs text-slate-400">
-            <div>
-              <AppIcon name="robot" :size="34" class="mx-auto mb-2 text-slate-400 opacity-60" />
-              <div>等待任务执行</div>
+          <div v-else class="h-full min-h-[360px] grid place-items-center text-center text-xs text-slate-400 p-5">
+            <div class="max-w-xs">
+              <div class="mx-auto w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500 flex items-center justify-center mb-3">
+                <AppIcon name="robot" :size="26" />
+              </div>
+              <div class="text-sm font-bold text-slate-700 dark:text-slate-200">等待任务执行</div>
+              <div class="mt-2 leading-5 text-slate-500 dark:text-slate-400">
+                执行流、工具调用、审批和最终结果会在这里连续展开。
+              </div>
             </div>
           </div>
         </div>

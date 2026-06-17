@@ -3,10 +3,10 @@
 const crypto = require('crypto');
 const EventEmitter = require('events');
 const { validateAgentTransition } = require('./graph');
-const { applyAgentCognitionToState, createAgentCognitionState } = require('./cognition');
-const { applyRuntimeDecisionReviewToState, createRuntimeDecisionReviewState } = require('./decision-policy');
+const { createAgentCognitionState } = require('./cognition');
+const { createRuntimeDecisionReviewState } = require('./decision-policy');
 const { applyObservationToRuntimeState } = require('./observation-interpreter');
-const { applyRuntimePlanToState, applyRuntimeRecoveryToState, createRuntimePlanState, createRuntimeRecoveryState } = require('./planning');
+const { createRuntimePlanState, createRuntimeRecoveryState } = require('./planning');
 const { applyReplayEvaluationToState, createReplayEvaluationState, evaluateAgentRunReplay } = require('./replay');
 const { describeCommandSideEffects, evaluateAgentToolPolicy } = require('./tool-policy');
 const { applyTrajectoryEvaluationToState, createTrajectoryEvaluationState, evaluateAgentTrajectory } = require('./trajectory');
@@ -98,46 +98,6 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
     return item;
   }
 
-  function recordRuntimePlan(runId, update = {}) {
-    const state = requireState(runId);
-    const plan = applyRuntimePlanToState(state, update);
-    touch(state);
-    emit(state, 'agent:runtime-plan-updated', { plan });
-    return plan;
-  }
-
-  function recordCognitionState(runId, update = {}, options = {}) {
-    const state = requireState(runId);
-    const cognition = applyAgentCognitionToState(state, update, options);
-    touch(state);
-    emit(state, 'agent:cognition-updated', { cognition });
-    return cognition;
-  }
-
-  function recordDecisionReview(runId, review = {}) {
-    const state = requireState(runId);
-    const item = applyRuntimeDecisionReviewToState(state, review);
-    touch(state);
-    emit(state, 'agent:decision-reviewed', { review: item });
-    return item;
-  }
-
-  function recordRecoveryPolicy(runId, update = {}) {
-    const state = requireState(runId);
-    const recovery = applyRuntimeRecoveryToState(state, update);
-    touch(state);
-    emit(state, 'agent:recovery-policy-updated', { recovery });
-    return recovery;
-  }
-
-  function recordReplayEvaluation(runId, evaluation = {}) {
-    const state = requireState(runId);
-    const item = applyReplayEvaluationToState(state, evaluation);
-    touch(state);
-    emit(state, 'agent:replay-evaluated', { replay: item });
-    return item;
-  }
-
   function updateTaskStatus(runId, taskStatus, options = {}) {
     const state = requireState(runId);
     const normalized = normalizeTaskStatus(taskStatus);
@@ -166,37 +126,6 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
     touch(state);
     emit(state, 'agent:status-updated', item);
     return { state, ...item };
-  }
-
-  function applyReplayRecommendation(runId, evaluation = {}, options = {}) {
-    const recommendedTaskStatus = normalizeTaskStatus(evaluation.recommendedTaskStatus || evaluation.recommended_task_status || '');
-    if (!recommendedTaskStatus) return null;
-    return updateTaskStatus(runId, recommendedTaskStatus, {
-      source: options.source || 'replay',
-      reason: options.reason || 'replay_recommendation',
-      syncResult: options.syncResult,
-      data: {
-        evaluationStatus: String(evaluation.status || ''),
-        evaluationOk: evaluation.ok === true,
-        reasons: normalizeStringArray(evaluation.reasons),
-        checks: Array.isArray(evaluation.checks)
-          ? evaluation.checks.map((check) => ({
-            id: String(check?.id || ''),
-            ok: check?.ok === true,
-            reasons: normalizeStringArray(check?.reasons),
-          }))
-          : [],
-        ...normalizeObject(options.data),
-      },
-    });
-  }
-
-  function recordTrajectoryEvaluation(runId, evaluation = {}) {
-    const state = requireState(runId);
-    const item = applyTrajectoryEvaluationToState(state, evaluation);
-    touch(state);
-    emit(state, 'agent:trajectory-evaluated', { trajectory: item });
-    return item;
   }
 
   function recordToolCallStarted(runId, toolName, args = {}, options = {}) {
@@ -360,11 +289,12 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
 
   function endRun(runId, { runnerStatus = 'completed', taskStatus = null, result = null, error = '' } = {}) {
     const state = requireState(runId);
+    // trajectory / replay 仅作为 advisory：记录到 state 并通过事件上报供 UI 展示，
+    // 但不再改写调用方报的 taskStatus（RFC：harness 不替模型下结论，结论以模型/校验为准）。
     const trajectory = evaluateAgentTrajectory(state, { result: result || state.result || {} });
     applyTrajectoryEvaluationToState(state, trajectory);
-    const effectiveTaskStatus = downgradeSuccessStatusForTrajectory(taskStatus, result || state.result || {}, state, trajectory);
     setRunnerStatus(state, runnerStatus);
-    if (effectiveTaskStatus) setTaskStatus(state, effectiveTaskStatus);
+    if (taskStatus) setTaskStatus(state, taskStatus);
     if (result) state.result = result;
     emit(state, 'agent:trajectory-evaluated', { trajectory: state.runtimeState.trajectory });
     const replayEvaluation = evaluateAgentRunReplay(state, {
@@ -373,10 +303,6 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
     });
     const replay = applyReplayEvaluationToState(state, replayEvaluation);
     emit(state, 'agent:replay-evaluated', { replay, reason: 'end_run_final_audit' });
-    const appliedReplay = applyReplayRecommendation(runId, replayEvaluation, {
-      source: 'final_replay',
-      reason: 'end_run_final_audit',
-    });
     emit(state, 'agent:run-ended', {
       runnerStatus: state.runnerStatus,
       taskStatus: state.taskStatus,
@@ -384,12 +310,7 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
       error,
       trajectory: state.runtimeState.trajectory,
       replay: state.runtimeState.replay,
-      appliedReplay: appliedReplay ? {
-        previousTaskStatus: appliedReplay.previousTaskStatus,
-        taskStatus: appliedReplay.taskStatus,
-        source: appliedReplay.source,
-        reason: appliedReplay.reason,
-      } : null,
+      appliedReplay: null,
     });
     return state;
   }
@@ -796,36 +717,21 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
     off: emitter.off.bind(emitter),
     on: emitter.on.bind(emitter),
     publishResult,
-    recordDecisionReview,
-    recordCognitionState,
     recordObservation,
-    recordRecoveryPolicy,
-    recordReplayEvaluation,
-    recordRuntimePlan,
     recordToolCallEnded,
     recordToolCallStarted,
     recordTraceEvent,
     recordTurn,
     recordRuntimeTransition,
-    recordTrajectoryEvaluation,
     recordVerification,
     resolveInterrupt,
     resumeRun,
     startRun,
     updateTaskStatus,
-    applyReplayRecommendation,
     updateArtifact,
     updatePhase,
     verifierRegistry: runtimeVerifierRegistry,
   };
-}
-
-function downgradeSuccessStatusForTrajectory(taskStatus = null, result = {}, state = {}, trajectory = {}) {
-  const status = normalizeTaskStatus(taskStatus || result?.taskStatus || result?.status || state?.taskStatus || '');
-  if (trajectory?.ok !== false || !['success', 'verified'].includes(status)) return taskStatus;
-  const reasons = Array.isArray(trajectory.reasons) ? trajectory.reasons : [];
-  if (reasons.some((reason) => reason === 'trajectory_side_effect_unverified' || reason.startsWith('trajectory_verifier_'))) return 'unverified';
-  return 'blocked';
 }
 
 function normalizeTaskStatus(status = '') {

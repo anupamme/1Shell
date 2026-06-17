@@ -1,15 +1,25 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Ref } from 'vue';
-import { RouterLink } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 import AppIcon from '@/components/AppIcon.vue';
+import HostListToolResult from '@/components/ide/HostListToolResult.vue';
 import AgentSessionRail from '@/components/AgentSessionRail.vue';
-import AgentToolsRail from '@/components/AgentToolsRail.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
 import { useIdeChat, type IdeApprovalMode, type IdeTimelineItem, type IdeChatApi, type IdeChatMessage, type IdeThinkingTimelineItem, type IdeToolTimelineItem, type IdeSystemTimelineItem, type IdeRewindPoint } from '@/composables/useIdeChat';
 import { useNotifyStore } from '@/stores/notify';
+import {
+  agentGoalObjective,
+  emptyAgentGoalState,
+  formatAgentGoalLabel,
+  parseAgentGoalCommand,
+  reduceAgentGoalCommand,
+  serializeAgentGoal,
+  type AgentGoalCommand,
+} from '@/utils/agentGoal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { renderMarkdown } from '@/utils/markdown';
+import { displayAssistantTextAfterToolResult, parseHostListResult } from '@/utils/structuredToolResults';
 import type { HostInfo, HostsListResponse } from '@/utils/scripts';
 
 // ── provider model ──
@@ -61,28 +71,39 @@ function fmtVal(v: unknown, max = 4000): string {
   return t.length > max ? t.slice(0, max) + '\n…[truncated]' : t;
 }
 
+function hasHostListResult(tool: IdeToolTimelineItem): boolean {
+  return tool.name === 'list_hosts' && Boolean(parseHostListResult(tool.result));
+}
+
+function assistantDisplayText(item: IdeChatMessage, index: number): string {
+  return displayAssistantTextAfterToolResult(ide.timeline.value, index, item.text);
+}
+
 // ── state ──
 const { requestJson } = useApiClient();
 const { confirm } = useConfirm();
 const notify = useNotifyStore();
+const route = useRoute();
+const router = useRouter();
 
 const scrollEl = ref<HTMLElement | null>(null);
 const hosts = ref<HostInfo[]>([]);
 const providers = ref<AgentProvider[]>([]);
 const activeProviderId = ref<string | null>(null);
-const agentGoal = ref('');
+const agentGoal = ref(emptyAgentGoalState());
 const selectedHostId = ref('');
 const modelPreference = ref('默认模型');
 const approvalMode = ref<IdeApprovalMode>('manual');
 const composerInput = ref('');
+const composerMode = ref<'chat' | 'goal'>('chat');
+const composerInputEl = ref<HTMLTextAreaElement | null>(null);
 const showHostDropdown = ref(false);
 const showModeDropdown = ref(false);
 const showModelDropdown = ref(false);
-const showTools = ref(false);
 const expandingToolId = ref<string | null>(null);
 let follow = true;
 
-type RailTab = 'chat' | 'files' | 'hosts';
+type RailTab = 'chat' | 'files' | 'tools';
 
 interface FileFocus {
   hostId: string;
@@ -171,6 +192,8 @@ interface CreateAgentRuntimeOptions {
 interface IdeLoadableAgentSession {
   id: string;
   timeline: IdeTimelineItem[];
+  running?: boolean;
+  runId?: string;
 }
 
 const runtimes = shallowRef<AgentRuntime[]>([]);
@@ -181,6 +204,27 @@ const activeRuntime = computed(() => {
     || null;
 });
 
+const ACTIVE_AGENT_SESSION_STORAGE_KEY = 'oneshell.agent.activeSessionId';
+let initialSessionRestoreAttempted = false;
+
+function readStoredActiveSessionId(): string {
+  try { return window.localStorage.getItem(ACTIVE_AGENT_SESSION_STORAGE_KEY) || ''; } catch { return ''; }
+}
+
+function storeActiveSessionId(id: string): void {
+  try {
+    if (id) window.localStorage.setItem(ACTIVE_AGENT_SESSION_STORAGE_KEY, id);
+    else window.localStorage.removeItem(ACTIVE_AGENT_SESSION_STORAGE_KEY);
+  } catch { /* ignore storage failures */ }
+}
+
+function rememberRuntimeSession(runtime: AgentRuntime | null = activeRuntime.value): void {
+  if (!runtime) return;
+  if (runtime.ide.timeline.value.length > 0 || runtime.ide.isRunning.value) {
+    storeActiveSessionId(runtime.ide.currentSessionId.value);
+  }
+}
+
 const taskMode = computed({
   get: () => activeRuntime.value?.taskMode.value || false,
   set: (value: boolean) => {
@@ -190,8 +234,15 @@ const taskMode = computed({
 });
 
 const enabledProviders = computed(() => providers.value.filter(p => p.enabled !== false));
+const isGoalComposerMode = computed(() => composerMode.value === 'goal');
+const composerPlaceholder = computed(() => {
+  return isGoalComposerMode.value
+    ? '1Shell 应继续朝哪个目标努力？'
+    : '输入目标、命令，或直接粘贴图片/文件后发送…';
+});
 
 const slashCmds = computed<SlashCmd[]>(() => {
+  if (isGoalComposerMode.value) return [];
   if (slashSubView.value) return [];
   const v = composerInput.value;
   if (!v.startsWith('/')) return [];
@@ -210,12 +261,38 @@ function openSlashModel(): void {
   composerInput.value = '';
 }
 
-function openSlashTask(): void {
+function openSlashTask(prefill = ''): void {
   slashSubView.value = 'task';
   slashHighlight.value = 0;
   composerInput.value = '';
-  taskGoalInput.value = '';
+  taskGoalInput.value = prefill;
   void nextTick(() => taskGoalEl.value?.focus());
+}
+
+function consumeTaskAuthoringRoute(): void {
+  if (route.query.taskAuthoring !== '1') return;
+  const initialIntent = typeof route.query.taskIntent === 'string' ? route.query.taskIntent : '';
+  openSlashTask(initialIntent);
+  const nextQuery = { ...route.query };
+  delete nextQuery.taskAuthoring;
+  delete nextQuery.taskIntent;
+  void router.replace({ path: '/agent', query: nextQuery });
+}
+
+function openGoalComposer(prefill = ''): void {
+  composerMode.value = 'goal';
+  composerInput.value = prefill;
+  slashSubView.value = null;
+  showHostDropdown.value = false;
+  showModeDropdown.value = false;
+  showModelDropdown.value = false;
+  void nextTick(() => composerInputEl.value?.focus());
+}
+
+function closeGoalComposer(): void {
+  if (!isGoalComposerMode.value) return;
+  composerMode.value = 'chat';
+  composerInput.value = '';
 }
 
 function submitTaskGoal(): void {
@@ -238,7 +315,7 @@ function closeSlashMenu(): void {
 function selectSlashCmd(cmd: SlashCmd): void {
   if (cmd.cmd === '/model') { openSlashModel(); return; }
   if (cmd.cmd === '/task') { openSlashTask(); return; }
-  if (cmd.cmd === '/goal') { composerInput.value = ''; setGoal(); return; }
+  if (cmd.cmd === '/goal') { openGoalComposer(); return; }
   if (cmd.cmd === '/host') { composerInput.value = ''; showHostDropdown.value = true; return; }
   if (cmd.cmd === '/mode') { composerInput.value = ''; showModeDropdown.value = true; return; }
   if (cmd.cmd === '/remind') { composerInput.value = ''; void openRewindModal(); return; }
@@ -296,7 +373,8 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
         surface: 'agent',
         module: 'Agent',
         moduleHint: '当前在 1Shell Agent 专用前端。',
-        agentGoal: agentGoal.value || undefined,
+        agentGoal: agentGoalObjective(agentGoal.value) || undefined,
+        threadGoal: serializeAgentGoal(agentGoal.value),
         hostScope: hostId || 'all',
         modelPreference: modelPreference.value !== '默认模型' ? modelPreference.value : undefined,
         hosts: host ? [{ id: host.id, name: host.name, host: host.host }] : undefined,
@@ -305,13 +383,16 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
     messagePayload: () => ({
       entry: runtimeTaskMode.value ? 'task' : 'core',
       approvalMode: approvalMode.value,
-      goal: agentGoal.value || undefined,
+      goal: agentGoalObjective(agentGoal.value) || undefined,
+      goalStatus: serializeAgentGoal(agentGoal.value)?.status,
+      threadGoal: serializeAgentGoal(agentGoal.value),
       hostId: runtimeHostId.value || undefined,
       modelPreference: modelPreference.value !== '默认模型' ? modelPreference.value : undefined,
       attachments: attachmentPayload(),
     }),
     onRunComplete: () => {
       touchedAt.value = new Date().toISOString();
+      rememberRuntimeSession(runtime);
       void loadSessions();
     },
   });
@@ -328,9 +409,11 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
   runtime.stopWatchers.push(watch(() => ideApi.currentSessionId.value, (nextId, previousId) => {
     if (activeRuntimeId.value === previousId) activeRuntimeId.value = nextId;
     touchedAt.value = new Date().toISOString();
+    rememberRuntimeSession(runtime);
   }));
   runtime.stopWatchers.push(watch(() => ideApi.timeline.value.length, () => {
     touchedAt.value = new Date().toISOString();
+    rememberRuntimeSession(runtime);
   }));
 
   runtimes.value = [...runtimes.value, runtime];
@@ -346,6 +429,7 @@ function activateRuntime(runtime: AgentRuntime): void {
   lastToolFocusKey = '';
   follow = true;
   syncRailFromTimeline();
+  rememberRuntimeSession(runtime);
   void nextTick(() => scrollToBottom());
 }
 
@@ -438,34 +522,56 @@ async function loadSessions(): Promise<void> {
   sessionsLoading.value = true;
   try {
     const resp = await requestJson<{ ok: boolean; sessions: SessionMeta[] }>('/api/agent/sessions');
-    if (resp.ok) sessions.value = resp.sessions || [];
+    if (resp.ok) {
+      sessions.value = resp.sessions || [];
+      await restoreInitialSession(sessions.value);
+    }
   } catch { /* ignore */ } finally {
     sessionsLoading.value = false;
   }
 }
 
-async function onSelectSession(id: string): Promise<void> {
-  if (id === ide.currentSessionId.value) return;
+async function restoreInitialSession(rows: SessionMeta[]): Promise<void> {
+  if (initialSessionRestoreAttempted) return;
+  initialSessionRestoreAttempted = true;
+  const runtime = activeRuntime.value;
+  if (!runtime || runtime.ide.isRunning.value || runtime.ide.timeline.value.length > 0) return;
+
+  const storedId = readStoredActiveSessionId();
+  if (storedId && await onSelectSession(storedId)) return;
+  const latest = rows[0]?.id || '';
+  if (latest && latest !== storedId) await onSelectSession(latest);
+}
+
+async function onSelectSession(id: string): Promise<boolean> {
+  if (id === ide.currentSessionId.value) return true;
   const liveRuntime = findRuntimeBySessionId(id);
   if (liveRuntime) {
     activateRuntime(liveRuntime);
-    return;
+    return true;
   }
   try {
-    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; timeline: IdeTimelineItem[] } }>(`/api/agent/sessions/${id}`);
-    if (!resp.ok || !resp.session) return;
+    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${id}`);
+    if (!resp.ok || !resp.session) return false;
     fileFocus.value = null;
     lastToolFocusKey = '';
     composerAttachments.value = [];
     attachmentError.value = '';
-    createAgentRuntime({
+    const runtime = createAgentRuntime({
       hostId: resp.session.hostId || '',
       taskMode: resp.session.entry === 'task',
-      session: { id: resp.session.id, timeline: resp.session.timeline || [] },
+      session: {
+        id: resp.session.id,
+        timeline: resp.session.timeline || [],
+        running: Boolean(resp.session.running),
+        runId: resp.session.runId || '',
+      },
     });
+    if (resp.session.running) void runtime.ide.reattachSession();
     follow = true;
     void nextTick(() => scrollToBottom());
-  } catch { /* ignore */ }
+    return true;
+  } catch { return false; }
 }
 
 function onNewSession(hostId = selectedHostId.value): void {
@@ -505,6 +611,7 @@ async function onDeleteSession(id: string): Promise<void> {
     await requestJson(`/api/agent/sessions/${id}`, { method: 'DELETE' });
   } catch { /* ignore */ }
   sessions.value = sessions.value.filter((s) => s.id !== id);
+  if (readStoredActiveSessionId() === id) storeActiveSessionId('');
   if (runtime) {
     disposeRuntime(runtime);
     runtimes.value = runtimes.value.filter((item) => item !== runtime);
@@ -520,7 +627,7 @@ async function onDeleteSession(id: string): Promise<void> {
 }
 
 const selectedHost = computed(() => hosts.value.find(h => h.id === selectedHostId.value) || null);
-const goalText = computed(() => agentGoal.value || '未设置目标');
+const goalText = computed(() => formatAgentGoalLabel(agentGoal.value));
 const hostText = computed(() => {
   if (selectedHostId.value === LOCAL_HOST_ID) return '本机';
   return selectedHost.value?.name || selectedHostId.value || '所有主机';
@@ -542,6 +649,11 @@ const modeBadge = computed(() => {
 });
 const hasTimeline = computed(() => ide.timeline.value.length > 0);
 const isBusy = computed(() => ide.isRunning.value);
+const canSubmitComposer = computed(() => {
+  if (isBusy.value) return false;
+  if (isGoalComposerMode.value) return Boolean(composerInput.value.trim());
+  return Boolean(composerInput.value.trim() || composerAttachments.value.length);
+});
 
 const modes: { key: IdeApprovalMode; label: string }[] = [
   { key: 'manual', label: '手动审批' },
@@ -712,7 +824,15 @@ watch(() => ide.timeline.value, () => {
   syncRailFromTimeline();
   void nextTick(() => scrollToBottom());
 }, { deep: true });
-onMounted(() => { void loadHosts(); void loadProviders(); void loadSessions(); });
+watch(() => [route.query.taskAuthoring, route.query.taskIntent], () => {
+  consumeTaskAuthoringRoute();
+});
+onMounted(() => {
+  void loadHosts();
+  void loadProviders();
+  void loadSessions();
+  consumeTaskAuthoringRoute();
+});
 onBeforeUnmount(() => {
   for (const runtime of runtimes.value) disposeRuntime(runtime);
   runtimes.value = [];
@@ -935,7 +1055,21 @@ function attachmentPayload(): Record<string, unknown>[] {
 
 function send(): void {
   const t = composerInput.value.trim();
-  if (isBusy.value || (!t && !composerAttachments.value.length)) return;
+  if (isBusy.value) return;
+  if (isGoalComposerMode.value) {
+    if (!t) return;
+    applyAgentGoalCommand({ kind: 'goal', action: 'set', objective: t });
+    composerMode.value = 'chat';
+    composerInput.value = '';
+    follow = true;
+    return;
+  }
+  if (!t && !composerAttachments.value.length) return;
+  if (t && composerAttachments.value.length === 0 && handleAgentGoalCommandText(t)) {
+    composerInput.value = '';
+    follow = true;
+    return;
+  }
   ide.inputText.value = `${t || '请分析附件。'}${attachmentSummary()}`;
   ide.sendMessage();
   composerInput.value = '';
@@ -948,8 +1082,31 @@ function sendSlash(cmd: string): void {
   follow = true;
 }
 function setGoal(): void {
-  const v = window.prompt('设置 Agent 目标：', agentGoal.value);
-  if (v !== null) { agentGoal.value = v.trim(); sendSlash(`/goal ${agentGoal.value}`); }
+  if (isGoalComposerMode.value) {
+    void nextTick(() => composerInputEl.value?.focus());
+    return;
+  }
+  openGoalComposer();
+}
+function handleAgentGoalCommandText(value: string): boolean {
+  const command = parseAgentGoalCommand(value);
+  if (!command) return false;
+  if (command.action === 'show') {
+    openGoalComposer();
+    return true;
+  }
+  if (command.action === 'edit') {
+    openGoalComposer(agentGoal.value.objective);
+    return true;
+  }
+  applyAgentGoalCommand(command);
+  return true;
+}
+function applyAgentGoalCommand(command: AgentGoalCommand): void {
+  const result = reduceAgentGoalCommand(agentGoal.value, command);
+  if (result.needsEditor) return openGoalComposer(agentGoal.value.objective);
+  agentGoal.value = result.state;
+  ide.pushSystemEvent(result.title, result.text, result.tone);
 }
 function pickHost(id: string): void {
   const normalizedHostId = id || '';
@@ -985,11 +1142,6 @@ function onRailSelectHost(id: string): void {
   lastToolFocusKey = '';
   showHostDropdown.value = false;
 }
-function onNewHostSession(id: string): void {
-  selectedHostId.value = id || '';
-  railTab.value = 'chat';
-  onNewSession(id || '');
-}
 function pickMode(m: IdeApprovalMode): void {
   approvalMode.value = m;
   showModeDropdown.value = false;
@@ -1002,6 +1154,7 @@ async function clearChat(): Promise<void> {
   }
   const ok = await confirm({ message: '清空当前会话时间线？', title: '清空' });
   if (!ok) return;
+  storeActiveSessionId('');
   ide.resetChat();
   taskMode.value = false;
   fileFocus.value = null;
@@ -1102,6 +1255,18 @@ function onRewindModalKeydown(event: KeyboardEvent): void {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (isGoalComposerMode.value) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeGoalComposer();
+      return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+      return;
+    }
+  }
   if (showSlashMenu.value) {
     if (slashSubView.value === 'model') {
       if (e.key === 'ArrowDown') { e.preventDefault(); slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, enabledProviders.value.length); return; }
@@ -1147,7 +1312,6 @@ function approveAction(action: 'allow' | 'deny'): void {
       @rename="onRenameSession"
       @delete="onDeleteSession"
       @select-host="onRailSelectHost"
-      @new-host-session="onNewHostSession"
     />
     <div class="flex flex-col flex-1 min-w-0 h-full">
     <!-- ── status bar ── -->
@@ -1173,15 +1337,6 @@ function approveAction(action: 'allow' | 'deny'): void {
           回溯
         </button>
         <button v-if="hasTimeline" class="text-xs text-slate-400 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 transition-colors cursor-pointer" @click="clearChat" title="清空时间线">清空</button>
-        <button
-          class="flex items-center gap-1 text-xs px-2 py-0.5 rounded-md border transition-colors cursor-pointer"
-          :class="showTools ? 'border-emerald-300 dark:border-emerald-400/30 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-400/10' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'"
-          title="工具（Skill / MCP）"
-          @click="showTools = !showTools"
-        >
-          <AppIcon name="wrench" :size="13" />
-          Tools
-        </button>
       </div>
     </header>
 
@@ -1218,7 +1373,7 @@ function approveAction(action: 'allow' | 'deny'): void {
 
         <!-- timeline items -->
         <div v-else class="max-w-[860px] mx-auto px-5 py-6 space-y-5">
-          <template v-for="item in ide.timeline.value" :key="item.id">
+          <template v-for="(item, index) in ide.timeline.value" :key="item.id">
             <!-- user -->
             <div v-if="item.kind === 'user'" class="flex justify-end">
               <div class="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-sky-50 dark:bg-[#1a2340] border border-sky-200 dark:border-white/[0.06] text-sm leading-relaxed text-slate-700 dark:text-slate-200">{{ (item as IdeChatMessage).text }}</div>
@@ -1260,6 +1415,9 @@ function approveAction(action: 'allow' | 'deny'): void {
                 </div>
                 <AppIcon name="arrow-right" :size="14" class="text-slate-400 dark:text-slate-600 shrink-0 transition-transform duration-200" :class="expandingToolId === (item as IdeToolTimelineItem).toolUseId ? 'rotate-90' : ''" />
               </div>
+              <div v-if="hasHostListResult(item as IdeToolTimelineItem)" class="px-4 pb-4" @click.stop>
+                <HostListToolResult :result="(item as IdeToolTimelineItem).result" />
+              </div>
               <div v-if="expandingToolId === (item as IdeToolTimelineItem).toolUseId" class="px-4 pb-4 space-y-3 border-t border-slate-100 dark:border-white/[0.04] pt-3">
                 <div v-if="(item as IdeToolTimelineItem).workNote" class="text-xs text-slate-500 dark:text-slate-400 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 leading-relaxed">{{ (item as IdeToolTimelineItem).workNote }}</div>
                 <div v-if="(item as IdeToolTimelineItem).input !== undefined && (item as IdeToolTimelineItem).input !== null" class="space-y-1">
@@ -1271,7 +1429,7 @@ function approveAction(action: 'allow' | 'deny'): void {
                   <pre v-for="(log, i) in (item as IdeToolTimelineItem).logs" :key="i" class="text-xs rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[260px] overflow-y-auto"
                     :class="log.stream === 'stderr' ? 'text-red-600 dark:text-red-300/80 bg-red-50 dark:bg-red-950/20' : 'text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19]'">{{ log.text }}</pre>
                 </div>
-                <div v-if="(item as IdeToolTimelineItem).result !== undefined && (item as IdeToolTimelineItem).result !== null" class="space-y-1">
+                <div v-if="!hasHostListResult(item as IdeToolTimelineItem) && (item as IdeToolTimelineItem).result !== undefined && (item as IdeToolTimelineItem).result !== null" class="space-y-1">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">结果</div>
                   <pre class="text-xs text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[240px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).result) }}</pre>
                 </div>
@@ -1282,7 +1440,7 @@ function approveAction(action: 'allow' | 'deny'): void {
             <div v-else class="flex items-start gap-3">
               <span class="w-7 h-7 mt-0.5 rounded-lg bg-emerald-50 dark:bg-emerald-400/10 border border-emerald-200 dark:border-emerald-400/15 flex items-center justify-center shrink-0"><AppIcon name="robot" :size="14" class="text-emerald-500 dark:text-emerald-400" /></span>
               <div class="min-w-0 flex-1">
-                <div v-if="(item as IdeChatMessage).text" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 space-y-3 markdown-body agent-md" v-html="renderMarkdown((item as IdeChatMessage).text)"></div>
+                <div v-if="assistantDisplayText(item as IdeChatMessage, index)" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 space-y-3 markdown-body agent-md" v-html="renderMarkdown(assistantDisplayText(item as IdeChatMessage, index))"></div>
                 <div v-else class="flex items-center gap-1.5 py-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse"></span>
                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse" style="animation-delay: 0.15s"></span>
@@ -1321,8 +1479,6 @@ function approveAction(action: 'allow' | 'deny'): void {
         </div>
       </div>
 
-      <!-- tools rail -->
-      <AgentToolsRail v-if="showTools" />
     </div>
 
     <!-- ── composer ── -->
@@ -1458,11 +1614,33 @@ function approveAction(action: 'allow' | 'deny'): void {
           </span>
           <span v-if="attachmentError" class="h-7 px-2 rounded-md border border-amber-200 dark:border-amber-400/20 bg-amber-50 dark:bg-amber-400/8 text-[11px] text-amber-700 dark:text-amber-300 flex items-center">{{ attachmentError }}</span>
         </div>
-        <div class="rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#0b0f19] shadow-sm focus-within:border-emerald-300 dark:focus-within:border-emerald-400/30 transition-colors p-2.5">
+        <div
+          class="rounded-2xl border bg-white dark:bg-[#0b0f19] shadow-sm transition-colors p-2.5"
+          :class="isGoalComposerMode ? 'border-emerald-300 dark:border-emerald-400/35 focus-within:border-emerald-400 dark:focus-within:border-emerald-300/55' : 'border-slate-200 dark:border-white/[0.08] focus-within:border-emerald-300 dark:focus-within:border-emerald-400/30'"
+        >
+          <div
+            v-if="isGoalComposerMode"
+            class="mb-1.5 min-h-9 px-2.5 py-1.5 rounded-xl border border-emerald-200 dark:border-emerald-400/20 bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300 flex items-center gap-2 text-xs"
+          >
+            <span class="w-6 h-6 rounded-lg bg-emerald-100 dark:bg-emerald-400/15 flex items-center justify-center shrink-0">
+              <AppIcon name="target" :size="13" />
+            </span>
+            <strong class="font-semibold shrink-0">目标</strong>
+            <span class="min-w-0 truncate text-emerald-600 dark:text-emerald-300/80">下一条输入会保存为 Agent 工作目标</span>
+            <button
+              type="button"
+              class="ml-auto w-6 h-6 rounded-lg flex items-center justify-center hover:bg-emerald-100 dark:hover:bg-emerald-400/15 transition-colors cursor-pointer"
+              title="退出目标输入"
+              @click="closeGoalComposer"
+            >
+              <AppIcon name="close" :size="11" />
+            </button>
+          </div>
           <textarea
+            ref="composerInputEl"
             v-model="composerInput"
             class="w-full min-h-[54px] max-h-[180px] px-2 py-1.5 text-sm leading-6 text-slate-700 dark:text-slate-200 bg-transparent border-0 resize-none focus:outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
-            placeholder="输入目标、命令，或直接粘贴图片/文件后发送…"
+            :placeholder="composerPlaceholder"
             rows="2"
             @keydown="onKeydown"
             @paste="onComposerPaste"
@@ -1472,7 +1650,7 @@ function approveAction(action: 'allow' | 'deny'): void {
               type="button"
               class="shrink-0 w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-400/10 flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
               title="添加图片或文档"
-              :disabled="isBusy"
+              :disabled="isBusy || isGoalComposerMode"
               @click="attachmentInput?.click()"
             >
               <AppIcon name="paperclip" :size="16" />
@@ -1486,6 +1664,18 @@ function approveAction(action: 'allow' | 'deny'): void {
               @click="openRewindModal"
             >
               <AppIcon name="history" :size="16" />
+            </button>
+
+            <button
+              type="button"
+              class="shrink-0 h-8 px-2.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              :class="isGoalComposerMode ? 'border-emerald-300 dark:border-emerald-400/30 bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+              :disabled="isBusy"
+              :title="goalText"
+              @click="setGoal"
+            >
+              <AppIcon name="target" :size="14" />
+              <span>目标</span>
             </button>
 
             <div class="relative">
@@ -1558,11 +1748,11 @@ function approveAction(action: 'allow' | 'deny'): void {
 
             <button
               class="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer"
-              :class="(composerInput.trim() || composerAttachments.length) && !isBusy ? 'bg-slate-900 dark:bg-emerald-500 text-white hover:bg-slate-800 dark:hover:bg-emerald-400 shadow-lg shadow-slate-900/10 dark:shadow-emerald-500/10' : 'bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-600 cursor-not-allowed'"
-              :disabled="(!composerInput.trim() && !composerAttachments.length) || isBusy"
+              :class="canSubmitComposer ? 'bg-slate-900 dark:bg-emerald-500 text-white hover:bg-slate-800 dark:hover:bg-emerald-400 shadow-lg shadow-slate-900/10 dark:shadow-emerald-500/10' : 'bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-600 cursor-not-allowed'"
+              :disabled="!canSubmitComposer"
               @click="send"
             >
-              <AppIcon :name="composerInput.trim() || composerAttachments.length ? 'send' : 'arrow-right'" :size="16" />
+              <AppIcon :name="canSubmitComposer ? (isGoalComposerMode ? 'target' : 'send') : 'arrow-right'" :size="16" />
             </button>
           </div>
         </div>

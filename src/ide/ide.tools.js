@@ -832,8 +832,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       }
 
       case 'list_hosts': {
-        const hosts = (hostService.listHosts?.() || []).map(h => `id=${h.id}  name=${h.name}  ${h.host || '127.0.0.1'}:${h.port || '-'}  type=${h.type || 'ssh'}`);
-        return ok(hosts.length > 0 ? hosts.join('\n') : '（无已托管主机）');
+        return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta, source: 'ide' });
       }
 
       case 'verify_outcome': {

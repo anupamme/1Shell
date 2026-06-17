@@ -89,6 +89,7 @@ const router = useRouter();
 const loading = ref(false);
 const hosts = ref<RepositoryHost[]>([]);
 const selectedHostId = ref<string | null>(null);
+const expandedHostIds = ref<Set<string>>(new Set());
 const search = ref('');
 const roleFilter = ref<'all' | HostRole | 'none'>('all');
 const statusFilter = ref<'all' | 'online' | 'offline' | 'unknown' | 'no-probe' | 'alerts'>('all');
@@ -98,6 +99,7 @@ const tagDraft = ref('');
 const draggingHostId = ref<string | null>(null);
 const draggingFromConsole = ref(false);
 const dragOverHostId = ref<string | null>(null);
+const repositoryDragOverHostId = ref<string | null>(null);
 const consoleDropActive = ref(false);
 const repositoryDropActive = ref(false);
 const hideDropActive = ref(false);
@@ -349,6 +351,18 @@ async function saveConsoleOrder(hostIds: string[]): Promise<void> {
   await loadHosts();
 }
 
+async function saveRepositoryOrder(hostIds: string[]): Promise<void> {
+  const response = await requestJson<RepositoryResponse>('/api/hosts/repository-order', {
+    method: 'POST',
+    body: JSON.stringify({ hostIds }),
+  });
+  if (Array.isArray(response.hosts)) {
+    hosts.value = response.hosts;
+  } else {
+    await loadHosts();
+  }
+}
+
 async function addToConsole(host: RepositoryHost): Promise<void> {
   const maxOrder = consoleHosts.value.reduce((max, item) => Math.max(max, item.preference.consoleOrder), -1);
   try {
@@ -478,6 +492,7 @@ function onDragEnd(): void {
   draggingHostId.value = null;
   draggingFromConsole.value = false;
   dragOverHostId.value = null;
+  repositoryDragOverHostId.value = null;
   consoleDropActive.value = false;
   repositoryDropActive.value = false;
   hideDropActive.value = false;
@@ -500,6 +515,30 @@ function buildConsoleOrder(draggedHostId: string, targetHostId: string | null): 
     ordered.push(draggedHostId);
   }
   return ordered;
+}
+
+function buildRepositoryOrder(draggedHostId: string, targetHostId: string | null): string[] {
+  const visibleIds = filteredHosts.value.map((host) => host.id);
+  if (!visibleIds.includes(draggedHostId)) return hosts.value.map((host) => host.id);
+
+  const visibleSet = new Set(visibleIds);
+  const orderedVisibleIds = visibleIds.filter((id) => id !== draggedHostId);
+  const targetIndex = targetHostId && targetHostId !== draggedHostId ? orderedVisibleIds.indexOf(targetHostId) : -1;
+  if (targetIndex >= 0) {
+    orderedVisibleIds.splice(targetIndex, 0, draggedHostId);
+  } else {
+    orderedVisibleIds.push(draggedHostId);
+  }
+
+  const queue = orderedVisibleIds.slice();
+  return hosts.value.map((host) => {
+    if (!visibleSet.has(host.id)) return host.id;
+    return queue.shift() || host.id;
+  });
+}
+
+function isSameOrder(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
 async function onConsoleDrop(event: DragEvent, targetHost: RepositoryHost | null = null): Promise<void> {
@@ -556,26 +595,86 @@ async function onHideDrop(event: DragEvent): Promise<void> {
 }
 
 function onRepositoryDragOver(event: DragEvent): void {
-  if (!draggingFromConsole.value) return;
+  if (!draggingHostId.value) return;
   event.preventDefault();
-  repositoryDropActive.value = true;
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  if (draggingFromConsole.value) {
+    repositoryDropActive.value = true;
+    return;
+  }
+  repositoryDropActive.value = false;
+  repositoryDragOverHostId.value = null;
 }
 
 function onRepositoryDragLeave(event: DragEvent): void {
-  if (event.target === event.currentTarget) repositoryDropActive.value = false;
+  if (event.target === event.currentTarget) {
+    repositoryDropActive.value = false;
+    repositoryDragOverHostId.value = null;
+  }
 }
 
 async function onRepositoryDrop(event: DragEvent): Promise<void> {
   event.preventDefault();
   const hostId = getDraggedHostId(event);
   const host = hosts.value.find((item) => item.id === hostId);
-  if (!draggingFromConsole.value || !host) {
+  if (!host) {
     onDragEnd();
     return;
   }
   try {
-    await hideFromConsole(host);
+    if (draggingFromConsole.value) {
+      await hideFromConsole(host);
+      return;
+    }
+    const orderedIds = buildRepositoryOrder(host.id, null);
+    if (isSameOrder(orderedIds, hosts.value.map((item) => item.id))) return;
+    await saveRepositoryOrder(orderedIds);
+    notify.success('仓库顺序已更新');
+  } catch (err) {
+    notify.error((err as Error).message || '仓库排序失败');
+  } finally {
+    onDragEnd();
+  }
+}
+
+function onRepositoryHostDragOver(event: DragEvent, targetHost: RepositoryHost): void {
+  if (!draggingHostId.value) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  if (draggingFromConsole.value) {
+    repositoryDropActive.value = true;
+    repositoryDragOverHostId.value = null;
+    return;
+  }
+  repositoryDropActive.value = false;
+  if (targetHost.id === draggingHostId.value) {
+    repositoryDragOverHostId.value = null;
+    return;
+  }
+  repositoryDragOverHostId.value = targetHost.id;
+}
+
+async function onRepositoryHostDrop(event: DragEvent, targetHost: RepositoryHost): Promise<void> {
+  event.preventDefault();
+  const hostId = getDraggedHostId(event);
+  const host = hosts.value.find((item) => item.id === hostId);
+  if (!host) {
+    onDragEnd();
+    return;
+  }
+
+  try {
+    if (draggingFromConsole.value) {
+      await hideFromConsole(host);
+      return;
+    }
+    if (host.id === targetHost.id) return;
+    const orderedIds = buildRepositoryOrder(host.id, targetHost.id);
+    if (isSameOrder(orderedIds, hosts.value.map((item) => item.id))) return;
+    await saveRepositoryOrder(orderedIds);
+    notify.success('仓库顺序已更新');
+  } catch (err) {
+    notify.error((err as Error).message || '仓库排序失败');
   } finally {
     onDragEnd();
   }
@@ -595,6 +694,21 @@ function openProbe(host?: RepositoryHost): void {
 
 function selectHost(host: RepositoryHost): void {
   selectedHostId.value = host.id;
+}
+
+function isHostExpanded(host: RepositoryHost): boolean {
+  return expandedHostIds.value.has(host.id);
+}
+
+function toggleHostCard(host: RepositoryHost): void {
+  selectedHostId.value = host.id;
+  const next = new Set(expandedHostIds.value);
+  if (next.has(host.id)) {
+    next.delete(host.id);
+  } else {
+    next.add(host.id);
+  }
+  expandedHostIds.value = next;
 }
 
 watch(
@@ -655,39 +769,58 @@ onMounted(() => { void loadHosts(); });
               v-for="(host, index) in consoleHosts"
               :key="host.id"
               draggable="true"
-              class="rounded-2xl border p-3 transition cursor-grab active:cursor-grabbing"
+              role="button"
+              tabindex="0"
+              class="rounded-xl border p-2.5 transition cursor-grab active:cursor-grabbing"
               :class="[
                 host.id === selectedHost?.id ? 'border-blue-400 bg-blue-50/80 dark:border-blue-400/70 dark:bg-blue-400/10' : 'border-slate-200 bg-white/70 hover:border-blue-200 dark:border-white/10 dark:bg-white/[0.03] dark:hover:border-blue-400/40',
                 draggingHostId === host.id ? 'opacity-50' : '',
                 dragOverHostId === host.id ? 'ring-2 ring-blue-300 dark:ring-blue-400/40' : '',
               ]"
-              @click="selectHost(host)"
+              @click="toggleHostCard(host)"
+              @keydown.enter.prevent="toggleHostCard(host)"
+              @keydown.space.prevent="toggleHostCard(host)"
               @dragstart="onHostDragStart($event, host, true)"
               @dragend="onDragEnd"
               @dragover.stop.prevent="onConsoleDragOver($event, host)"
               @drop.stop.prevent="onConsoleDrop($event, host)"
             >
-              <div class="flex items-start justify-between gap-2">
-                <div class="min-w-0">
-                  <div class="flex items-center gap-2">
-                    <span class="h-2 w-2 rounded-full shadow" :class="statusClass(host)" />
-                    <h3 class="truncate text-sm font-semibold">{{ host.name }}</h3>
-                    <span v-if="host.preference.pinned" class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-400/15 dark:text-amber-200">置顶</span>
-                  </div>
-                  <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{{ hostMeta(host) }}</p>
-                  <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">OS {{ platformText(host) }}</p>
-                  <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">CPU {{ formatPercent(host.probe?.cpu) }} · MEM {{ formatPercent(host.probe?.memory) }} · 告警 {{ host.probe?.alertCount || 0 }}</p>
-                  <div class="mt-2 flex flex-wrap gap-1">
-                    <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600 dark:bg-white/8 dark:text-slate-300">{{ roleText(host) }}</span>
-                    <span v-for="tag in host.preference.tags" :key="tag" class="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-600 dark:bg-blue-400/10 dark:text-blue-200">{{ tag }}</span>
-                  </div>
+              <div class="flex items-center gap-2">
+                <span class="h-2 w-2 shrink-0 rounded-full shadow" :class="statusClass(host)" />
+                <h3 class="min-w-0 flex-1 truncate text-sm font-semibold">{{ host.name }}</h3>
+                <span class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium" :class="host.probe?.status === 'online' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200' : host.probe?.status === 'offline' ? 'bg-rose-100 text-rose-700 dark:bg-rose-400/15 dark:text-rose-200' : 'bg-slate-100 text-slate-600 dark:bg-white/8 dark:text-slate-300'">
+                  {{ statusLabel(host) }}
+                </span>
+                <span v-if="host.preference.pinned" class="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-400/15 dark:text-amber-200">置顶</span>
+                <span class="shrink-0 text-[10px] text-slate-400">{{ isHostExpanded(host) ? '收起' : '展开' }}</span>
+              </div>
+              <p class="mt-1 truncate text-[11px] text-slate-500 dark:text-slate-400">{{ hostMeta(host) }}</p>
+              <div class="mt-2 grid grid-cols-3 gap-1.5 text-[11px]">
+                <div class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/[0.04]">
+                  <span class="text-slate-400">CPU</span>
+                  <b class="ml-1 font-semibold text-slate-700 dark:text-slate-200">{{ formatPercent(host.probe?.cpu) }}</b>
+                </div>
+                <div class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/[0.04]">
+                  <span class="text-slate-400">MEM</span>
+                  <b class="ml-1 font-semibold text-slate-700 dark:text-slate-200">{{ formatPercent(host.probe?.memory) }}</b>
+                </div>
+                <div class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/[0.04]">
+                  <span class="text-slate-400">告警</span>
+                  <b class="ml-1 font-semibold" :class="(host.probe?.alertCount || 0) > 0 ? 'text-amber-600 dark:text-amber-300' : 'text-slate-700 dark:text-slate-200'">{{ host.probe?.alertCount || 0 }}</b>
                 </div>
               </div>
-              <div class="mt-3 grid grid-cols-2 gap-1.5 text-[11px]">
-                <button type="button" class="rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50 disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/8" :disabled="index === 0" @click.stop="moveConsoleHost(host, -1)">上移</button>
-                <button type="button" class="rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50 disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/8" :disabled="index === consoleHosts.length - 1" @click.stop="moveConsoleHost(host, 1)">下移</button>
-                <button type="button" class="rounded-lg border border-amber-200 px-2 py-1 text-amber-700 hover:bg-amber-50 dark:border-amber-400/20 dark:text-amber-200 dark:hover:bg-amber-400/10" @click.stop="pinToConsole(host)">顶置</button>
-                <button type="button" class="rounded-lg border border-rose-200 px-2 py-1 text-rose-600 hover:bg-rose-50 dark:border-rose-400/20 dark:text-rose-200 dark:hover:bg-rose-400/10" @click.stop="hideFromConsole(host)">隐藏</button>
+              <div v-if="isHostExpanded(host)" class="mt-2 border-t border-slate-100 pt-2 dark:border-white/10">
+                <p class="truncate text-[11px] text-slate-500 dark:text-slate-400">OS {{ platformText(host) }}</p>
+                <div class="mt-2 flex flex-wrap gap-1">
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600 dark:bg-white/8 dark:text-slate-300">{{ roleText(host) }}</span>
+                  <span v-for="tag in host.preference.tags" :key="tag" class="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-600 dark:bg-blue-400/10 dark:text-blue-200">{{ tag }}</span>
+                </div>
+                <div class="mt-2 grid grid-cols-2 gap-1.5 text-[11px]">
+                  <button type="button" class="rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50 disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/8" :disabled="index === 0" @click.stop="moveConsoleHost(host, -1)">上移</button>
+                  <button type="button" class="rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50 disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/8" :disabled="index === consoleHosts.length - 1" @click.stop="moveConsoleHost(host, 1)">下移</button>
+                  <button type="button" class="rounded-lg border border-amber-200 px-2 py-1 text-amber-700 hover:bg-amber-50 dark:border-amber-400/20 dark:text-amber-200 dark:hover:bg-amber-400/10" @click.stop="pinToConsole(host)">顶置</button>
+                  <button type="button" class="rounded-lg border border-rose-200 px-2 py-1 text-rose-600 hover:bg-rose-50 dark:border-rose-400/20 dark:text-rose-200 dark:hover:bg-rose-400/10" @click.stop="hideFromConsole(host)">隐藏</button>
+                </div>
               </div>
             </article>
             <div
@@ -748,34 +881,62 @@ onMounted(() => { void loadHosts(); });
                 v-for="host in filteredHosts"
                 :key="host.id"
                 draggable="true"
-                class="rounded-2xl border p-3 transition cursor-grab active:cursor-grabbing"
+                role="button"
+                tabindex="0"
+                class="rounded-xl border p-2.5 transition cursor-grab active:cursor-grabbing"
                 :class="[
                   host.id === selectedHost?.id ? 'border-blue-400 bg-blue-50/80 dark:border-blue-400/70 dark:bg-blue-400/10' : 'border-slate-200 bg-white/70 hover:border-blue-200 dark:border-white/10 dark:bg-white/[0.03] dark:hover:border-blue-400/40',
                   draggingHostId === host.id ? 'opacity-50' : '',
+                  repositoryDragOverHostId === host.id ? 'ring-2 ring-blue-300 dark:ring-blue-400/40' : '',
                 ]"
-                @click="selectHost(host)"
+                @click="toggleHostCard(host)"
+                @keydown.enter.prevent="toggleHostCard(host)"
+                @keydown.space.prevent="toggleHostCard(host)"
                 @dragstart="onHostDragStart($event, host, false)"
                 @dragend="onDragEnd"
+                @dragover.stop.prevent="onRepositoryHostDragOver($event, host)"
+                @drop.stop.prevent="onRepositoryHostDrop($event, host)"
               >
-                <div class="flex items-start justify-between gap-2">
-                  <div class="min-w-0">
-                    <div class="flex items-center gap-2">
-                      <span class="h-2 w-2 rounded-full shadow" :class="statusClass(host)" />
-                      <h3 class="truncate text-sm font-semibold">{{ host.name }}</h3>
-                      <span v-if="host.preference.showInConsole" class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200">已在主控</span>
-                      <span v-if="host.preference.archived" class="rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-white/10 dark:text-slate-300">已归档</span>
-                    </div>
-                    <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{{ hostMeta(host) }}</p>
-                    <p class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">{{ statusLabel(host) }} · {{ modeLabel(host) }} · {{ roleText(host) }}</p>
-                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">CPU {{ formatPercent(host.probe?.cpu) }} · MEM {{ formatPercent(host.probe?.memory) }} · 流量 {{ formatBytes(host.probe?.trafficMonth) }}</p>
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 shrink-0 rounded-full shadow" :class="statusClass(host)" />
+                  <h3 class="min-w-0 flex-1 truncate text-sm font-semibold">{{ host.name }}</h3>
+                  <span class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium" :class="host.probe?.status === 'online' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200' : host.probe?.status === 'offline' ? 'bg-rose-100 text-rose-700 dark:bg-rose-400/15 dark:text-rose-200' : 'bg-slate-100 text-slate-600 dark:bg-white/8 dark:text-slate-300'">
+                    {{ statusLabel(host) }}
+                  </span>
+                  <span v-if="host.preference.showInConsole" class="shrink-0 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200">主控</span>
+                  <span v-if="host.preference.archived" class="shrink-0 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-white/10 dark:text-slate-300">归档</span>
+                  <span class="shrink-0 text-[10px] text-slate-400">{{ isHostExpanded(host) ? '收起' : '展开' }}</span>
+                </div>
+                <p class="mt-1 truncate text-[11px] text-slate-500 dark:text-slate-400">{{ hostMeta(host) }}</p>
+                <div class="mt-2 grid grid-cols-3 gap-1.5 text-[11px]">
+                  <div class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/[0.04]">
+                    <span class="text-slate-400">CPU</span>
+                    <b class="ml-1 font-semibold text-slate-700 dark:text-slate-200">{{ formatPercent(host.probe?.cpu) }}</b>
+                  </div>
+                  <div class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/[0.04]">
+                    <span class="text-slate-400">MEM</span>
+                    <b class="ml-1 font-semibold text-slate-700 dark:text-slate-200">{{ formatPercent(host.probe?.memory) }}</b>
+                  </div>
+                  <div class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/[0.04]">
+                    <span class="text-slate-400">流量</span>
+                    <b class="ml-1 font-semibold text-slate-700 dark:text-slate-200">{{ formatBytes(host.probe?.trafficMonth) }}</b>
                   </div>
                 </div>
-                <div class="mt-3 flex flex-wrap gap-1.5 text-[11px]">
-                  <button type="button" class="rounded-lg border border-blue-200 px-2 py-1 text-blue-700 hover:bg-blue-50 disabled:opacity-40 dark:border-blue-400/20 dark:text-blue-200 dark:hover:bg-blue-400/10" :disabled="host.preference.showInConsole" @click.stop="addToConsole(host)">加入主控</button>
-                  <button type="button" class="rounded-lg border border-amber-200 px-2 py-1 text-amber-700 hover:bg-amber-50 dark:border-amber-400/20 dark:text-amber-200 dark:hover:bg-amber-400/10" @click.stop="pinToConsole(host)">顶置到主控</button>
-                  <button type="button" class="rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50 dark:border-white/10 dark:hover:bg-white/8" @click.stop="selectHost(host)">查看详情</button>
-                  <button type="button" class="rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50 dark:border-white/10 dark:hover:bg-white/8" @click.stop="openConsole(host)">打开终端</button>
-                  <button v-if="host.id !== LOCAL_HOST_ID" type="button" class="rounded-lg border border-rose-200 px-2 py-1 text-rose-600 hover:bg-rose-50 dark:border-rose-400/20 dark:text-rose-200 dark:hover:bg-rose-400/10" @click.stop="deleteHost(host)">删除</button>
+                <div v-if="isHostExpanded(host)" class="mt-2 border-t border-slate-100 pt-2 dark:border-white/10">
+                  <div class="grid grid-cols-2 gap-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    <p class="truncate">{{ modeLabel(host) }} · {{ roleText(host) }}</p>
+                    <p class="truncate text-right">告警 {{ host.probe?.alertCount || 0 }}</p>
+                    <p class="col-span-2 truncate">OS {{ platformText(host) }}</p>
+                  </div>
+                  <div v-if="host.preference.tags.length" class="mt-2 flex flex-wrap gap-1">
+                    <span v-for="tag in host.preference.tags" :key="tag" class="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-600 dark:bg-blue-400/10 dark:text-blue-200">{{ tag }}</span>
+                  </div>
+                  <div class="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                    <button type="button" class="rounded-lg border border-blue-200 px-2 py-1 text-blue-700 hover:bg-blue-50 disabled:opacity-40 dark:border-blue-400/20 dark:text-blue-200 dark:hover:bg-blue-400/10" :disabled="host.preference.showInConsole" @click.stop="addToConsole(host)">加入主控</button>
+                    <button type="button" class="rounded-lg border border-amber-200 px-2 py-1 text-amber-700 hover:bg-amber-50 dark:border-amber-400/20 dark:text-amber-200 dark:hover:bg-amber-400/10" @click.stop="pinToConsole(host)">顶置到主控</button>
+                    <button type="button" class="rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50 dark:border-white/10 dark:hover:bg-white/8" @click.stop="openConsole(host)">打开终端</button>
+                    <button v-if="host.id !== LOCAL_HOST_ID" type="button" class="rounded-lg border border-rose-200 px-2 py-1 text-rose-600 hover:bg-rose-50 dark:border-rose-400/20 dark:text-rose-200 dark:hover:bg-rose-400/10" @click.stop="deleteHost(host)">删除</button>
+                  </div>
                 </div>
               </article>
             </template>

@@ -60,98 +60,6 @@ function applyAgentCognitionToState(state = {}, update = {}, options = {}) {
   return next;
 }
 
-function buildPreDecisionCognitionUpdate(state = {}, { turn = null, observations = [] } = {}) {
-  const runtimeState = state.runtimeState || {};
-  const current = runtimeState.cognition || {};
-  const world = runtimeState.worldState || {};
-  const policy = state.spec?.policy || {};
-  const verifier = runtimeState.verifier || world.verificationPlan || {};
-  const failures = (Array.isArray(world.failures) ? world.failures : []).filter((item) => item?.status !== 'recovered').slice(-8);
-  const pendingInterrupts = (Array.isArray(state.interrupts) ? state.interrupts : []).filter((item) => item?.status === 'pending');
-  const sideEffectsNeedingVerification = (Array.isArray(world.sideEffects) ? world.sideEffects : [])
-    .filter((item) => item?.requiresVerification === true && item?.verified !== true)
-    .slice(-8);
-  const evidenceNeeded = [];
-  if (verifier?.required === true && verifier.ok !== true) evidenceNeeded.push('runtime verification is required before success');
-  for (const sideEffect of sideEffectsNeedingVerification) {
-    evidenceNeeded.push(`verify side effect from ${sideEffect.toolName || sideEffect.id || 'tool action'}`);
-  }
-
-  return {
-    status: failures.length > 0 ? 'needs_recovery' : 'orienting',
-    objective: state.goal || state.spec?.goal || '',
-    turn,
-    successCriteria: inferSuccessCriteria(state, current),
-    knownFacts: [
-      ...summarizeWorldFacts(world.facts, 12),
-      ...summarizeObservationsAsFacts(observations, 8),
-    ],
-    unknowns: [
-      ...summarizeOpenQuestions(world.openQuestions, 8),
-      ...pendingInterrupts.map((item) => ({
-        id: `interrupt:${item.id || item.type || 'pending'}`,
-        text: item.reason || item.message || `pending ${item.type || 'interrupt'}`,
-        source: 'pending_interrupt',
-      })),
-    ],
-    constraints: inferPolicyConstraints(policy),
-    risks: inferRuntimeRisks({ failures, verifier, sideEffectsNeedingVerification }),
-    evidenceNeeded,
-    blockers: [
-      ...failures.map((item) => `failure:${item.toolName || item.id || 'unknown'}`),
-      ...pendingInterrupts.map((item) => `interrupt:${item.type || item.id || 'pending'}`),
-    ],
-    updatedBy: 'runtime_pre_decision',
-  };
-}
-
-function buildDecisionCognitionUpdate(command = {}, result = {}, { turn = null, state = {}, decisionReview = null } = {}) {
-  const type = String(command?.type || '').trim() || 'continue';
-  const stateDelta = normalizeAgentStateDelta(command.stateDelta || command.state_delta || result.stateDelta || result.state_delta || result.agentStateDelta || result.agent_state_delta);
-  return {
-    ...stateDelta,
-    status: statusForCommand(type),
-    objective: state.goal || state.spec?.goal || '',
-    turn,
-    decisionBasis: compactText(
-      stateDelta.decisionBasis
-      || command.reason
-      || result.reason
-      || decisionReview?.message
-      || command.text
-      || result.text
-      || '',
-      1000,
-    ),
-    updatedBy: 'model_decision',
-  };
-}
-
-function buildObservationCognitionUpdate(observations = [], { turn = null, state = {} } = {}) {
-  const items = Array.isArray(observations) ? observations : [];
-  const failed = items.filter((item) => item?.isError === true || item?.ok === false);
-  const succeeded = items.filter((item) => item?.ok === true && item?.isError !== true);
-  const verifier = state?.runtimeState?.verifier || state?.runtimeState?.worldState?.verificationPlan || {};
-  return {
-    status: failed.length > 0 ? 'observed_failure' : 'observed',
-    objective: state?.goal || state?.spec?.goal || '',
-    turn,
-    knownFacts: succeeded.map((item) => ({
-      id: item.id || '',
-      text: compactText(item.content || item.stdoutExcerpt || item.evidence?.[0] || `${item.toolName || 'observation'} succeeded`, 700),
-      source: item.toolName ? `tool:${item.toolName}` : 'observation',
-    })),
-    risks: failed.map((item) => ({
-      id: item.id || '',
-      text: compactText(item.error || item.stderrExcerpt || item.content || `${item.toolName || 'observation'} failed`, 700),
-      source: item.toolName ? `tool:${item.toolName}` : 'observation',
-    })),
-    blockers: failed.map((item) => `failure:${item.toolName || item.id || 'unknown'}`),
-    evidenceNeeded: verifier?.required === true && verifier.ok !== true ? ['runtime verification is still required'] : [],
-    updatedBy: 'runtime_observation',
-  };
-}
-
 function normalizeAgentStateDelta(value = {}) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   return {
@@ -183,65 +91,6 @@ function summarizeCognition(cognition = {}) {
     updatedBy: cognition.updatedBy || '',
     updatedAt: cognition.updatedAt || '',
   };
-}
-
-function inferSuccessCriteria(state = {}, current = {}) {
-  const explicit = state.spec?.outputContract?.successCriteria
-    || state.spec?.outputContract?.success_criteria
-    || state.spec?.context?.successCriteria
-    || state.spec?.context?.success_criteria;
-  if (Array.isArray(explicit) && explicit.length > 0) return explicit;
-  if (Array.isArray(current.successCriteria) && current.successCriteria.length > 0) return current.successCriteria;
-  const goal = String(state.goal || state.spec?.goal || '').trim();
-  return goal ? [`Satisfy the user goal with observable evidence: ${goal}`] : [];
-}
-
-function inferPolicyConstraints(policy = {}) {
-  const constraints = [];
-  if (policy.readOnly === true) constraints.push('read-only policy is active');
-  for (const tool of normalizeStringArray(policy.allowedTools)) constraints.push(`allowed tool: ${tool}`);
-  for (const tool of normalizeStringArray(policy.deniedTools)) constraints.push(`denied tool: ${tool}`);
-  for (const item of normalizeStringArray(policy.requireApproval)) constraints.push(`approval required: ${item}`);
-  if (policy.hostScope) constraints.push(`host scope: ${String(policy.hostScope)}`);
-  return constraints;
-}
-
-function inferRuntimeRisks({ failures = [], verifier = {}, sideEffectsNeedingVerification = [] } = {}) {
-  const risks = [];
-  if (failures.length > 0) risks.push(`${failures.length} unrecovered failure(s) exist`);
-  if (verifier?.required === true && verifier.ok !== true) risks.push('required runtime verification has not passed');
-  if (sideEffectsNeedingVerification.length > 0) risks.push(`${sideEffectsNeedingVerification.length} side effect(s) still need verification`);
-  return risks;
-}
-
-function summarizeWorldFacts(facts = [], limit = 12) {
-  return (Array.isArray(facts) ? facts : []).slice(-limit).map((item) => ({
-    id: item?.id || '',
-    text: compactText(item?.text || item?.summary || item?.content || '', 700),
-    source: item?.toolName ? `tool:${item.toolName}` : (item?.kind || item?.factType || 'world'),
-  })).filter((item) => item.text);
-}
-
-function summarizeObservationsAsFacts(observations = [], limit = 8) {
-  return (Array.isArray(observations) ? observations : []).slice(-limit)
-    .filter((item) => item?.ok === true && item?.isError !== true)
-    .map((item) => ({
-      id: item?.id || '',
-      text: compactText(item?.content || item?.stdoutExcerpt || item?.evidence?.[0] || '', 700),
-      source: item?.toolName ? `tool:${item.toolName}` : 'observation',
-    }))
-    .filter((item) => item.text);
-}
-
-function summarizeOpenQuestions(openQuestions = [], limit = 8) {
-  return (Array.isArray(openQuestions) ? openQuestions : []).slice(-limit).map((item) => {
-    if (typeof item === 'string') return item;
-    return {
-      id: item?.id || '',
-      text: item?.question || item?.text || '',
-      source: item?.source || 'world',
-    };
-  });
 }
 
 function mergeCognitionItems(current, incoming, defaultType, context, limit) {
@@ -289,16 +138,6 @@ function normalizeCognitionItem(value, defaultType, context = {}, index = 0) {
   };
 }
 
-function statusForCommand(type) {
-  if (type === 'act') return 'acting';
-  if (type === 'verify') return 'verifying';
-  if (type === 'recover') return 'recovering';
-  if (type === 'finalize') return 'finalizing';
-  if (type === 'block') return 'blocked';
-  if (['ask_user', 'request_secret', 'request_approval'].includes(type)) return 'waiting_for_input';
-  return 'deciding';
-}
-
 function ensureRuntimeState(state) {
   if (!state.runtimeState || typeof state.runtimeState !== 'object' || Array.isArray(state.runtimeState)) state.runtimeState = {};
   if (!state.runtimeState.cognition || typeof state.runtimeState.cognition !== 'object' || Array.isArray(state.runtimeState.cognition)) {
@@ -312,10 +151,6 @@ function ensureRuntimeMemory(state) {
   if (!state.memory || typeof state.memory !== 'object' || Array.isArray(state.memory)) state.memory = {};
   if (!Array.isArray(state.memory.cognition)) state.memory.cognition = [];
   return state.memory;
-}
-
-function normalizeStringArray(value) {
-  return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : [];
 }
 
 function nullableNumber(value) {
@@ -332,9 +167,6 @@ function compactText(value, maxLength) {
 
 module.exports = {
   applyAgentCognitionToState,
-  buildDecisionCognitionUpdate,
-  buildObservationCognitionUpdate,
-  buildPreDecisionCognitionUpdate,
   createAgentCognitionState,
   normalizeAgentStateDelta,
   summarizeCognition,

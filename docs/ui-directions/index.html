@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>1Shell UI Directions</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: linear-gradient(180deg, #eef5ff 0%, #f8fbff 42%, #edf3f7 100%);
+      --panel: rgba(255,255,255,0.74);
+      --panel-strong: rgba(255,255,255,0.92);
+      --line: rgba(124,148,178,0.2);
+      --text: #15304a;
+      --muted: #58728c;
+      --accent: #1292ff;
+      --accent-2: #16c5a4;
+      --shadow: 0 28px 72px rgba(24, 54, 86, 0.14);
+      --radius: 28px;
+      --font: "Segoe UI Variable", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; font-family: var(--font); color: var(--text); background: var(--bg); }
+    body::before, body::after {
+      content: "";
+      position: fixed;
+      inset: auto;
+      border-radius: 999px;
+      filter: blur(70px);
+      pointer-events: none;
+      opacity: .45;
+    }
+    body::before { width: 28rem; height: 28rem; top: -7rem; left: -6rem; background: rgba(18, 146, 255, .18); }
+    body::after { width: 26rem; height: 26rem; right: -5rem; bottom: -8rem; background: rgba(22, 197, 164, .14); }
+    .wrap { max-width: 1500px; margin: 0 auto; padding: 28px 24px 40px; position: relative; }
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .hero h1 { margin: 0 0 10px; font-size: clamp(34px, 4vw, 56px); line-height: 1; letter-spacing: -.02em; }
+    .hero p { margin: 0; max-width: 760px; color: var(--muted); font-size: 15px; line-height: 1.7; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 40px;
+      padding: 0 16px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.86);
+      border: 1px solid var(--line);
+      box-shadow: 0 12px 30px rgba(24, 54, 86, 0.08);
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      border-radius: var(--radius);
+      overflow: hidden;
+      backdrop-filter: blur(18px);
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid rgba(124,148,178,.14);
+      background: linear-gradient(180deg, rgba(255,255,255,.55), rgba(255,255,255,.15));
+    }
+    .card-head h2 { margin: 0; font-size: 18px; }
+    .card-head span { color: var(--muted); font-size: 13px; }
+    iframe {
+      display: block;
+      width: 100%;
+      height: 340px;
+      border: 0;
+      background: #fff;
+      pointer-events: none;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      padding: 16px 20px 20px;
+      background: rgba(255,255,255,.42);
+    }
+    .actions a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 120px;
+      height: 42px;
+      padding: 0 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(18,146,255,.18);
+      color: #116fd0;
+      text-decoration: none;
+      background: rgba(255,255,255,.86);
+      font-weight: 600;
+    }
+    .actions a.primary {
+      background: linear-gradient(135deg, #1394ff, #0b78e3);
+      color: #fff;
+      border-color: transparent;
+      box-shadow: 0 14px 28px rgba(17, 111, 208, 0.18);
+    }
+    @media (max-width: 1180px) {
+      .grid { grid-template-columns: 1fr; }
+      iframe { height: 420px; }
+    }
+    @media (max-width: 720px) {
+      .wrap { padding: 20px 14px 28px; }
+      .hero { flex-direction: column; align-items: start; }
+      iframe { height: 280px; }
+      .actions { flex-direction: column; }
+      .actions a { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <h1>1Shell 前端视觉方向</h1>
+        <p>下面是 3 套静态 HTML 方案，都是按你现在这个运维控制台的信息架构来画的，不是落地代码。你先挑顺眼的方向，我们再把那一套往真实 Vue 前端里改。</p>
+      </div>
+      <div class="badge"><span class="dot"></span>直接打开本页或下面的单独 HTML 即可预览</div>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <div class="card-head">
+          <div>
+            <h2>方案 A · Atlas</h2>
+            <span>偏全球总控视角，明亮、轻盈、地图感更强</span>
+          </div>
+        </div>
+        <iframe src="./01-atlas.html" title="Atlas"></iframe>
+        <div class="actions">
+          <a class="primary" href="./01-atlas.html">打开方案 A</a>
+          <a href="./02-workbench.html">顺看方案 B</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <div>
+            <h2>方案 B · Workbench</h2>
+            <span>偏专业工作台，信息密度更高，像真正干活的台面</span>
+          </div>
+        </div>
+        <iframe src="./02-workbench.html" title="Workbench"></iframe>
+        <div class="actions">
+          <a class="primary" href="./02-workbench.html">打开方案 B</a>
+          <a href="./03-nightshift.html">顺看方案 C</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <div>
+            <h2>方案 C · Nightshift</h2>
+            <span>偏夜间值守指挥台，终端和 Agent 的存在感更强</span>
+          </div>
+        </div>
+        <iframe src="./03-nightshift.html" title="Nightshift"></iframe>
+        <div class="actions">
+          <a class="primary" href="./03-nightshift.html">打开方案 C</a>
+          <a href="./01-atlas.html">回看方案 A</a>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

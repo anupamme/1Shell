@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>1Shell Atlas</title>
+  <style>
+    :root {
+      --bg: linear-gradient(180deg, #edf5ff 0%, #f7fbff 38%, #eff5fb 100%);
+      --panel: rgba(255,255,255,.72);
+      --panel-strong: rgba(255,255,255,.9);
+      --line: rgba(125, 153, 188, .18);
+      --text: #15324d;
+      --muted: #607d95;
+      --blue: #1492ff;
+      --cyan: #18c8c4;
+      --good: #12b981;
+      --warn: #ff9d2e;
+      --shadow: 0 24px 64px rgba(24, 54, 86, .12);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; font-family: "Segoe UI Variable", "PingFang SC", "Microsoft YaHei UI", sans-serif; background: var(--bg); color: var(--text); }
+    body::before, body::after { content: ""; position: fixed; border-radius: 999px; filter: blur(80px); opacity: .45; pointer-events: none; }
+    body::before { width: 30rem; height: 30rem; top: -8rem; left: -9rem; background: rgba(20, 146, 255, .18); }
+    body::after { width: 24rem; height: 24rem; right: -5rem; bottom: -6rem; background: rgba(24, 200, 196, .16); }
+    .app { max-width: 1500px; margin: 0 auto; padding: 24px; position: relative; }
+    .topbar, .panel, .hero, .tile { border: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: blur(18px); }
+    .topbar {
+      display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-radius: 22px;
+      background: rgba(255,255,255,.82); margin-bottom: 18px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 210px; }
+    .brand img { width: 38px; height: 38px; border-radius: 12px; }
+    .brand strong { display: block; font-size: 16px; }
+    .brand span { display: block; font-size: 12px; color: var(--muted); }
+    .nav, .tools, .metric-band, .queue, .hosts, .approval, .tiles { display: flex; gap: 10px; }
+    .nav { flex-wrap: wrap; }
+    .nav a, .tools span, .queue span, .approval span {
+      height: 38px; padding: 0 14px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center;
+      text-decoration: none; color: var(--muted); background: rgba(255,255,255,.62); border: 1px solid rgba(125,153,188,.14); font-size: 13px;
+    }
+    .nav a.active { color: #0d74d8; background: rgba(20,146,255,.12); border-color: rgba(20,146,255,.18); font-weight: 600; }
+    .tools { margin-left: auto; }
+    .hero {
+      display: grid; grid-template-columns: 1.06fr .94fr; gap: 20px; padding: 22px; border-radius: 30px; background: var(--panel);
+    }
+    .eyebrow { color: #0d74d8; font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 10px 0 12px; font-size: clamp(34px, 4vw, 54px); line-height: .98; }
+    .sub { margin: 0 0 18px; max-width: 680px; color: var(--muted); line-height: 1.7; font-size: 15px; }
+    .metric-band { flex-wrap: wrap; margin-bottom: 16px; }
+    .metric {
+      min-width: 160px; padding: 14px 16px; border-radius: 18px; background: var(--panel-strong); border: 1px solid rgba(125,153,188,.14);
+    }
+    .metric b { display: block; margin-bottom: 6px; font-size: 26px; }
+    .metric small { color: var(--muted); font-size: 12px; }
+    .queue { flex-wrap: wrap; }
+    .queue span { height: 34px; border-radius: 999px; }
+    .queue span.primary { color: #fff; background: linear-gradient(135deg, var(--blue), #0c79e7); border-color: transparent; }
+    .globe {
+      min-height: 390px; position: relative; overflow: hidden; border-radius: 28px;
+      background:
+        radial-gradient(circle at 50% 115%, rgba(20,146,255,.1), rgba(20,146,255,0) 50%),
+        linear-gradient(180deg, rgba(255,255,255,.76), rgba(242,248,255,.74));
+      border: 1px solid rgba(125,153,188,.14);
+    }
+    .globe::before, .globe::after {
+      content: ""; position: absolute; left: 50%; transform: translateX(-50%); border-radius: 50%;
+      border: 1px solid rgba(86, 135, 179, .16);
+    }
+    .globe::before { width: 94%; height: 76%; bottom: -18%; }
+    .globe::after { width: 66%; height: 54%; bottom: -6%; }
+    .gridline {
+      position: absolute; inset: 12% 8% 16%; border-radius: 50%;
+      background:
+        repeating-linear-gradient(90deg, rgba(110,149,183,.08) 0 1px, transparent 1px 12.5%),
+        repeating-linear-gradient(180deg, rgba(110,149,183,.08) 0 1px, transparent 1px 20%);
+      mask: radial-gradient(circle at 50% 82%, black 0 74%, transparent 74.5%);
+    }
+    .dot {
+      position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 4px solid var(--blue);
+      box-shadow: 0 0 0 10px rgba(20,146,255,.1), 0 0 22px rgba(20,146,255,.18);
+    }
+    .tag { position: absolute; padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,.92); border: 1px solid rgba(125,153,188,.14); color: #0d74d8; font-size: 12px; font-weight: 700; }
+    .summary {
+      position: absolute; right: 18px; top: 18px; width: 240px; padding: 16px; border-radius: 22px;
+      background: rgba(255,255,255,.84); border: 1px solid rgba(125,153,188,.14);
+    }
+    .summary h3, .panel h3 { margin: 0 0 4px; font-size: 17px; }
+    .summary p, .panel p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .summary .row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-top: 1px solid rgba(125,153,188,.12); margin-top: 10px; }
+    .summary .row b { font-size: 15px; }
+    .grid {
+      margin-top: 18px; display: grid; grid-template-columns: 290px minmax(0, 1fr) 320px; gap: 18px;
+    }
+    .panel { border-radius: 28px; padding: 18px; background: var(--panel); }
+    .panel-head { display: flex; justify-content: space-between; align-items: start; gap: 14px; margin-bottom: 14px; }
+    .pill { height: 28px; padding: 0 10px; border-radius: 999px; display: inline-flex; align-items: center; background: rgba(255,255,255,.72); color: #0d74d8; font-size: 12px; }
+    .host {
+      padding: 14px; border-radius: 18px; background: var(--panel-strong); border: 1px solid rgba(125,153,188,.14); margin-bottom: 10px;
+    }
+    .host strong, .line strong { display: block; margin-bottom: 5px; }
+    .host small { color: var(--muted); }
+    .bar { height: 8px; border-radius: 999px; overflow: hidden; background: rgba(125,153,188,.14); margin-top: 12px; }
+    .bar span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), var(--blue)); }
+    .step {
+      display: grid; grid-template-columns: 34px 1fr auto; gap: 12px; align-items: start;
+      padding: 14px; border-radius: 18px; background: var(--panel-strong); border: 1px solid rgba(125,153,188,.14); margin-bottom: 10px;
+    }
+    .step i {
+      width: 34px; height: 34px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center;
+      background: rgba(20,146,255,.12); color: #0d74d8; font-style: normal; font-weight: 700;
+    }
+    .step em { font-style: normal; color: var(--muted); font-size: 12px; }
+    .term {
+      margin-top: 14px; padding: 14px; border-radius: 22px; background: #0d1d2f; color: #d9e7f4; font: 13px/1.75 "Cascadia Code", "Consolas", monospace;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    .line { display: block; opacity: .92; }
+    .line.ok { color: #7ef0c2; }
+    .line.warn { color: #ffc46d; }
+    .line.dim { color: #8ea9c0; }
+    .approval { flex-direction: column; }
+    .approval span { justify-content: space-between; height: auto; min-height: 54px; padding: 12px 14px; border-radius: 18px; }
+    .approval b { display: block; margin-bottom: 4px; color: var(--text); }
+    .tiles { margin-top: 18px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .tile {
+      padding: 18px; border-radius: 24px; background: var(--panel); min-height: 144px;
+    }
+    .tile b { display: block; font-size: 22px; margin: 14px 0 6px; }
+    .tile small { color: #0d74d8; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
+    .tile p { margin: 0; color: var(--muted); line-height: 1.65; font-size: 13px; }
+    @media (max-width: 1180px) {
+      .hero, .grid, .tiles { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .app { padding: 14px; }
+      .topbar { flex-wrap: wrap; }
+      .tools { margin-left: 0; }
+      .globe { min-height: 300px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <img src="../../frontend/public/logo.png" alt="1Shell">
+        <div><strong>1Shell</strong><span>Atlas Control Plane</span></div>
+      </div>
+      <nav class="nav">
+        <a class="active" href="#">主页</a>
+        <a href="#">Agent</a>
+        <a href="#">终端</a>
+        <a href="#">面板</a>
+      </nav>
+      <div class="tools"><span>3 台在线</span><span>1 条待审批</span><span>主题</span></div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow">GLOBAL OPERATIONS</div>
+        <h1>全域主机、任务流和 Agent 协作放到同一张总控视图</h1>
+        <p class="sub">在线主机 3 台，跨 2 个国家，最近 24 小时脚本成功率 98.7%，当前仅有 1 条高风险动作待审批。</p>
+        <div class="metric-band">
+          <div class="metric"><b>03</b><small>在线主机</small></div>
+          <div class="metric"><b>11</b><small>运行中的任务</small></div>
+          <div class="metric"><b>98.7%</b><small>今日成功率</small></div>
+        </div>
+        <div class="queue">
+          <span class="primary">AI 创建任务</span>
+          <span>香港链路延迟稳定</span>
+          <span>法兰克福 Agent 就绪</span>
+          <span>待处理审计 2 条</span>
+        </div>
+      </div>
+
+      <div class="globe">
+        <div class="gridline"></div>
+        <div class="dot" style="left:74%;top:58%;"></div>
+        <div class="tag" style="left:76%;top:53%;">HK</div>
+        <div class="dot" style="left:57%;top:42%;border-color:#18c8c4;box-shadow:0 0 0 10px rgba(24,200,196,.1),0 0 22px rgba(24,200,196,.18);"></div>
+        <div class="tag" style="left:59%;top:37%;color:#0d8f8a;">CH</div>
+        <div class="summary">
+          <h3>主机总览</h3>
+          <p>地图区域保留了你现在首页的“全球态势”概念，但让右上摘要和落点信息更像成体系的产品。</p>
+          <div class="row"><span>主机总数</span><b>3</b></div>
+          <div class="row"><span>正常运行</span><b style="color:var(--good)">3</b></div>
+          <div class="row"><span>异常事件</span><b style="color:var(--warn)">0</b></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <aside class="panel">
+        <div class="panel-head"><div><h3>主机态势</h3><p>左栏不再发空，改成更强的运行态和资源浓度。</p></div><span class="pill">HOSTS</span></div>
+        <div class="host"><strong>vip-hk</strong><small>root@82.158.226.220</small><div class="bar"><span style="width:82%"></span></div></div>
+        <div class="host"><strong>local-shell</strong><small>Windows 11 / Local Agent</small><div class="bar"><span style="width:54%"></span></div></div>
+        <div class="host"><strong>edge-ch</strong><small>Debian 13 / Probe Relay</small><div class="bar"><span style="width:67%"></span></div></div>
+      </aside>
+
+      <section class="panel">
+        <div class="panel-head"><div><h3>执行链</h3><p>中区把“任务”从空白状态换成真正可扫读的步骤流和终端摘录。</p></div><span class="pill">RUNBOOK</span></div>
+        <div class="step"><i>1</i><div><strong>收集香港节点负载与磁盘快照</strong><em>Probe + Host Exec</em></div><em>已完成</em></div>
+        <div class="step"><i>2</i><div><strong>生成修复脚本并写入草稿区</strong><em>AI Task + Script Draft</em></div><em>执行中</em></div>
+        <div class="step"><i>3</i><div><strong>审批后批量推送到选定主机</strong><em>Approval Gate</em></div><em>待审批</em></div>
+        <div class="term">
+          <span class="line dim">$ probe host vip-hk --window 15m</span>
+          <span class="line ok">cpu: 24%  mem: 61%  disk: 48%  rx: 7.4 MiB/s</span>
+          <span class="line dim">$ ai-draft repair --target vip-hk</span>
+          <span class="line warn">approval required: write_remote_file /etc/nginx/nginx.conf</span>
+          <span class="line dim">$ waiting for operator...</span>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-head"><div><h3>AI 协作</h3><p>右栏强调“你和 Agent 一起做事”，不再像空白聊天框。</p></div><span class="pill">COPILOT</span></div>
+        <div class="approval">
+          <span><div><b>写入 nginx 配置</b><small>目标：vip-hk</small></div><small>高风险</small></span>
+          <span><div><b>重启容器栈</b><small>目标：edge-ch</small></div><small>已排队</small></span>
+          <span><div><b>刷新 MCP 注册表</b><small>范围：全局</small></div><small>低风险</small></span>
+        </div>
+      </aside>
+    </section>
+
+    <section class="tiles">
+      <article class="tile"><small>Panel</small><b>程序面板</b><p>从单纯的三栏空状态，改成“左边筛选，中间任务，右边结果”的强节奏。</p></article>
+      <article class="tile"><small>Terminal</small><b>终端控制台</b><p>保留你熟悉的主机切换方式，但让顶部上下文、脚本、AI 命令更整齐地并入工具带。</p></article>
+      <article class="tile"><small>Agent</small><b>目标驱动</b><p>把时间线、工具调用、回放和审批模式做得更像一个执行 cockpit，而不是单纯聊天页。</p></article>
+      <article class="tile"><small>Probe</small><b>态势卡片</b><p>探针数据更适合挂在总控页和右栏摘要里，不必单独显得零散。</p></article>
+    </section>
+  </main>
+</body>
+</html>

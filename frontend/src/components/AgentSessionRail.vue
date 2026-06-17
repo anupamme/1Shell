@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from '@/components/AppIcon.vue';
+import AgentToolsRail from '@/components/AgentToolsRail.vue';
 import { useFileBrowser, type DirItem } from '@/composables/useFileBrowser';
 import type { HostInfo } from '@/utils/scripts';
 
-type RailTab = 'chat' | 'files' | 'hosts';
+type RailTab = 'chat' | 'files' | 'tools';
 
 interface SessionMeta {
   id: string;
@@ -53,11 +54,9 @@ const emit = defineEmits<{
   (e: 'delete', id: string): void;
   (e: 'update:activeTab', tab: RailTab): void;
   (e: 'select-host', id: string): void;
-  (e: 'new-host-session', id: string): void;
 }>();
 
 const keyword = ref('');
-const hostKeyword = ref('');
 const renamingId = ref<string | null>(null);
 const renameText = ref('');
 const fileHostId = ref('local');
@@ -67,15 +66,10 @@ const fb = useFileBrowser({ hostId: fileHostId, singleton: false });
 const tabs: Array<{ key: RailTab; label: string; icon: string }> = [
   { key: 'chat', label: '对话', icon: 'terminal' },
   { key: 'files', label: '文件', icon: 'folder' },
-  { key: 'hosts', label: '主机列表', icon: 'server' },
+  { key: 'tools', label: 'Tools', icon: 'wrench' },
 ];
 
 const hostList = computed(() => props.hosts || []);
-const filteredHosts = computed(() => {
-  const kw = hostKeyword.value.trim().toLowerCase();
-  if (!kw) return hostList.value;
-  return hostList.value.filter((h) => `${h.name || ''} ${h.host || ''} ${h.id || ''}`.toLowerCase().includes(kw));
-});
 
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase();
@@ -443,46 +437,7 @@ function isFocusedItem(item: DirItem): boolean {
     </template>
 
     <template v-else>
-      <div class="shrink-0 px-3 py-2 border-b border-slate-200 dark:border-white/[0.05]">
-        <div class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">主机列表</div>
-        <input
-          v-model="hostKeyword"
-          type="text"
-          placeholder="搜索主机..."
-          class="mt-2 w-full px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-[#0b0f19] border border-slate-200 dark:border-white/[0.06] rounded-lg focus:outline-none focus:border-emerald-400/30 placeholder:text-slate-400 dark:placeholder:text-slate-600 transition-colors"
-        />
-      </div>
-      <div class="flex-1 overflow-y-auto px-2 py-2">
-        <div v-if="!filteredHosts.length" class="px-2 py-8 text-center text-xs text-slate-400 dark:text-slate-600">暂无主机</div>
-        <div
-          v-for="host in filteredHosts"
-          :key="host.id"
-          class="w-full mb-1 rounded-lg border px-2.5 py-2 transition-colors"
-          :class="props.selectedHostId === host.id ? 'border-emerald-300 dark:border-emerald-400/25 bg-emerald-50 dark:bg-emerald-400/10' : 'border-transparent hover:bg-white dark:hover:bg-white/[0.04]'"
-        >
-          <div class="flex items-center gap-2">
-            <button
-              type="button"
-              class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 cursor-pointer"
-              :class="props.selectedHostId === host.id ? 'bg-emerald-100 dark:bg-emerald-400/15 text-emerald-600 dark:text-emerald-300' : 'bg-slate-100 dark:bg-white/[0.05] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'"
-              title="切换到这台主机"
-              @click="selectHost(host.id)"
-            >
-              <AppIcon name="server" :size="14" />
-            </button>
-            <button type="button" class="min-w-0 flex-1 text-left cursor-pointer" @click="selectHost(host.id)">
-              <div class="text-xs font-semibold truncate" :class="props.selectedHostId === host.id ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-200'">{{ host.name || host.id }}</div>
-              <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600 truncate">{{ host.host || host.id }}</div>
-            </button>
-            <button
-              type="button"
-              class="h-7 px-2 rounded-md border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-white dark:hover:bg-white/[0.04] cursor-pointer transition-colors"
-              title="以这台主机新建对话"
-              @click="emit('new-host-session', host.id)"
-            >新对话</button>
-          </div>
-        </div>
-      </div>
+      <AgentToolsRail embedded />
     </template>
   </aside>
 </template>

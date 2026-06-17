@@ -581,9 +581,46 @@ function attachmentSummaryLine(att) {
   return `- ${att.name} (${type}, ${att.mime}, ${attachmentSizeLabel(att.size || att.binaryBytes)})${att.error ? `: ${att.error}` : ''}`;
 }
 
-function buildAgentUserContent({ firstContextBlock = '', message = '', attachments = [] }) {
+function normalizeGoalStatus(value) {
+  const text = String(value || '').trim();
+  return ['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'].includes(text)
+    ? text
+    : 'active';
+}
+
+function normalizeRuntimeGoalContext(context = null) {
+  const ctx = context && typeof context === 'object' && !Array.isArray(context) ? context : {};
+  const threadGoal = ctx.threadGoal && typeof ctx.threadGoal === 'object' && !Array.isArray(ctx.threadGoal)
+    ? ctx.threadGoal
+    : {};
+  const objective = String(threadGoal.objective || ctx.agentGoal || ctx.goal || '').replace(/\r\n/g, '\n').trim();
+  if (!objective) return null;
+  const updatedAt = String(threadGoal.updatedAt || ctx.goalUpdatedAt || '').trim();
+  return {
+    objective: objective.length > 4000 ? objective.slice(0, 4000) : objective,
+    status: normalizeGoalStatus(threadGoal.status || ctx.goalStatus),
+    updatedAt,
+  };
+}
+
+function indentMultiline(value) {
+  return String(value || '').replace(/\n/g, '\n  ');
+}
+
+function buildRunContextBlock(context = null) {
+  const goal = normalizeRuntimeGoalContext(context);
+  if (!goal) return '';
+  return [
+    '**Current 1Shell goal**:',
+    `- objective: ${indentMultiline(goal.objective)}`,
+    `- status: ${goal.status}`,
+    goal.updatedAt ? `- updatedAt: ${goal.updatedAt}` : '',
+  ].filter(Boolean).join('\n') + '\n\n';
+}
+
+function buildAgentUserContent({ firstContextBlock = '', runContextBlock = '', message = '', attachments = [] }) {
   const normalized = normalizeAgentAttachments(attachments);
-  const text = `${firstContextBlock || ''}${message || ''}`.trim();
+  const text = `${firstContextBlock || ''}${runContextBlock || ''}${message || ''}`.trim();
   if (!normalized.length) return text;
 
   const blocks = [{ type: 'text', text: text || '请分析附件。' }];
@@ -1933,7 +1970,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
               runId,
               toolUseId: tc.id,
               name: tc.name,
-              result: toolContentPreview(result?.content || '').substring(0, 4000),
+              result: clientToolResultForFrontend(tc.name, result),
               is_error: isIdeToolResultError(result),
             });
           }
@@ -2086,6 +2123,15 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     }
   }
 
+  function clientToolResultForFrontend(toolName, result = {}) {
+    const contentText = toolContentPreview(result?.content || '');
+    if (String(toolName || '') === 'list_hosts') {
+      const parsed = parseToolResultJson(contentText);
+      if (parsed) return parsed;
+    }
+    return contentText.substring(0, 4000);
+  }
+
   function formatObservationContentForProvider(observation = {}) {
     const body = toolContentPreview(
       observation.content
@@ -2104,6 +2150,19 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       observation.error ? `error=${String(observation.error).slice(0, 1000)}` : '',
       observation.summary ? `summary=${String(observation.summary).slice(0, 1000)}` : '',
     ].filter(Boolean);
+    if (observation.toolName === 'list_hosts') {
+      const parsed = parseToolResultJson(body);
+      const hosts = parsed?.data && typeof parsed.data === 'object' && Array.isArray(parsed.data.hosts)
+        ? parsed.data.hosts
+        : [];
+      if (hosts.length > 0) {
+        lines.push(
+          'structured_result=list_hosts',
+          `host_count=${hosts.length}`,
+          'display_note=The UI renders exact host fields from this structured result. In final prose, summarize the count and refer to the rendered list instead of rewriting ID/IP/address tables.',
+        );
+      }
+    }
     if (lines.length === 0) return body;
     return [lines.join('\n'), body].filter(Boolean).join('\n\n');
   }
@@ -2367,8 +2426,29 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     const hosts = hostService?.listHosts?.() || [];
     const allowedHosts = policy.allowedHosts || [];
     const visible = hosts.filter((host) => allowsValue(host.id, allowedHosts));
-    const lines = visible.map(h => `id=${h.id}  name=${h.name}  ${h.host || '127.0.0.1'}:${h.port || '-'}  type=${h.type || 'ssh'}`);
-    return { content: lines.length > 0 ? lines.join('\n') : '（无允许访问的主机）', is_error: false };
+    const normalized = visible.map((host) => {
+      const type = String(host.type || 'ssh').trim() || 'ssh';
+      const id = String(host.id || '').trim();
+      const name = String(host.name || id || '').trim();
+      const hostAddress = type === 'local' ? '127.0.0.1' : String(host.host || '127.0.0.1').trim();
+      const port = type === 'local' ? null : (Number(host.port) || 22);
+      return {
+        id,
+        name,
+        host: hostAddress,
+        port,
+        address: port ? `${hostAddress}:${port}` : hostAddress,
+        type,
+      };
+    }).filter((host) => host.id);
+    return {
+      content: formatJson({
+        ok: true,
+        summary: normalized.length > 0 ? '主机列表读取成功' : '无允许访问的主机',
+        data: { hosts: normalized },
+      }),
+      is_error: false,
+    };
   }
 
   function applyToolPolicy(tc, session) {
@@ -2621,6 +2701,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
   function getOrCreateSession(sessionId, context, entry, approvalMode = null) {
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
+      session.updatedAt = new Date().toISOString();
       applyPromptEntry(session, entry, approvalMode);
       session.taskRepair = normalizeTaskRepairScope(context, session.entry);
       if (context?.toolPolicy) session.toolPolicy = normalizeToolPolicy(context.toolPolicy);
@@ -2664,6 +2745,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       system: promptForEntry(promptEntry),
       contextBlock,
       hostId: context?.hosts?.[0]?.id || 'local',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       abortController: null,
       activeChildProcess: null,
       cancelHandlers: new Set(),
@@ -2893,6 +2976,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       if (!ideSessionRepository?.upsertSession || !isPersistableSessionId(sessionId)) return;
       const messages = Array.isArray(session?.messages) ? session.messages : [];
       if (messages.length === 0) return;
+      session.updatedAt = new Date().toISOString();
       ideSessionRepository.upsertSession({
         id: sessionId,
         title: session.firstUserMessage ? session.firstUserMessage.slice(0, 60) : deriveSessionTitle(messages),
@@ -2955,12 +3039,79 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return items;
   }
 
-  function listSessions(opts) {
-    return ideSessionRepository?.listSessions ? ideSessionRepository.listSessions(opts) : { sessions: [], total: 0 };
+  function sessionRecordToMeta(record) {
+    if (!record) return null;
+    return {
+      id: record.id,
+      title: record.title || '',
+      entry: record.entry || 'core',
+      hostId: record.hostId || '',
+      modelLabel: record.modelLabel || '',
+      messageCount: record.messageCount || 0,
+      preview: record.preview || '',
+      createdAt: record.createdAt || record.created_at || '',
+      updatedAt: record.updatedAt || record.updated_at || '',
+    };
+  }
+
+  function liveSessionMeta(sessionId, session, existing = null) {
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+    if (!session?.currentRunId && messages.length === 0) return null;
+    const createdAt = existing?.createdAt || session.createdAt || session.updatedAt || new Date().toISOString();
+    const updatedAt = session.updatedAt || session.detachedAt || existing?.updatedAt || createdAt;
+    return {
+      id: sessionId,
+      title: existing?.title || (session.firstUserMessage ? session.firstUserMessage.slice(0, 60) : deriveSessionTitle(messages)),
+      entry: session.entry || existing?.entry || 'core',
+      hostId: session.hostId || existing?.hostId || '',
+      modelLabel: existing?.modelLabel || '',
+      messageCount: messages.length || existing?.messageCount || 0,
+      preview: deriveSessionPreview(messages) || existing?.preview || '',
+      createdAt,
+      updatedAt,
+      running: Boolean(session.currentRunId && !session.cancelled),
+      awaitingApproval: Boolean(session.awaitingApproval),
+    };
+  }
+
+  function listSessions(opts = {}) {
+    const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 200, 1), 500);
+    const offset = Math.max(parseInt(opts.offset, 10) || 0, 0);
+    const keyword = String(opts.keyword || '').trim().toLowerCase();
+    const rows = new Map();
+
+    if (ideSessionRepository?.listSessions) {
+      const stored = ideSessionRepository.listSessions({ limit: 500, offset: 0 })?.sessions || [];
+      for (const row of stored) {
+        const meta = sessionRecordToMeta(row);
+        if (meta?.id) rows.set(meta.id, meta);
+      }
+    }
+
+    for (const [sessionId, session] of sessions) {
+      if (!isPersistableSessionId(sessionId)) continue;
+      const meta = liveSessionMeta(sessionId, session, rows.get(sessionId));
+      if (meta?.id) rows.set(meta.id, meta);
+    }
+
+    let list = [...rows.values()];
+    if (keyword) {
+      list = list.filter((row) => `${row.title || ''} ${row.preview || ''}`.toLowerCase().includes(keyword));
+    }
+    list.sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''));
+    return { sessions: list.slice(offset, offset + limit), total: list.length };
   }
 
   function getSessionDetail(id) {
     const record = ideSessionRepository?.getSession?.(id);
+    const live = sessions.get(id);
+    if (live && (live.currentRunId || (Array.isArray(live.messages) && live.messages.length))) {
+      const meta = liveSessionMeta(id, live, sessionRecordToMeta(record));
+      return {
+        ...meta,
+        timeline: projectMessagesToTimeline(live.messages),
+      };
+    }
     if (!record) return null;
     return {
       id: record.id,
@@ -3051,10 +3202,13 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     repairDanglingToolUseMessages(session.messages);
 
     const firstContextBlock = session.messages.length === 0 && session.contextBlock ? session.contextBlock : '';
-    const userContent = buildAgentUserContent({ firstContextBlock, message, attachments });
+    const runContextBlock = buildRunContextBlock(runContext);
+    const userContent = buildAgentUserContent({ firstContextBlock, runContextBlock, message, attachments });
 
     session.messages.push({ role: 'user', content: userContent });
     if (!session.firstUserMessage) session.firstUserMessage = String(message || '').trim();
+    session.updatedAt = new Date().toISOString();
+    persistSessionSafe(sessionId, session, { modelLabel: '' });
     createUserRewindCheckpoint(session, message);
     recordTraceEvent('instruction', 'instruction_received', {
       source: 'ide',

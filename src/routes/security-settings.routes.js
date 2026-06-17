@@ -57,7 +57,8 @@ function createSecuritySettingsRouter({ securitySettingsService, bridgeService, 
         error: result.exitCode === 0 ? undefined : result.stderr,
         details: JSON.stringify({ agentUser }),
       });
-      res.json({
+      // 提权脚本失败时返回 502，避免客户端把失败的特权操作当成功
+      res.status(result.exitCode === 0 ? 200 : 502).json({
         ok: result.exitCode === 0,
         hostId,
         agentUser,

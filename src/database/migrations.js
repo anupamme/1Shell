@@ -500,6 +500,19 @@ const migrations = [
       `);
     },
   },
+  {
+    version: 13,
+    name: 'host preferences: repository order',
+    up(db) {
+      if (!columnExists(db, 'host_preferences', 'repository_order')) {
+        db.exec('ALTER TABLE host_preferences ADD COLUMN repository_order INTEGER NOT NULL DEFAULT 0');
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_host_preferences_repository_order
+          ON host_preferences(repository_order);
+      `);
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

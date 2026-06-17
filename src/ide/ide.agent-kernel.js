@@ -101,10 +101,26 @@ function shouldRequestAgentApproval(toolName, { readonlyTools, sideEffectTools, 
   return false;
 }
 
-function createIdeAgentGoalProfile({ entry = 'core' } = {}) {
+function normalizeIdeGoalStatus(value) {
+  const text = String(value || '').trim();
+  return ['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'].includes(text)
+    ? text
+    : 'active';
+}
+
+function createIdeAgentGoalProfile({ message = '', context = null, entry = 'core' } = {}) {
+  const ctx = context && typeof context === 'object' && !Array.isArray(context) ? context : {};
+  const threadGoal = ctx.threadGoal && typeof ctx.threadGoal === 'object' && !Array.isArray(ctx.threadGoal)
+    ? ctx.threadGoal
+    : {};
+  const objective = String(threadGoal.objective || ctx.agentGoal || ctx.goal || '').replace(/\r\n/g, '\n').trim();
+  const status = objective ? normalizeIdeGoalStatus(threadGoal.status || ctx.goalStatus) : '';
   return {
-    intent: '',
-    goalKind: '',
+    intent: String(message || '').trim().slice(0, 500),
+    objective: objective.slice(0, 4000),
+    status,
+    active: Boolean(objective && status === 'active'),
+    goalKind: objective ? 'thread_goal' : '',
     entry: String(entry || 'core').trim().toLowerCase(),
   };
 }

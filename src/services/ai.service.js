@@ -151,6 +151,8 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
             'Content-Type': 'application/json',
             Authorization: `Bearer ${key}`,
           },
+          // 防止上游 socket 永久挂起占用连接
+          timeout: 60000,
           body: JSON.stringify({
             model,
             messages,
@@ -428,21 +430,18 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
 
   async function fetchModelList(body = {}) {
     const { base, key } = resolveConfig(body);
-    const paths = ['/models', '/models'];
-    for (const p of paths) {
-      try {
-        const res = await fetchImpl(`${base}${p}`, {
-          headers: { Authorization: `Bearer ${key}` },
-          timeout: 8000,
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.data && Array.isArray(data.data)) {
-            return data.data.map((m) => m.id).filter(Boolean);
-          }
+    try {
+      const res = await fetchImpl(`${base}/models`, {
+        headers: { Authorization: `Bearer ${key}` },
+        timeout: 8000,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.data && Array.isArray(data.data)) {
+          return data.data.map((m) => m.id).filter(Boolean);
         }
-      } catch { /* try next */ }
-    }
+      }
+    } catch { /* fall through to empty list */ }
     return [];
   }
 

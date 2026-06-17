@@ -29,6 +29,7 @@ export interface HostPreference {
   hostId: string;
   showInConsole: boolean;
   consoleOrder: number;
+  repositoryOrder: number;
   pinned: boolean;
   role: HostRole | null;
   tags: string[];

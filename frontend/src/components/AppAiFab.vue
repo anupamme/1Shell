@@ -44,7 +44,7 @@ const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
 const MODULE_MAP: Record<string, ModuleContext> = {
   console: { name: '主控', icon: 'console', hint: '当前在主控页面。可结合主机和终端上下文处理运维目标。' },
   features: { name: '功能', icon: 'wrench', hint: '当前在功能页面。可管理 AI 任务和纯代码程序。' },
-  skills: { name: 'Skill 仓库', icon: 'package', hint: '当前在 Skill 仓库页面。可查看和运行已有能力。' },
+  skills: { name: '扩展', icon: 'package', hint: '当前在扩展页面。可管理 Skill、远程 MCP 和本地 MCP。' },
   probe: { name: '探针监控', icon: 'radio', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
   audit: { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },
   hosts: { name: '主机', icon: 'server', hint: '当前在主机页面。可查看和管理连接目标。' },

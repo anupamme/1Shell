@@ -235,14 +235,14 @@ watch(() => hosts.filterKeyword, () => {
 
 <template>
   <!-- auth gate 由 App.vue 顶层负责；这里假定已登录。 -->
-  <!-- 主壳。h-screen + overflow-hidden 强制占满 viewport,杜绝内部内容撑大整页 -->
-  <div class="flex flex-col min-w-0 p-2 h-screen min-h-0 overflow-hidden">
+  <!-- 主壳。吃满 AppHeader 下方的父容器高度,杜绝内部内容撑大整页 -->
+  <div class="console-page flex flex-col min-w-0 p-2 h-full min-h-0 overflow-hidden">
     <!-- 三栏主内容 -->
-    <div class="flex flex-1 gap-2 min-h-0">
+    <div class="console-workspace flex flex-1 gap-2 min-h-0">
 
       <!-- 左栏：主机 / 文件 tab 切换 -->
       <aside
-        class="w-[20%] shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out border border-slate-200/70 dark:border-[#1e293b] bg-white/60 dark:bg-[#0b1324]/80 backdrop-blur-sm"
+        class="console-paper-panel console-side-panel w-[20%] shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
         :class="{ hidden: sidebarCollapsed || terminalFullscreen }"
       >
         <div class="ai-side-tabs">
@@ -290,7 +290,7 @@ watch(() => hosts.filterKeyword, () => {
       </aside>
 
       <!-- 中栏：终端（刀 2 填充） -->
-      <main class="flex-1 flex flex-col min-w-0 min-h-0 rounded-2xl overflow-hidden">
+      <main class="console-paper-panel console-terminal-panel flex-1 flex flex-col min-w-0 min-h-0 rounded-2xl overflow-hidden">
         <TerminalArea
           :host-name="probe.displayName.value"
           :cpu="probe.cpuText.value"
@@ -310,7 +310,7 @@ watch(() => hosts.filterKeyword, () => {
       <!-- 宽度跟随 tab：IDE/Agent 激活时 w-[40%]（整体 2:4:4 同老版 setIdePanelOpen/setAgentPanelOpen）；AI Chat 时 w-[20%] -->
       <aside
         v-if="!aiPanelCollapsed && !terminalFullscreen"
-        class="shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
+        class="console-paper-panel console-side-panel shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
         :class="rightTab === 'ide' || rightTab === 'agent' ? 'w-[40%]' : 'w-[20%]'"
       >
         <!-- tab 头：feedback-right-aside-tabs 拍板 -->

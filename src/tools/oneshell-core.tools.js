@@ -12,6 +12,22 @@ function commandHasTruncationMarker(command) {
   return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
 }
 
+function normalizeHostForTool(host = {}) {
+  const type = String(host.type || 'ssh').trim() || 'ssh';
+  const id = String(host.id || '').trim();
+  const name = String(host.name || id || '').trim();
+  const hostAddress = type === 'local' ? '127.0.0.1' : String(host.host || '127.0.0.1').trim();
+  const port = type === 'local' ? null : (Number(host.port) || 22);
+  return {
+    id,
+    name,
+    host: hostAddress,
+    port,
+    address: port ? `${hostAddress}:${port}` : hostAddress,
+    type,
+  };
+}
+
 const EXEC_SCHEMA = {
   type: 'object',
   properties: {
@@ -630,11 +646,9 @@ function createOneShellCoreTools(deps = {}) {
     const allowedHosts = Array.isArray(context.allowedHosts) ? context.allowedHosts : [];
     const hosts = (deps.hostService?.listHosts?.() || [])
       .filter((h) => context.exposure !== 'remote' || allowedHosts.length === 0 || allowedHosts.includes('*') || allowedHosts.includes(h.id))
-      .map((h) => {
-        const addr = h.type === 'local' ? '127.0.0.1:-' : `${h.host || '127.0.0.1'}:${h.port || 22}`;
-        return `id=${h.id}  name=${h.name}  ${addr}  type=${h.type || 'ssh'}`;
-      });
-    return ok(hosts.length > 0 ? hosts.join('\n') : '（无允许访问的主机）');
+      .map(normalizeHostForTool)
+      .filter((h) => h.id);
+    return structured(true, hosts.length > 0 ? '主机列表读取成功' : '无允许访问的主机', { hosts });
   }
 
   async function handleAskOneShellAi(input, context) {

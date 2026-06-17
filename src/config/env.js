@@ -19,6 +19,9 @@ function parsePositiveInt(value, fallback) {
 }
 
 const PORT = Math.max(1, parseInt(process.env.PORT || '3301', 10)) || 3301;
+// 监听地址：默认空。空值时由 server.js 按是否配置了登录凭据决定——
+// 配置了凭据则绑 0.0.0.0（对外），未配置则只绑 127.0.0.1（仅本机，安全默认）。
+const BIND_HOST = (process.env.HOST || process.env.BIND_HOST || '').trim();
 const PUBLIC_SERVER_URL = (process.env.PUBLIC_SERVER_URL || process.env.ONESHELL_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const ENV_API_BASE = (process.env.OPENAI_API_BASE || 'https://api.openai.com/v1').replace(/\/$/, '');
 const ENV_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -32,6 +35,8 @@ const SESSION_TTL_MS = Math.max(1, parseInt(process.env.APP_SESSION_TTL_HOURS ||
 const AUTH_USERNAME = process.env.APP_LOGIN_USERNAME || 'admin';
 const AUTH_PASSWORD = process.env.APP_LOGIN_PASSWORD || 'admin';
 const USING_DEFAULT_CREDENTIALS = !process.env.APP_LOGIN_USERNAME || !process.env.APP_LOGIN_PASSWORD;
+// 鉴权是否真正启用：用户名和密码都配置了才算。auth.service 据此决定是否放行。
+const AUTH_ENABLED = Boolean(process.env.APP_LOGIN_USERNAME && process.env.APP_LOGIN_PASSWORD);
 const PROBE_TIMEOUT_MS = parsePositiveInt(process.env.PROBE_TIMEOUT_MS, 12000);
 const PROBE_INTERVAL_MS = parsePositiveInt(process.env.PROBE_INTERVAL_MS, 60000);
 const PROBE_REMOTE_CONCURRENCY = parsePositiveInt(process.env.PROBE_REMOTE_CONCURRENCY, 3);
@@ -50,6 +55,17 @@ const TRUSTED_PROXY_IPS = (process.env.TRUSTED_PROXY_IPS || '')
 const BRIDGE_TOKEN = (process.env.BRIDGE_TOKEN || '').trim();
 const BRIDGE_EXEC_TIMEOUT_MS = parsePositiveInt(process.env.BRIDGE_EXEC_TIMEOUT_MS, 30000);
 const PROXY_TOKEN = (process.env.PROXY_TOKEN || '').trim();
+
+// 判断一个监听地址是否仅本机可达（loopback）。
+// 0.0.0.0 / :: / 空 视为对外暴露；127.x / ::1 / localhost 视为仅本机。
+function isLoopbackBindHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (!h) return false;
+  if (h === 'localhost') return true;
+  if (h === '::1') return true;
+  if (h.startsWith('127.')) return true;
+  return false;
+}
 
 function updateCredentials(username, password) {
   let content = '';
@@ -103,5 +119,8 @@ module.exports = {
   PROXY_TOKEN,
   TRUSTED_PROXY_IPS,
   USING_DEFAULT_CREDENTIALS,
+  AUTH_ENABLED,
+  BIND_HOST,
+  isLoopbackBindHost,
   updateCredentials,
 };

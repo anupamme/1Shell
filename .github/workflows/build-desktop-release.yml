@@ -129,8 +129,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           gh release view "$env:RELEASE_TAG" | Out-Null
+          # 安装包 + electron-updater 元数据（latest*.yml / .blockmap），后者缺失会导致自动更新检测不到新版本
           $files = @(Get-ChildItem -Path release/desktop -File | Where-Object {
-            $_.Name -match '^1shell-desktop-.*\.(exe|zip|dmg|AppImage)$'
+            $_.Name -match '^1shell-desktop-.*\.(exe|zip|dmg|AppImage)$' -or
+            $_.Name -match '\.blockmap$' -or
+            $_.Name -match '^latest.*\.yml$'
           } | ForEach-Object { $_.FullName })
           if ($files.Count -eq 0) { throw 'No desktop release files found.' }
           gh release upload "$env:RELEASE_TAG" @files --clobber

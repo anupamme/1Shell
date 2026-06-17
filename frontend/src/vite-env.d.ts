@@ -13,12 +13,29 @@ interface OneShellDesktopSettings {
   envFile: string;
 }
 
+interface OneShellUpdateState {
+  supported: boolean;
+  currentVersion: string;
+  githubUrl: string;
+  releasesUrl: string;
+  status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error' | 'unsupported';
+  version: string;
+  releaseNotes: string;
+  percent: number;
+  error: string;
+}
+
 interface OneShellDesktopBridge {
   isDesktop: boolean;
   getSettings(): Promise<OneShellDesktopSettings>;
   updateSettings(patch: Partial<Pick<OneShellDesktopSettings, 'startAtLogin' | 'backgroundOnClose'>>): Promise<OneShellDesktopSettings>;
   openWindow(): Promise<OneShellDesktopSettings>;
   quit(): Promise<void>;
+  getUpdateState(): Promise<OneShellUpdateState>;
+  checkUpdate(): Promise<OneShellUpdateState>;
+  downloadUpdate(): Promise<OneShellUpdateState>;
+  installUpdate(): Promise<boolean>;
+  onUpdateState(callback: (state: OneShellUpdateState) => void): () => void;
 }
 
 interface Window {

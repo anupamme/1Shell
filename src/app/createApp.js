@@ -34,15 +34,22 @@ function createApp(rootDir) {
   const spaBuilt = fs.existsSync(spaIndex);
 
   if (spaBuilt) {
+    const setAppCacheHeaders = (res) => {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+      res.set('Surrogate-Control', 'no-store');
+    };
     app.get('/', (req, res) => res.redirect(302, '/app/'));
     app.use('/app', express.static(frontendDist, {
-      maxAge: '1h',
-      setHeaders: (res, filePath) => {
-        if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-cache');
-      },
+      etag: false,
+      lastModified: false,
+      maxAge: 0,
+      setHeaders: setAppCacheHeaders,
     }));
     // SPA fallback：未匹配静态资源的 /app/* 路径交给 Vue Router
     app.get(/^\/app(?:\/.*)?$/, (req, res, next) => {
+      setAppCacheHeaders(res);
       res.sendFile(spaIndex, (err) => { if (err) next(err); });
     });
   }

@@ -39,11 +39,11 @@ function registerSessionSocketHandlers(io, { sessionService }) {
     socket.on('session:input', (payload = {}) => {
       try {
         const validated = validateSessionInputPayload(payload);
-        log.info('终端输入', {
+        // 不记录输入内容预览：每次按键都会触发，且会把用户键入的密码/密钥写进日志。
+        log.debug('终端输入', {
           socketId: socket.id,
           sessionId: validated.sessionId,
           dataLength: String(validated.data || '').length,
-          preview: String(validated.data || '').slice(0, 40),
         });
         sessionService.writeToSession(socket.id, validated.sessionId, validated.data);
       } catch {
