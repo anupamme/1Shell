@@ -36,7 +36,7 @@ download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$out" "$url"
   else
-    err "Neither curl nor wget is available. Install one or preinstall Node.js 18+."
+    err "Neither curl nor wget is available. Install one or preinstall Node.js 20/22."
     return 1
   fi
 }
@@ -81,12 +81,13 @@ try_system_node() {
   command -v npm >/dev/null 2>&1 || return 1
   major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || true)"
   [ -n "$major" ] || return 1
-  [ "$major" -ge 18 ] || return 1
+  [ "$major" -ge 20 ] || return 1
+  [ "$major" -lt 23 ] || return 1
   NODE_EXE="$(command -v node)"
   NPM_CMD="$(command -v npm)"
 }
 
-log "1Shell v4.1.0 starter package"
+log "1Shell v4.2.0 starter package"
 if [ ! -x "$NODE_EXE" ]; then
   if [ "${ONE_SHELL_USE_SYSTEM_NODE:-0}" = "1" ] && try_system_node; then
     :

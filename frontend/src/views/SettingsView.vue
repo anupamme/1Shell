@@ -49,7 +49,7 @@ const SECURITY_MODE_LABELS: Record<SecurityMode, string> = {
 
 type Tab = 'account' | 'security' | 'ipfilter' | 'aiconfig' | 'desktop' | 'about';
 
-const APP_VERSION = '4.1.0';
+const APP_VERSION = '4.2.0';
 const GITHUB_URL = 'https://github.com/weidu12123/1Shell';
 
 const TAB_ITEMS: Array<{ key: Tab; label: string; icon: string; desc: string }> = [

@@ -18,22 +18,22 @@ err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         1Shell v4.1.0                          ║${NC}"
+echo -e "${GREEN}║         1Shell v4.2.0                          ║${NC}"
 echo -e "${GREEN}║     One Shell to rule them all.                ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # 检查 Node.js
 if ! command -v node &>/dev/null; then
-  err "未检测到 Node.js，请先安装 Node.js 18 或更高版本"
+  err "未检测到 Node.js，请先安装 Node.js 20 或 22"
   err "安装方式: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt install -y nodejs"
   exit 1
 fi
 
 NODE_VER=$(node -v | tr -d 'v')
 NODE_MAJOR=$(echo "$NODE_VER" | cut -d. -f1)
-if [[ "$NODE_MAJOR" -lt 18 ]]; then
-  err "Node.js 版本过低 (v${NODE_VER})，需要 v18 或更高版本"
+if [[ "$NODE_MAJOR" -lt 20 || "$NODE_MAJOR" -ge 23 ]]; then
+  err "Node.js 版本不受支持 (v${NODE_VER})，需要 v20 或 v22"
   exit 1
 fi
 log "Node.js v${NODE_VER} 已检测到"
