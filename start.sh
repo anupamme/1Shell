@@ -27,7 +27,7 @@ fi
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         1Shell v4.2.0                          ║${NC}"
+echo -e "${GREEN}║         1Shell v4.2.1                          ║${NC}"
 echo -e "${GREEN}║     One Shell to rule them all.                ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
 echo ""

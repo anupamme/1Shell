@@ -10,25 +10,33 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const RELEASE_DIR = path.join(ROOT, 'release');
 const OUTPUT_DIR = process.argv[2] ? path.resolve(process.argv[2]) : path.join(RELEASE_DIR, 'repacked');
+const pkg = require(path.join(ROOT, 'package.json'));
+const VERSION = String(pkg.version || '0.0.0');
 
 const ASSETS = [
   {
-    sourceName: '1shell-4.1.0-linux-x64-with-deps-20260606-211813.tar.gz',
-    outputName: '1shell-4.1.0-linux-x64.tar.gz',
-    packageName: '1shell-4.1.0-linux-x64',
+    platform: 'linux',
+    sourcePattern: /^1shell-\d+\.\d+\.\d+-linux-x64-offline-.*\.tar\.gz$/,
+    outputName: `1shell-${VERSION}-linux-x64.tar.gz`,
+    packageName: `1shell-${VERSION}-linux-x64`,
   },
   {
-    sourceName: '1shell-4.1.0-windows-x64-with-deps-20260606-211813.zip',
-    outputName: '1shell-4.1.0-windows-x64.zip',
-    packageName: '1shell-4.1.0-windows-x64',
+    platform: 'windows',
+    sourcePattern: /^1shell-\d+\.\d+\.\d+-windows-x64-offline-.*\.zip$/,
+    outputName: `1shell-${VERSION}-windows-x64.zip`,
+    packageName: `1shell-${VERSION}-windows-x64`,
   },
 ];
 
 const FILES = [
   '.dockerignore',
   '.env.example',
+  '.gitattributes',
   '.gitignore',
+  '.node-version',
   '.npmignore',
+  '.nvmrc',
+  'CHANGELOG.md',
   'docker-compose.yml',
   'Dockerfile',
   'HARNESS_DESIGN.md',
@@ -134,8 +142,24 @@ function sha256File(filePath) {
   return hash.digest('hex');
 }
 
+function pickSourceAsset(asset) {
+  const candidates = fs.readdirSync(RELEASE_DIR)
+    .filter((name) => asset.sourcePattern.test(name))
+    .map((name) => {
+      const filePath = path.join(RELEASE_DIR, name);
+      return { name, filePath, mtimeMs: fs.statSync(filePath).mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
+
+  if (!candidates.length) {
+    throw new Error(`Missing ${asset.platform} base asset in ${RELEASE_DIR}`);
+  }
+  return candidates[0];
+}
+
 function repack(asset) {
-  const source = path.join(RELEASE_DIR, asset.sourceName);
+  const sourceAsset = pickSourceAsset(asset);
+  const source = sourceAsset.filePath;
   if (!fs.existsSync(source)) {
     throw new Error(`Missing local asset: ${source}`);
   }
@@ -143,7 +167,7 @@ function repack(asset) {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneshell-repack-'));
   try {
     const extractArgs = ['-xf', source, '-C', workDir];
-    if (asset.sourceName.endsWith('.tar.gz') && process.platform === 'win32') {
+    if (sourceAsset.name.endsWith('.tar.gz') && process.platform === 'win32') {
       extractArgs.push('--exclude=*/node_modules/.bin/*');
     }
     execFileSync('tar', extractArgs, { stdio: 'inherit' });
@@ -168,7 +192,7 @@ function repack(asset) {
     const digest = sha256File(output);
     fs.writeFileSync(`${output}.sha256.txt`, `${digest}  ${asset.outputName}\n`, 'utf8');
     console.log(JSON.stringify({
-      source: asset.sourceName,
+      source: sourceAsset.name,
       asset: asset.outputName,
       sha256: digest,
       output,
