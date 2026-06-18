@@ -24,6 +24,11 @@ const SYNC_ASK_MAX_TIMEOUT_MS = 600000;
 const DETACHED_ASK_DEFAULT_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_TIMEOUT_MS', 60 * 60 * 1000);
 const DETACHED_ASK_MAX_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_MAX_TIMEOUT_MS', 6 * 60 * 60 * 1000);
 const DETACHED_ASK_RESULT_TTL_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_RESULT_TTL_MS', 24 * 60 * 60 * 1000);
+const HOST_EXEC_SYNC_DEFAULT_TIMEOUT_MS = 30000;
+const HOST_EXEC_BACKGROUND_THRESHOLD_MS = envPositiveNumber('ONESHELL_MCP_HOST_EXEC_BACKGROUND_THRESHOLD_MS', 90000);
+const HOST_EXEC_DETACHED_DEFAULT_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_HOST_EXEC_DETACHED_TIMEOUT_MS', 60 * 60 * 1000);
+const HOST_EXEC_DETACHED_MAX_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_HOST_EXEC_DETACHED_MAX_TIMEOUT_MS', 6 * 60 * 60 * 1000);
+const HOST_EXEC_RESULT_TTL_MS = envPositiveNumber('ONESHELL_MCP_HOST_EXEC_RESULT_TTL_MS', 24 * 60 * 60 * 1000);
 
 function commandHasTruncationMarker(command) {
   const text = String(command || '');
@@ -52,6 +57,9 @@ const EXEC_SCHEMA = {
     hostId: { type: 'string', description: '目标主机 ID（可通过 list_hosts 获取）' },
     command: { type: 'string', description: '要执行的非交互式 shell 命令' },
     timeout: { type: 'number', description: '命令执行超时毫秒数，默认 30000' },
+    background: { type: 'boolean', description: 'true 时立即返回 runId，命令在后台继续运行' },
+    async: { type: 'boolean', description: 'background 的别名' },
+    wait: { type: 'boolean', description: 'false 等同 background=true；true 强制同步等待' },
   },
   required: ['hostId', 'command'],
 };
@@ -60,8 +68,20 @@ const TOOL_DEFS = [
   {
     name: 'host_exec',
     targets: ['mcp'],
-    description: '在 1Shell 已配置的主机上执行非交互式命令并返回 stdout/stderr/exitCode。',
+    description: '在 1Shell 已配置的主机上执行非交互式命令。长耗时 MCP 命令会返回 runId 并在后台继续运行，可用 get_host_exec_run 轮询。',
     schema: EXEC_SCHEMA,
+  },
+  {
+    name: 'get_host_exec_run',
+    targets: ['mcp'],
+    description: '查询 host_exec background=true 启动的后台命令状态和最终 stdout/stderr/exitCode。',
+    schema: {
+      type: 'object',
+      properties: {
+        runId: { type: 'string', description: 'host_exec 返回的 runId' },
+      },
+      required: ['runId'],
+    },
   },
   {
     name: 'execute_command',
@@ -226,11 +246,14 @@ const TOOL_DEFS = [
   {
     name: 'finish_file_upload',
     targets: ['mcp'],
-    description: '完成分片上传，将暂存文件流式上传到目标主机并清理本地暂存文件。',
+    description: '完成分片上传。MCP 调用默认启动后台传输并返回 transferId；用 get_file_transfer 查询进度和结果。',
     schema: {
       type: 'object',
       properties: {
         uploadId: { type: 'string', description: 'start_file_upload 返回的 uploadId' },
+        background: { type: 'boolean', description: 'true 时启动后台传输并返回 transferId' },
+        async: { type: 'boolean', description: 'background 的别名' },
+        wait: { type: 'boolean', description: 'true 强制同步上传；false 启动后台传输' },
       },
       required: ['uploadId'],
     },
@@ -302,7 +325,7 @@ const TOOL_DEFS = [
   {
     name: 'download_file',
     targets: ['mcp', 'ide'],
-    description: '从指定主机下载文件。传 localPath 时保存到 1Shell 本机；否则小文件以 base64 返回。',
+    description: '从指定主机下载文件。MCP 调用传 localPath 时默认启动后台传输并返回 transferId；不传 localPath 时仅小文件以内联 base64 返回。',
     schema: {
       type: 'object',
       properties: {
@@ -310,6 +333,11 @@ const TOOL_DEFS = [
         path: { type: 'string', description: '源文件路径' },
         localPath: { type: 'string', description: '保存到 1Shell 本机的路径，相对项目根目录或绝对路径（可选）' },
         maxBytes: { type: 'number', description: '不传 localPath 时允许返回的最大字节数，默认 1048576' },
+        expectedSha256: { type: 'string', description: '提交到 localPath 前校验的 sha256（可选）' },
+        sha256: { type: 'string', description: 'expectedSha256 的别名' },
+        background: { type: 'boolean', description: 'true 时启动后台传输并返回 transferId' },
+        async: { type: 'boolean', description: 'background 的别名' },
+        wait: { type: 'boolean', description: 'true 强制同步下载；false 启动后台传输' },
       },
       required: ['hostId', 'path'],
     },
@@ -608,6 +636,7 @@ const TOOL_DEFS = [
 function createOneShellCoreTools(deps = {}) {
   const toolMap = new Map(TOOL_DEFS.map((tool) => [tool.name, tool]));
   const aiRuns = new Map();
+  const hostExecRuns = new Map();
   const uploadSessions = new Map();
   const fileTransfers = new Map();
 
@@ -650,6 +679,8 @@ function createOneShellCoreTools(deps = {}) {
       case 'host_exec':
       case 'execute_command':
         return handleExec(input, context);
+      case 'get_host_exec_run':
+        return handleGetHostExecRun(input);
       case 'list_hosts':
         return handleListHosts(context);
       case 'ask_1shell_ai':
@@ -734,7 +765,151 @@ function createOneShellCoreTools(deps = {}) {
     }
   }
 
+  function normalizeHostExecTimeout(input, background = false) {
+    const raw = Number(input.timeout);
+    if (raw > 0) {
+      return background ? Math.min(raw, HOST_EXEC_DETACHED_MAX_TIMEOUT_MS) : raw;
+    }
+    return background ? HOST_EXEC_DETACHED_DEFAULT_TIMEOUT_MS : HOST_EXEC_SYNC_DEFAULT_TIMEOUT_MS;
+  }
+
+  function shouldRunHostExecInBackground(input, context, timeout) {
+    if (input.background === true || input.async === true || input.wait === false) return true;
+    if (input.wait === true) return false;
+    return context.source === 'mcp' && timeout > HOST_EXEC_BACKGROUND_THRESHOLD_MS;
+  }
+
+  function publicHostExecRun(run) {
+    return {
+      runId: run.runId,
+      status: run.status,
+      hostId: run.hostId,
+      command: run.command,
+      timeout: run.timeout,
+      startedAt: run.startedAt,
+      updatedAt: run.updatedAt,
+      finishedAt: run.finishedAt || null,
+      stdout: run.stdout || '',
+      stderr: run.stderr || '',
+      exitCode: run.exitCode,
+      durationMs: run.durationMs || 0,
+      error: run.error || null,
+      pollTool: 'get_host_exec_run',
+    };
+  }
+
+  function pruneHostExecRuns() {
+    const now = Date.now();
+    for (const [runId, run] of hostExecRuns) {
+      if (!run.finishedAtMs) continue;
+      if (now - run.finishedAtMs > HOST_EXEC_RESULT_TTL_MS) hostExecRuns.delete(runId);
+    }
+  }
+
+  function parseStructuredExecResult(result) {
+    const content = String(result?.content || '');
+    if (content.startsWith('[ERROR] ')) {
+      const message = content.slice(8);
+      return { ok: false, summary: message, data: {}, error: message };
+    }
+    try {
+      const parsed = JSON.parse(content);
+      const failed = parsed.ok === false || result?.is_error === true;
+      return {
+        ok: !failed,
+        summary: parsed.summary || '',
+        data: parsed.data || {},
+        error: failed ? (parsed.summary || 'host_exec failed') : null,
+      };
+    } catch {
+      return { ok: result?.is_error !== true, summary: content, data: {}, error: result?.is_error ? content : null };
+    }
+  }
+
+  function startHostExecRun({ hostId, command, timeout }, context = {}) {
+    pruneHostExecRuns();
+    const runId = createRuntimeId('host-exec');
+    const now = new Date().toISOString();
+    const run = {
+      runId,
+      status: 'running',
+      hostId,
+      command,
+      timeout,
+      stdout: '',
+      stderr: '',
+      exitCode: null,
+      durationMs: 0,
+      error: null,
+      startedAt: now,
+      updatedAt: now,
+      finishedAt: null,
+      finishedAtMs: 0,
+    };
+    hostExecRuns.set(runId, run);
+
+    const detachedContext = {
+      ...context,
+      runId,
+      signal: undefined,
+      socket: undefined,
+      onToolDelta: undefined,
+      onOutput: undefined,
+      requestApproval: undefined,
+      allowApproval: false,
+    };
+
+    void executeHostCommand({ hostId, command, timeout }, detachedContext)
+      .then((result) => {
+        const parsed = parseStructuredExecResult(result);
+        const data = parsed.data || {};
+        run.status = parsed.ok ? 'succeeded' : 'failed';
+        run.stdout = data.stdout || '';
+        run.stderr = data.stderr || '';
+        run.exitCode = Number.isFinite(Number(data.exitCode)) ? Number(data.exitCode) : (parsed.ok ? 0 : 1);
+        run.durationMs = Number(data.durationMs) || 0;
+        run.error = parsed.error || null;
+        run.updatedAt = new Date().toISOString();
+        run.finishedAt = run.updatedAt;
+        run.finishedAtMs = Date.now();
+      })
+      .catch((error) => {
+        run.status = 'failed';
+        run.error = error?.message || 'host_exec failed';
+        run.exitCode = 1;
+        run.updatedAt = new Date().toISOString();
+        run.finishedAt = run.updatedAt;
+        run.finishedAtMs = Date.now();
+      });
+
+    return run;
+  }
+
   async function handleExec(input, context) {
+    const hostId = String(input.hostId || '').trim();
+    const command = String(input.command || '').trim();
+    const initialTimeout = normalizeHostExecTimeout(input, input.background === true || input.async === true || input.wait === false);
+    const background = shouldRunHostExecInBackground(input, context, initialTimeout);
+    const timeout = normalizeHostExecTimeout(input, background);
+    if (commandHasTruncationMarker(command)) return err('命令疑似被摘要截断（包含省略号或 [truncated] 标记），请重新生成完整命令后再执行。');
+    if (!hostId || !command) return err('hostId 和 command 为必填');
+    if (background) {
+      const run = startHostExecRun({ hostId, command, timeout }, context);
+      return structured(true, 'host_exec started in background', publicHostExecRun(run));
+    }
+    return executeHostCommand({ hostId, command, timeout }, context);
+  }
+
+  function handleGetHostExecRun(input) {
+    pruneHostExecRuns();
+    const runId = String(input.runId || '').trim();
+    if (!runId) return err('runId is required');
+    const run = hostExecRuns.get(runId);
+    if (!run) return err(`host_exec run not found or expired: ${runId}`);
+    return structured(run.status !== 'failed', run.status === 'running' ? 'host_exec is running' : 'host_exec status', publicHostExecRun(run), run.status === 'failed');
+  }
+
+  async function executeHostCommand(input, context) {
     const hostId = String(input.hostId || '').trim();
     const command = String(input.command || '').trim();
     const timeout = Number(input.timeout) > 0 ? Number(input.timeout) : 30000;
@@ -908,7 +1083,7 @@ function createOneShellCoreTools(deps = {}) {
       '[MCP_GATEWAY_REQUEST]',
       `mode=${mode}`,
       hostId ? `hostId=${hostId}` : '',
-      'External MCP clients directly see only these tools: list_hosts, host_exec, list_remote_dir, read_remote_file, write_remote_file, create_directory, delete_path, rename_path, upload_file, download_file, start_file_upload, append_file_upload, finish_file_upload, cancel_file_upload, start_file_download, get_file_transfer, resume_file_transfer, cancel_file_transfer, ask_1shell_ai, get_1shell_ai_run.',
+      'External MCP clients directly see only these tools: list_hosts, host_exec, get_host_exec_run, list_remote_dir, read_remote_file, write_remote_file, create_directory, delete_path, rename_path, upload_file, download_file, start_file_upload, append_file_upload, finish_file_upload, cancel_file_upload, start_file_download, get_file_transfer, resume_file_transfer, cancel_file_transfer, ask_1shell_ai, get_1shell_ai_run.',
       'Scripts, automations, probes, audit, diagnostics, and MCP registry operations are delegated capabilities behind ask_1shell_ai; do not describe them as directly visible external MCP tools.',
       requireConfirmation ? 'mutating actions require confirmation; if confirmation is unavailable, explain what would be done instead of forcing the action.' : 'the caller explicitly allowed execution without interactive confirmation.',
       mode === 'answer' ? 'Answer the request. Prefer read-only inspection and do not make changes.' : '',
@@ -1222,7 +1397,8 @@ function createOneShellCoreTools(deps = {}) {
       return err(`上传尚未完整：已接收 ${formatBytes(session.receivedBytes)}，声明大小 ${formatBytes(session.declaredSize)}`);
     }
     try {
-      if (input.background === true) {
+      const background = input.background === true || input.async === true || input.wait === false || (context.source === 'mcp' && input.wait !== true);
+      if (background) {
         return createUploadTransfer(session, context);
       }
       const stream = fs.createReadStream(session.tempPath);
@@ -1637,26 +1813,27 @@ function createOneShellCoreTools(deps = {}) {
     const filePath = String(input.path || '').trim();
     if (!hostId || !filePath) return err('hostId 和 path 为必填');
     try {
-      if (input.localPath && input.background === true) {
+      const background = input.localPath && (
+        input.background === true
+        || input.async === true
+        || input.wait === false
+        || (context.source === 'mcp' && input.wait !== true)
+      );
+      if (background) {
         return createDownloadTransfer(input, context);
       }
       const result = await deps.fileService.downloadFile(hostId, filePath);
       const maxBytes = Number(input.maxBytes) > 0 ? Number(input.maxBytes) : 1024 * 1024;
       if (!input.localPath && result.size > maxBytes) {
         result.stream.destroy?.();
-        return err(`文件过大 (${result.size} bytes)，请传 localPath 保存到 1Shell 本机，或调大 maxBytes`);
+        return err(`文件过大 (${result.size} bytes)，请传 localPath 启动后台下载并用 get_file_transfer 查询进度，或调大 maxBytes`);
       }
       if (input.localPath) {
         const localPath = resolveLocalPath(input.localPath);
         result.stream.destroy?.();
         const saved = await downloadToLocalPathAtomic(hostId, filePath, localPath, input, context);
         deps.auditService?.log?.({ action: 'mcp_file_download', source: context.source || 'core_tools', hostId, command: filePath, details: JSON.stringify({ localPath, size: saved.size, sha256: saved.sha256 }) });
-        return structured(true, '鏂囦欢涓嬭浇鎴愬姛', { hostId, path: filePath, localPath, filename: saved.filename, size: saved.size, sha256: saved.sha256 });
-        await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
-        await streamToFile(result.stream, localPath, context.signal);
-        const stat = await fs.promises.stat(localPath);
-        deps.auditService?.log?.({ action: 'mcp_file_download', source: context.source || 'core_tools', hostId, command: filePath, details: JSON.stringify({ localPath, size: stat.size }) });
-        return structured(true, '文件下载成功', { hostId, path: filePath, localPath, filename: result.filename, size: stat.size });
+        return structured(true, '文件下载成功', { hostId, path: filePath, localPath, filename: saved.filename, size: saved.size, sha256: saved.sha256 });
       }
       const buffer = await streamToBuffer(result.stream, context.signal);
       return structured(true, '文件下载成功', { hostId, path: filePath, filename: result.filename, size: buffer.length, base64Content: buffer.toString('base64') });

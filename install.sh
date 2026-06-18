@@ -225,7 +225,7 @@ After=network.target
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=$(which node) ${INSTALL_DIR}/server.js
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 

@@ -3,9 +3,11 @@
 
 const { execFileSync } = require('child_process');
 const crypto = require('crypto');
+const { once } = require('events');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 
 const ROOT = path.resolve(__dirname, '..');
 const RELEASE_DIR = path.join(ROOT, 'release');
@@ -126,6 +128,198 @@ function overlay(packageDir) {
   }
 }
 
+function chmodIfExists(packageDir, rel, mode = 0o755) {
+  const target = path.join(packageDir, rel);
+  if (!fs.existsSync(target)) return;
+  fs.chmodSync(target, mode);
+}
+
+function chmodFilesInDir(packageDir, rel, mode = 0o755) {
+  const dir = path.join(packageDir, rel);
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isFile() || entry.isSymbolicLink()) {
+      chmodIfExists(packageDir, path.join(rel, entry.name), mode);
+    }
+  }
+}
+
+function restoreExecutableBits(packageDir) {
+  for (const rel of [
+    'start.sh',
+    'install.sh',
+    'scripts/start-bootstrap.sh',
+    'bin/1shell-mcp-stdio.js',
+    'runtime/node/bin/node',
+    'runtime/node/bin/npm',
+    'runtime/node/bin/npx',
+    'runtime/node/bin/corepack',
+  ]) {
+    chmodIfExists(packageDir, rel);
+  }
+  chmodFilesInDir(packageDir, 'agent/dist');
+  chmodFilesInDir(packageDir, 'runtime/node/bin');
+}
+
+function isExecutableRel(rel) {
+  const normalized = rel.split(path.sep).join('/');
+  return normalized === 'start.sh'
+    || normalized === 'install.sh'
+    || normalized === 'scripts/start-bootstrap.sh'
+    || normalized === 'bin/1shell-mcp-stdio.js'
+    || normalized.startsWith('runtime/node/bin/')
+    || normalized.startsWith('agent/dist/')
+    || normalized.includes('/node_modules/.bin/');
+}
+
+function tarModeFor(rel, stat) {
+  if (stat.isDirectory()) return 0o755;
+  if (stat.isSymbolicLink()) return 0o777;
+  return isExecutableRel(rel) ? 0o755 : 0o644;
+}
+
+function toTarPath(value) {
+  return value.split(path.sep).join('/');
+}
+
+function writeString(buf, offset, length, value) {
+  const data = Buffer.from(String(value), 'utf8');
+  data.copy(buf, offset, 0, Math.min(length, data.length));
+}
+
+function writeOctal(buf, offset, length, value) {
+  const text = Math.floor(Number(value) || 0).toString(8).padStart(length - 1, '0');
+  writeString(buf, offset, length, `${text.slice(-(length - 1))}\0`);
+}
+
+function splitTarName(name) {
+  const bytes = Buffer.byteLength(name);
+  if (bytes <= 100) return { name, prefix: '' };
+  const parts = name.split('/');
+  for (let i = 1; i < parts.length; i += 1) {
+    const prefix = parts.slice(0, i).join('/');
+    const tail = parts.slice(i).join('/');
+    if (Buffer.byteLength(prefix) <= 155 && Buffer.byteLength(tail) <= 100) {
+      return { name: tail, prefix };
+    }
+  }
+  return null;
+}
+
+function tarHeader({ name, mode, uid = 0, gid = 0, size = 0, mtime = Math.floor(Date.now() / 1000), type = '0', linkname = '', uname = 'root', gname = 'root' }) {
+  const buf = Buffer.alloc(512, 0);
+  const split = splitTarName(name) || { name: name.slice(0, 100), prefix: '' };
+  writeString(buf, 0, 100, split.name);
+  writeOctal(buf, 100, 8, mode);
+  writeOctal(buf, 108, 8, uid);
+  writeOctal(buf, 116, 8, gid);
+  writeOctal(buf, 124, 12, size);
+  writeOctal(buf, 136, 12, mtime);
+  for (let i = 148; i < 156; i += 1) buf[i] = 0x20;
+  writeString(buf, 156, 1, type);
+  writeString(buf, 157, 100, linkname);
+  writeString(buf, 257, 6, 'ustar');
+  writeString(buf, 263, 2, '00');
+  writeString(buf, 265, 32, uname);
+  writeString(buf, 297, 32, gname);
+  writeString(buf, 345, 155, split.prefix);
+  let sum = 0;
+  for (const byte of buf) sum += byte;
+  const checksum = sum.toString(8).padStart(6, '0');
+  writeString(buf, 148, 8, `${checksum}\0 `);
+  return buf;
+}
+
+async function writeAll(stream, chunk) {
+  if (!stream.write(chunk)) await once(stream, 'drain');
+}
+
+async function writePadded(stream, size) {
+  const remainder = size % 512;
+  if (remainder) await writeAll(stream, Buffer.alloc(512 - remainder));
+}
+
+async function writeLongName(stream, type, value) {
+  const body = Buffer.from(`${value}\0`, 'utf8');
+  await writeAll(stream, tarHeader({
+    name: '././@LongLink',
+    mode: 0o644,
+    size: body.length,
+    type,
+  }));
+  await writeAll(stream, body);
+  await writePadded(stream, body.length);
+}
+
+async function writeEntryHeader(stream, entry) {
+  if (!splitTarName(entry.name)) {
+    await writeLongName(stream, 'L', entry.name);
+  }
+  if (entry.linkname && Buffer.byteLength(entry.linkname) > 100) {
+    await writeLongName(stream, 'K', entry.linkname);
+  }
+  await writeAll(stream, tarHeader(entry));
+}
+
+async function addTarEntry(stream, rootDir, absPath) {
+  const stat = fs.lstatSync(absPath);
+  let rel = toTarPath(path.relative(rootDir, absPath));
+  if (!rel) return;
+  const entryName = stat.isDirectory() && !rel.endsWith('/') ? `${rel}/` : rel;
+  const packageRel = rel.split('/').slice(1).join('/');
+  const mode = tarModeFor(packageRel, stat);
+  const mtime = Math.floor(stat.mtimeMs / 1000);
+
+  if (stat.isDirectory()) {
+    await writeEntryHeader(stream, { name: entryName, mode, size: 0, type: '5', mtime });
+    const children = fs.readdirSync(absPath)
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => path.join(absPath, name));
+    for (const child of children) {
+      await addTarEntry(stream, rootDir, child);
+    }
+    return;
+  }
+
+  if (stat.isSymbolicLink()) {
+    await writeEntryHeader(stream, {
+      name: entryName,
+      mode,
+      size: 0,
+      type: '2',
+      linkname: toTarPath(fs.readlinkSync(absPath)),
+      mtime,
+    });
+    return;
+  }
+
+  if (!stat.isFile()) return;
+
+  await writeEntryHeader(stream, {
+    name: entryName,
+    mode,
+    size: stat.size,
+    type: '0',
+    mtime,
+  });
+
+  const input = fs.createReadStream(absPath);
+  for await (const chunk of input) {
+    await writeAll(stream, chunk);
+  }
+  await writePadded(stream, stat.size);
+}
+
+async function createTarGz(output, workDir, packageName) {
+  const gzip = zlib.createGzip();
+  const out = fs.createWriteStream(output);
+  gzip.pipe(out);
+  await addTarEntry(gzip, workDir, path.join(workDir, packageName));
+  await writeAll(gzip, Buffer.alloc(1024));
+  gzip.end();
+  await once(out, 'finish');
+}
+
 function sha256File(filePath) {
   const hash = crypto.createHash('sha256');
   const fd = fs.openSync(filePath, 'r');
@@ -157,7 +351,7 @@ function pickSourceAsset(asset) {
   return candidates[0];
 }
 
-function repack(asset) {
+async function repack(asset) {
   const sourceAsset = pickSourceAsset(asset);
   const source = sourceAsset.filePath;
   if (!fs.existsSync(source)) {
@@ -173,6 +367,7 @@ function repack(asset) {
     execFileSync('tar', extractArgs, { stdio: 'inherit' });
     let packageDir = findPackageDir(workDir);
     overlay(packageDir);
+    restoreExecutableBits(packageDir);
     if (path.basename(packageDir) !== asset.packageName) {
       const renamedPackageDir = path.join(workDir, asset.packageName);
       rm(renamedPackageDir);
@@ -186,7 +381,7 @@ function repack(asset) {
     if (asset.outputName.endsWith('.zip')) {
       execFileSync('tar', ['-a', '-cf', output, '-C', workDir, path.basename(packageDir)], { stdio: 'inherit' });
     } else {
-      execFileSync('tar', ['-czf', output, '-C', workDir, path.basename(packageDir)], { stdio: 'inherit' });
+      await createTarGz(output, workDir, path.basename(packageDir));
     }
 
     const digest = sha256File(output);
@@ -202,6 +397,11 @@ function repack(asset) {
   }
 }
 
-for (const asset of ASSETS) {
-  repack(asset);
-}
+(async () => {
+  for (const asset of ASSETS) {
+    await repack(asset);
+  }
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

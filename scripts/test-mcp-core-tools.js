@@ -66,6 +66,21 @@ function failingThenResumableFileService() {
   };
 }
 
+function delayedDownloadFileService(content = 'direct') {
+  return {
+    async downloadFile(hostId, filePath, options = {}) {
+      assert.strictEqual(Number(options.startOffset) || 0, 0);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return {
+        stream: Readable.from(Buffer.from(content, 'utf8')),
+        size: Buffer.byteLength(content),
+        filename: path.basename(filePath),
+        source: 'fake',
+      };
+    },
+  };
+}
+
 async function main() {
   const tmpRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'oneshell-mcp-core-'));
   try {
@@ -73,9 +88,11 @@ async function main() {
     const uploadDir = path.join(tmpRoot, 'upload-target');
     const chunkDir = path.join(tmpRoot, 'chunk-target');
     const backgroundChunkDir = path.join(tmpRoot, 'chunk-background-target');
+    const mcpBackgroundChunkDir = path.join(tmpRoot, 'chunk-mcp-background-target');
     await fs.promises.mkdir(uploadDir);
     await fs.promises.mkdir(chunkDir);
     await fs.promises.mkdir(backgroundChunkDir);
+    await fs.promises.mkdir(mcpBackgroundChunkDir);
     await fs.promises.writeFile(sourcePath, Buffer.from('0123456789abcdef', 'utf8'));
 
     const hostService = {
@@ -173,6 +190,28 @@ async function main() {
     assert.strictEqual(uploaded.data.sha256, sha256('async!'));
     assert.strictEqual(await fs.promises.readFile(path.join(backgroundChunkDir, 'background.txt'), 'utf8'), 'async!');
 
+    const mcpBgStart = parseToolJson(await tools.handle('start_file_upload', {
+      hostId: 'local',
+      dirPath: mcpBackgroundChunkDir,
+      filename: 'mcp-background.txt',
+      size: 4,
+    }, {}));
+    const mcpBgUploadId = mcpBgStart.data.uploadId;
+    await tools.handle('append_file_upload', {
+      uploadId: mcpBgUploadId,
+      offset: 0,
+      base64Content: Buffer.from('mcp!', 'utf8').toString('base64'),
+    }, {});
+    const mcpBgFinish = parseToolJson(await tools.handle('finish_file_upload', { uploadId: mcpBgUploadId }, { source: 'mcp' }));
+    const mcpUploadTransferId = mcpBgFinish.data.transferId;
+    assert.ok(mcpUploadTransferId, 'MCP finish_file_upload must return transferId by default');
+    const mcpUploaded = await waitFor(async () => {
+      const current = parseToolJson(await tools.handle('get_file_transfer', { transferId: mcpUploadTransferId }, {}));
+      return current.data.status === 'succeeded' ? current : null;
+    });
+    assert.strictEqual(mcpUploaded.data.type, 'upload');
+    assert.strictEqual(await fs.promises.readFile(path.join(mcpBackgroundChunkDir, 'mcp-background.txt'), 'utf8'), 'mcp!');
+
     const askStart = parseToolJson(await tools.handle('ask_1shell_ai', {
       goal: 'run a background check',
       background: true,
@@ -184,6 +223,57 @@ async function main() {
       return current.data.status === 'succeeded' ? current : null;
     });
     assert.strictEqual(completed.data.response, 'background done');
+
+    const execTools = createOneShellCoreTools({
+      bridgeService: {
+        async execOnHost(hostId, command, timeout, options = {}) {
+          assert.strictEqual(hostId, 'remote');
+          assert.strictEqual(command, 'long-running command');
+          assert.strictEqual(timeout, 120000);
+          assert.strictEqual(options.signal, undefined, 'background host_exec must detach from the MCP request signal');
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return { stdout: 'done\n', stderr: '', exitCode: 0, durationMs: 50 };
+        },
+      },
+      auditService: { log() {} },
+    });
+    const execStartedAt = Date.now();
+    const execStart = parseToolJson(await execTools.handle('host_exec', {
+      hostId: 'remote',
+      command: 'long-running command',
+      timeout: 120000,
+    }, { source: 'mcp' }));
+    assert.ok(Date.now() - execStartedAt < 100, 'long MCP host_exec must return quickly');
+    const execRunId = execStart.data.runId;
+    assert.ok(execRunId, 'background host_exec must return runId');
+    const execDone = await waitFor(async () => {
+      const current = parseToolJson(await execTools.handle('get_host_exec_run', { runId: execRunId }, {}));
+      return current.data.status === 'succeeded' ? current : null;
+    });
+    assert.strictEqual(execDone.data.stdout, 'done\n');
+    assert.strictEqual(execDone.data.exitCode, 0);
+
+    const directDownloadTarget = path.join(tmpRoot, 'downloads', 'direct.txt');
+    const directDownloadTools = createOneShellCoreTools({
+      hostService,
+      fileService: delayedDownloadFileService('direct'),
+      auditService: { log() {} },
+    });
+    const directDownloadStart = parseToolJson(await directDownloadTools.handle('download_file', {
+      hostId: 'local',
+      path: '/remote/direct.txt',
+      localPath: directDownloadTarget,
+      expectedSha256: sha256('direct'),
+    }, { source: 'mcp' }));
+    const directTransferId = directDownloadStart.data.transferId;
+    assert.ok(directTransferId, 'MCP download_file localPath must return transferId by default');
+    assert.strictEqual(await fs.promises.access(directDownloadTarget).then(() => true).catch(() => false), false, 'background download must not create final file before commit');
+    const directDownloaded = await waitFor(async () => {
+      const current = parseToolJson(await directDownloadTools.handle('get_file_transfer', { transferId: directTransferId }, {}));
+      return current.data.status === 'succeeded' ? current : null;
+    });
+    assert.strictEqual(directDownloaded.data.sha256, sha256('direct'));
+    assert.strictEqual(await fs.promises.readFile(directDownloadTarget, 'utf8'), 'direct');
 
     const transferTarget = path.join(tmpRoot, 'downloads', 'resumable.txt');
     const transferTools = createOneShellCoreTools({
@@ -218,7 +308,7 @@ async function main() {
     assert.strictEqual(succeededTransfer.data.sha256, sha256('helloworld'));
     assert.strictEqual(await fs.promises.readFile(transferTarget, 'utf8'), 'helloworld');
 
-    console.log('mcp-core-tools: upload guard, chunk upload, background ask, and transfer job checks passed');
+    console.log('mcp-core-tools: upload guard, chunk upload, background ask, host exec, and transfer job checks passed');
   } finally {
     await fs.promises.rm(tmpRoot, { recursive: true, force: true });
   }

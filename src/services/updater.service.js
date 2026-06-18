@@ -346,10 +346,17 @@ function createUpdaterService({ rootDir, dataDir, logger = console } = {}) {
     } catch { return ''; }
   }
 
+  function restartExitCode() {
+    const raw = process.env.ONESHELL_RESTART_EXIT_CODE || process.env.ONE_SHELL_RESTART_EXIT_CODE || '1';
+    const code = Number.parseInt(raw, 10);
+    return Number.isInteger(code) && code >= 0 && code <= 255 ? code : 1;
+  }
+
   // ── 重启：交给 supervisor（docker restart / systemd Restart）拉起 ──────
   function scheduleRestart(reason) {
-    logger.info?.(`[updater] ${reason}，2 秒后退出由 supervisor 拉起新版本`);
-    setTimeout(() => process.exit(0), 2000);
+    const exitCode = restartExitCode();
+    logger.info?.(`[updater] ${reason}，2 秒后退出由 supervisor 拉起新版本，exit=${exitCode}`);
+    setTimeout(() => process.exit(exitCode), 2000);
   }
 
   // ── 编排：检查 → 下载 → 校验 → 解压 → 换入 → 标记重启 ─────────────────

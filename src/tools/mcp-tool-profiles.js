@@ -5,6 +5,7 @@
 const MCP_STANDARD_TOOL_NAMES = [
   'list_hosts',
   'host_exec',
+  'get_host_exec_run',
   'list_remote_dir',
   'read_remote_file',
   'write_remote_file',
