@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.2.3 - 2026-06-19
+
+4.2.3 focuses on making 1Shell AI less blind during long-running command failures. It does not add more prompt rules; instead it passes execution facts from the tool layer back to the model so the agent can reason from complete context.
+
+- Add structured `outputDiagnostics` to command results, including runtime, output size, truncation state, terminal progress markers, download-phase hints, interactive prompt hints, clear error/completion hints, and last meaningful output lines.
+- Preserve partial stdout/stderr, exit code, duration, timeout, and interactive prompt state through SSH shell, bridge, harness, core tools, IDE tools, frontend tool cards, and provider observations.
+- Detect long-running terminal-progress downloads such as BenchOS/curl output and surface `suspectedStalledDownload` as a factual signal for the model.
+- Remove duplicate pseudo progress text generated while tool arguments are still streaming, avoiding repeated “preparing parameters”/work-note noise in the agent timeline.
+- Keep natural assistant text visible while avoiding repeated `workNote` rendering in tool summaries and tool bodies.
+- Keep the core prompt minimal: no task-specific deployment heuristics and no fixed architecture-generated answer templates.
+- Add project guardrails in `AGENTS.md` so future maintenance keeps prompt changes rare, avoids architecture impersonating the AI, and preserves full model context.
+- Verify the release with syntax checks, targeted stalled-download diagnostics, `npm test`, frontend typecheck, and frontend production build.
+
+## 4.2.2 - 2026-06-18
+
+4.2.2 is a patch release for update-flow testing after 4.2.1. It hardens updater restart behavior and long-running MCP operations so users can continue testing in-place upgrades from the 4.2 line.
+
+- Bump the release line from 4.2.1 to 4.2.2 so updater tests can validate a real version transition.
+- Make updater restarts exit with a supervisor-friendly non-zero code by default, while still allowing `ONESHELL_RESTART_EXIT_CODE` / `ONE_SHELL_RESTART_EXIT_CODE` overrides.
+- Change the Linux systemd install unit to `Restart=always`, reducing the chance that a successful update exit leaves the service down.
+- Extend the stdio MCP client request timeout to 10 minutes by default and make it configurable with `ONESHELL_MCP_REQUEST_TIMEOUT_MS`.
+- Preserve Linux executable permissions during release repackaging so `start.sh`, `install.sh`, and MCP stdio entrypoints remain runnable after update.
+- Keep MCP large-file/background transfer fixes from 4.2.1 and continue publishing updater assets for Windows x64 and Linux x64 with SHA256 checksum files.
+
 ## 4.2.1 - 2026-06-18
 
 4.2.1 is a test patch release for validating the 4.2 feature set. It synchronizes the latest agent, MCP, transfer, terminal, mobile layout, and slash-command fixes into the 4.2 source tree.

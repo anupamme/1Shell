@@ -26,6 +26,27 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
     if (signal?.aborted) throw makeAbortError();
   }
 
+  function looksLikeInteractivePrompt(output) {
+    const tail = String(output || '').slice(-1200);
+    return /(\[[^\]\n]{0,80}(?:y\/n|yes\/no|y\/f\/v\/n|Y\/n)[^\]\n]*\]\s*[:：]?\s*$)|((?:password|passphrase)\s*[:：]\s*$)|((?:press any key|are you sure|continue\?)\s*[:：]?\s*$)/i.test(tail);
+  }
+
+  function attachExecutionContext(err, { stdout = '', stderr = '', startAt = Date.now(), exitCode } = {}) {
+    if (!err) return err;
+    err.stdout = typeof err.stdout === 'string' ? err.stdout : String(stdout || '');
+    err.stderr = typeof err.stderr === 'string' ? err.stderr : String(stderr || '');
+    err.exitCode = typeof err.exitCode === 'number'
+      ? err.exitCode
+      : (typeof exitCode === 'number' ? exitCode : (err.code === 'EXEC_TIMEOUT' ? 124 : -1));
+    err.durationMs = typeof err.durationMs === 'number' ? err.durationMs : Date.now() - startAt;
+    const combined = `${err.stdout}\n${err.stderr}`;
+    if (looksLikeInteractivePrompt(combined)) {
+      err.interactivePromptDetected = true;
+      err.stderr = `${err.stderr ? `${err.stderr}\n` : ''}[1Shell] command appears to be waiting for interactive input`;
+    }
+    return err;
+  }
+
   /**
    * 在指定主机上执行单条命令。
    *
@@ -144,6 +165,8 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
       let timer = null;
       let targetClient = null;
       let proxyClientRef = null;
+      const stdoutChunks = [];
+      const stderrChunks = [];
 
       const usePool = Boolean(sshPool);
 
@@ -190,6 +213,11 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
       function fail(err) {
         if (settled) return;
         settled = true;
+        attachExecutionContext(err, {
+          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+          stderr: Buffer.concat(stderrChunks).toString('utf8'),
+          startAt,
+        });
         cleanup(false);
         auditService?.log({
           action: 'bridge_exec',
@@ -232,9 +260,6 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
               execErr.code = 'SSH_EXEC_ERROR';
               return fail(execErr);
             }
-
-            const stdoutChunks = [];
-            const stderrChunks = [];
 
             stream.on('data', (chunk) => {
               stdoutChunks.push(chunk);

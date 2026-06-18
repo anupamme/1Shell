@@ -1400,7 +1400,6 @@ function approveAction(action: 'allow' | 'deny'): void {
                     </span>
                   </div>
                   <div class="flex items-center gap-2 mt-0.5 text-[11px] text-slate-400 dark:text-slate-500">
-                    <span v-if="(item as IdeToolTimelineItem).workNote" class="truncate max-w-[320px]">{{ (item as IdeToolTimelineItem).workNote }}</span>
                     <span v-if="toolDuration((item as IdeToolTimelineItem).durationMs)">{{ toolDuration((item as IdeToolTimelineItem).durationMs) }}</span>
                   </div>
                 </div>
@@ -1413,7 +1412,6 @@ function approveAction(action: 'allow' | 'deny'): void {
                 <ProbeListToolResult :result="(item as IdeToolTimelineItem).result" />
               </div>
               <div v-if="expandingToolId === (item as IdeToolTimelineItem).toolUseId" class="px-4 pb-4 space-y-3 border-t border-slate-100 dark:border-white/[0.04] pt-3">
-                <div v-if="(item as IdeToolTimelineItem).workNote" class="text-xs text-slate-500 dark:text-slate-400 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 leading-relaxed">{{ (item as IdeToolTimelineItem).workNote }}</div>
                 <div v-if="(item as IdeToolTimelineItem).input !== undefined && (item as IdeToolTimelineItem).input !== null" class="space-y-1">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">参数</div>
                   <pre class="text-xs text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[200px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).input) }}</pre>

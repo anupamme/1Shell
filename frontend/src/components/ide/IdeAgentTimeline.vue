@@ -91,6 +91,13 @@ function toolDisplayName(tool: IdeToolTimelineItem): string {
     list_remote_dir: '列出目录',
     read_remote_file: '读取文件',
     write_remote_file: '写入文件',
+    get_probe: '读取主机探针',
+    get_probe_samples: '探针样本',
+    get_probe_timeseries: '探针时序',
+    get_probe_traffic: '探针流量',
+    probe_diag_ping: 'Ping 诊断',
+    probe_diag_http: 'HTTP 诊断',
+    probe_diag_dns: 'DNS 诊断',
     preview_ai_task: '预览任务',
     create_ai_task: '保存任务',
     update_ai_task: '更新任务',
@@ -148,7 +155,6 @@ function toolDuration(tool: IdeToolTimelineItem): string {
 }
 
 function toolPurpose(tool: IdeToolTimelineItem): string {
-  if (tool.workNote?.trim()) return shorten(tool.workNote);
   const input = asRecord(tool.input);
   const direct = pickString(input, [
     ['description'],
@@ -311,11 +317,6 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
           </summary>
 
           <div class="ide-agent-tool-body">
-            <div v-if="item.workNote" class="ide-agent-tool-section ide-agent-tool-section--note">
-              <div class="ide-agent-tool-section-title">1Shell AI 的工作笔记</div>
-              <p>{{ item.workNote }}</p>
-            </div>
-
             <details v-if="hasToolInput(item)" class="ide-agent-tool-section">
               <summary>参数</summary>
               <pre>{{ formatToolValue(item.input) }}</pre>

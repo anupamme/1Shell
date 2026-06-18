@@ -41,6 +41,39 @@ function createSshShellPool({ hostService }) {
     return err;
   }
 
+  function looksLikeInteractivePrompt(output) {
+    const tail = String(output || '').slice(-1200);
+    return /(\[[^\]\n]{0,80}(?:y\/n|yes\/no|y\/f\/v\/n|Y\/n)[^\]\n]*\]\s*[:：]?\s*$)|((?:password|passphrase)\s*[:：]\s*$)|((?:press any key|are you sure|continue\?)\s*[:：]?\s*$)/i.test(tail);
+  }
+
+  function extractPendingOutput(entry, cmd = entry?.pendingCmd) {
+    if (!entry || !cmd) return '';
+    let output = String(entry.buffer || '');
+    const endIdx = output.indexOf(`${cmd.endMarker} `);
+    if (endIdx >= 0) output = output.substring(0, endIdx);
+    const startIdx = output.indexOf(cmd.startMarker);
+    if (startIdx >= 0) {
+      const lineEnd = output.indexOf('\n', startIdx);
+      output = lineEnd >= 0 ? output.substring(lineEnd + 1) : '';
+    }
+    return output;
+  }
+
+  function attachExecutionContext(err, entry, cmd = entry?.pendingCmd) {
+    if (!err || !cmd) return err;
+    const output = extractPendingOutput(entry, cmd);
+    err.stdout = typeof err.stdout === 'string' ? err.stdout : output;
+    err.stderr = typeof err.stderr === 'string' ? err.stderr : '';
+    err.exitCode = typeof err.exitCode === 'number' ? err.exitCode : (err.code === 'EXEC_TIMEOUT' ? 124 : -1);
+    err.durationMs = typeof err.durationMs === 'number' ? err.durationMs : (Date.now() - (cmd.startAt || Date.now()));
+    if (output) err.partialOutput = output;
+    if (looksLikeInteractivePrompt(output)) {
+      err.interactivePromptDetected = true;
+      err.stderr = `${err.stderr ? `${err.stderr}\n` : ''}[1Shell] command appears to be waiting for interactive input`;
+    }
+    return err;
+  }
+
   function destroyEntry(hostId, reason) {
     const closeError = reason || new Error('shell connection closed');
     const entry = pool.get(hostId);
@@ -48,7 +81,7 @@ function createSshShellPool({ hostService }) {
     pool.delete(hostId);
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     if (entry.pendingCmd) {
-      entry.pendingCmd.reject(closeError);
+      entry.pendingCmd.reject(attachExecutionContext(closeError, entry, entry.pendingCmd));
       entry.pendingCmd = null;
     }
     for (const q of (entry.queue || [])) {
@@ -285,14 +318,18 @@ function createSshShellPool({ hostService }) {
         reject(err);
       };
       const timer = setTimeout(() => {
+        const pendingCmd = entry.pendingCmd;
+        const err = new Error(`命令执行超时 (${timeoutMs}ms): ${command}`);
+        err.code = 'EXEC_TIMEOUT';
+        err.exitCode = 124;
+        attachExecutionContext(err, entry, pendingCmd);
         if (entry.pendingCmd) {
           entry.pendingCmd = null;
         }
         entry.busy = false;
         // 超时后销毁此 shell（可能 half-open），下次重建
-        destroyEntry(hostId);
-        const err = new Error(`命令执行超时 (${timeoutMs}ms): ${command}`);
-        err.code = 'EXEC_TIMEOUT';
+        destroyEntry(hostId, err);
+        signal?.removeEventListener?.('abort', onAbort);
         reject(err);
       }, timeoutMs);
       signal?.addEventListener?.('abort', onAbort, { once: true });
@@ -310,6 +347,9 @@ function createSshShellPool({ hostService }) {
           reject(err);
         },
         timer,
+        command,
+        timeoutMs,
+        startAt,
         onOutput,
         startSeen: false,
         outputStart: 0,

@@ -10,6 +10,7 @@ const { DATA_DIR, ROOT_DIR } = require('../config/env');
 const { execLocalCommand } = require('../../lib/exec-local');
 const { emitIdeEvent } = require('../ide/ide.events');
 const { MCP_STANDARD_TOOL_SET } = require('./mcp-tool-profiles');
+const { formatOutputDiagnostics, withOutputDiagnostics } = require('../utils/output-diagnostics');
 
 const INLINE_UPLOAD_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_INLINE_UPLOAD_MAX_BYTES', 1024 * 1024);
 const TEXT_WRITE_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_TEXT_WRITE_MAX_BYTES', 2 * 1024 * 1024);
@@ -793,6 +794,7 @@ function createOneShellCoreTools(deps = {}) {
       stderr: run.stderr || '',
       exitCode: run.exitCode,
       durationMs: run.durationMs || 0,
+      outputDiagnostics: run.outputDiagnostics || null,
       error: run.error || null,
       pollTool: 'get_host_exec_run',
     };
@@ -840,6 +842,7 @@ function createOneShellCoreTools(deps = {}) {
       stderr: '',
       exitCode: null,
       durationMs: 0,
+      outputDiagnostics: null,
       error: null,
       startedAt: now,
       updatedAt: now,
@@ -868,6 +871,7 @@ function createOneShellCoreTools(deps = {}) {
         run.stderr = data.stderr || '';
         run.exitCode = Number.isFinite(Number(data.exitCode)) ? Number(data.exitCode) : (parsed.ok ? 0 : 1);
         run.durationMs = Number(data.durationMs) || 0;
+        run.outputDiagnostics = data.outputDiagnostics || null;
         run.error = parsed.error || null;
         run.updatedAt = new Date().toISOString();
         run.finishedAt = run.updatedAt;
@@ -940,15 +944,29 @@ function createOneShellCoreTools(deps = {}) {
           emitTool(context, 'execute_command', { hostId, command }, { stdout: '', stderr: dispatched.content, exitCode: 126, durationMs: 0 });
           return err(dispatched.content);
         }
-        const r = withReadonlyMountHint(hostId, dispatched.raw);
+        const r = withOutputDiagnostics(withReadonlyMountHint(hostId, dispatched.raw), { timeout });
         emitTool(context, 'execute_command', { hostId, command }, r);
         const okRun = r.exitCode === 0;
         return structured(okRun, okRun ? '命令执行成功' : `命令执行失败，exitCode=${r.exitCode}`, {
           hostId, command, timeout,
           stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode, durationMs: r.durationMs || 0,
+          outputDiagnostics: r.outputDiagnostics,
+          ...(r.errorCode ? { errorCode: r.errorCode } : {}),
+          ...(r.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
         }, !okRun);
       } catch (e) {
         if (e?.name === 'AbortError' || e?.code === 'CANCELLED') throw e;
+        if (hasExecutionErrorContext(e)) {
+          const r = withOutputDiagnostics(withReadonlyMountHint(hostId, executionErrorToResult(e)), { timeout });
+          emitTool(context, 'execute_command', { hostId, command }, r);
+          return structured(false, `命令执行失败：${e.message || 'execution failed'}`, {
+            hostId, command, timeout,
+            stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode, durationMs: r.durationMs || 0,
+            outputDiagnostics: r.outputDiagnostics,
+            ...(r.errorCode ? { errorCode: r.errorCode } : {}),
+            ...(r.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
+          }, true);
+        }
         return err(e.message);
       }
     }
@@ -959,7 +977,7 @@ function createOneShellCoreTools(deps = {}) {
       const rawResult = hostId === 'local'
         ? await execLocal(command, timeout, { signal: context.signal, onOutput })
         : await deps.bridgeService.execOnHost(hostId, command, timeout, { source: context.source || 'core_tools', signal: context.signal, onOutput });
-      const result = withReadonlyMountHint(hostId, rawResult);
+      const result = withOutputDiagnostics(withReadonlyMountHint(hostId, rawResult), { timeout });
       emitTool(context, 'execute_command', { hostId, command }, result);
       const okRun = result.exitCode === 0;
       return structured(okRun, okRun ? '命令执行成功' : `命令执行失败，exitCode=${result.exitCode}`, {
@@ -970,8 +988,28 @@ function createOneShellCoreTools(deps = {}) {
         stderr: result.stderr || '',
         exitCode: result.exitCode,
         durationMs: result.durationMs || 0,
+        outputDiagnostics: result.outputDiagnostics,
+        ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+        ...(result.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
       }, !okRun);
     } catch (e) {
+      if (e?.name === 'AbortError' || e?.code === 'CANCELLED') throw e;
+      if (hasExecutionErrorContext(e)) {
+        const result = withOutputDiagnostics(withReadonlyMountHint(hostId, executionErrorToResult(e)), { timeout });
+        emitTool(context, 'execute_command', { hostId, command }, result);
+        return structured(false, `命令执行失败：${e.message || 'execution failed'}`, {
+          hostId,
+          command,
+          timeout,
+          stdout: result.stdout || '',
+          stderr: result.stderr || '',
+          exitCode: result.exitCode,
+          durationMs: result.durationMs || 0,
+          outputDiagnostics: result.outputDiagnostics,
+          ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+          ...(result.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
+        }, true);
+      }
       return err(e.message);
     }
   }
@@ -2241,6 +2279,28 @@ function execLocal(command, timeout, { cwd = ROOT_DIR, signal, onOutput } = {}) 
   return execLocalCommand(command, { timeout, cwd, signal, onOutput });
 }
 
+function hasExecutionErrorContext(err) {
+  if (!err || typeof err !== 'object') return false;
+  return ['stdout', 'stderr', 'partialOutput', 'exitCode', 'durationMs', 'interactivePromptDetected']
+    .some((key) => Object.prototype.hasOwnProperty.call(err, key));
+}
+
+function executionErrorToResult(err) {
+  const stdout = String(err.stdout ?? err.partialOutput ?? '');
+  const stderrParts = [];
+  if (err.stderr) stderrParts.push(String(err.stderr));
+  if (err.message && !stderrParts.some((part) => part.includes(err.message))) stderrParts.push(String(err.message));
+  if (err.interactivePromptDetected === true) stderrParts.push('[1Shell] interactivePromptDetected=true');
+  return {
+    stdout,
+    stderr: stderrParts.join('\n'),
+    exitCode: typeof err.exitCode === 'number' ? err.exitCode : (err.code === 'EXEC_TIMEOUT' ? 124 : -1),
+    durationMs: typeof err.durationMs === 'number' ? err.durationMs : 0,
+    errorCode: err.code || undefined,
+    interactivePromptDetected: err.interactivePromptDetected === true,
+  };
+}
+
 function emitTool(context, toolName, input, result) {
   if (!context.socket) return;
   emitIdeEvent(context.socket, 'ide:tool-call', {
@@ -2253,6 +2313,7 @@ function emitTool(context, toolName, input, result) {
       stderr: result.stderr?.substring(0, 2000),
       exitCode: result.exitCode,
       durationMs: result.durationMs,
+      outputDiagnostics: result.outputDiagnostics,
     },
   });
 }
@@ -2429,12 +2490,14 @@ function structured(okValue, summary, data, isError = false) {
   return { content: formatJson({ ok: okValue, summary, data }), is_error: isError };
 }
 
-function formatExec({ stdout, stderr, exitCode, durationMs }) {
+function formatExec({ stdout, stderr, exitCode, durationMs, outputDiagnostics }) {
   const parts = [];
   if (stdout) parts.push(`[stdout]\n${stdout.trimEnd()}`);
   if (stderr) parts.push(`[stderr]\n${stderr.trimEnd()}`);
   parts.push(`[exitCode] ${exitCode}`);
   parts.push(`[durationMs] ${durationMs || 0}`);
+  const diagnosticsText = formatOutputDiagnostics(outputDiagnostics);
+  if (diagnosticsText) parts.push(diagnosticsText);
   return parts.join('\n\n');
 }
 

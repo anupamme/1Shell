@@ -8,6 +8,7 @@ const fetch = require('node-fetch');
 const { ROOT_DIR } = require('../config/env');
 const { createOneShellCoreTools } = require('../tools/oneshell-core.tools');
 const { emitIdeEvent } = require('./ide.events');
+const { formatOutputDiagnostics, withOutputDiagnostics } = require('../utils/output-diagnostics');
 
 function commandHasTruncationMarker(command) {
   const text = String(command || '');
@@ -815,17 +816,22 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
             const { exec: childExec } = require('child_process');
             const result = await new Promise((resolve) => {
               childExec(command, { timeout, maxBuffer: 8 * 1024 * 1024, cwd: ROOT_DIR }, (e, stdout, stderr) => {
-                resolve({ stdout: stdout || '', stderr: (e && !stderr) ? e.message : (stderr || ''), exitCode: e ? (e.code || 1) : 0, durationMs: 0 });
+                resolve(withOutputDiagnostics({ stdout: stdout || '', stderr: (e && !stderr) ? e.message : (stderr || ''), exitCode: e ? (e.code || 1) : 0, durationMs: 0 }, { timeout }));
               });
             });
             emitTool(socket, sessionId, name, { command, hostId }, result);
             return execResult(result);
           }
-          const result = await bridgeService.execOnHost(hostId, command, timeout, { source: 'ide' });
+          const result = withOutputDiagnostics(await bridgeService.execOnHost(hostId, command, timeout, { source: 'ide' }), { timeout });
           emitTool(socket, sessionId, name, { command, hostId }, result);
           auditService?.log?.({ action: 'ide_exec', hostId, command: command.substring(0, 2000), exitCode: result.exitCode });
           return execResult(result);
         } catch (e) {
+          if (hasExecutionErrorContext(e)) {
+            const result = withOutputDiagnostics(executionErrorToResult(e), { timeout });
+            emitTool(socket, sessionId, name, { command, hostId }, result);
+            return execResult(result);
+          }
           return err(e.message);
         }
       }
@@ -1154,12 +1160,14 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
 
   function execResult(result = {}) {
     const exitCode = Number.isFinite(Number(result.exitCode)) ? Number(result.exitCode) : 1;
-    const raw = {
+    const raw = withOutputDiagnostics({
       stdout: String(result.stdout || ''),
       stderr: String(result.stderr || ''),
       exitCode,
       durationMs: Number.isFinite(Number(result.durationMs)) ? Number(result.durationMs) : 0,
-    };
+      ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+      ...(result.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
+    }, { timeout: result.timeout });
     return {
       content: formatExec(raw),
       is_error: exitCode !== 0,
@@ -1168,15 +1176,42 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       stdout: raw.stdout,
       stderr: raw.stderr,
       durationMs: raw.durationMs,
+      outputDiagnostics: raw.outputDiagnostics,
+      ...(raw.errorCode ? { errorCode: raw.errorCode } : {}),
+      ...(raw.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
     };
   }
 
-  function formatExec({ stdout, stderr, exitCode, durationMs }) {
+  function hasExecutionErrorContext(err) {
+    if (!err || typeof err !== 'object') return false;
+    return ['stdout', 'stderr', 'partialOutput', 'exitCode', 'durationMs', 'interactivePromptDetected']
+      .some((key) => Object.prototype.hasOwnProperty.call(err, key));
+  }
+
+  function executionErrorToResult(err) {
+    const stdout = String(err.stdout ?? err.partialOutput ?? '');
+    const stderrParts = [];
+    if (err.stderr) stderrParts.push(String(err.stderr));
+    if (err.message && !stderrParts.some((part) => part.includes(err.message))) stderrParts.push(String(err.message));
+    if (err.interactivePromptDetected === true) stderrParts.push('[1Shell] interactivePromptDetected=true');
+    return {
+      stdout,
+      stderr: stderrParts.join('\n'),
+      exitCode: typeof err.exitCode === 'number' ? err.exitCode : (err.code === 'EXEC_TIMEOUT' ? 124 : -1),
+      durationMs: typeof err.durationMs === 'number' ? err.durationMs : 0,
+      errorCode: err.code || undefined,
+      interactivePromptDetected: err.interactivePromptDetected === true,
+    };
+  }
+
+  function formatExec({ stdout, stderr, exitCode, durationMs, outputDiagnostics }) {
     const parts = [];
     if (stdout) parts.push(`[stdout]\n${stdout.trimEnd()}`);
     if (stderr) parts.push(`[stderr]\n${stderr.trimEnd()}`);
     parts.push(`[exitCode] ${exitCode}`);
     parts.push(`[durationMs] ${durationMs || 0}`);
+    const diagnosticsText = formatOutputDiagnostics(outputDiagnostics);
+    if (diagnosticsText) parts.push(diagnosticsText);
     return parts.join('\n\n');
   }
 
@@ -1187,6 +1222,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       stderr: result.stderr?.substring(0, 2000),
       exitCode: result.exitCode,
       durationMs: result.durationMs,
+      outputDiagnostics: result.outputDiagnostics,
     }});
   }
 

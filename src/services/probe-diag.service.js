@@ -65,7 +65,7 @@ function parseHttpOutput(stdout) {
   // 我们用 curl -w 'STATUS=%{http_code}\nNAMELOOKUP=%{time_namelookup}\nCONNECT=%{time_connect}\nSTARTTRANSFER=%{time_starttransfer}\nTOTAL=%{time_total}\nSIZE=%{size_download}\n'
   const result = {};
   for (const line of String(stdout || '').split('\n')) {
-    const m = line.match(/^([A-Z_]+)=(.+)$/);
+    const m = line.trim().match(/^([A-Z_]+)=(.*)$/);
     if (m) result[m[1]] = m[2].trim();
   }
   const toNumSec = (k) => result[k] !== undefined ? Number(result[k]) : null;

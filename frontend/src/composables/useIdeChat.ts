@@ -478,12 +478,8 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
       return '';
     }
     const workNote = assistant.text.trim();
-    const thinking: IdeThinkingTimelineItem = {
-      id: assistant.id,
-      kind: 'thinking',
-      text: assistant.text,
-    };
-    timeline.value = timeline.value.map((item) => (item.id === assistant.id ? thinking : item));
+    assistant.status = 'done';
+    touchTimeline();
     return workNote;
   }
 

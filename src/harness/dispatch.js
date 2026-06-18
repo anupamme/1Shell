@@ -1,5 +1,7 @@
 'use strict';
 
+const { analyzeCommandOutput, formatOutputDiagnostics } = require('../utils/output-diagnostics');
+
 /**
  * Harness Dispatch — 核心 6 步管道。
  *
@@ -22,13 +24,17 @@ function toToolResult(safe) {
   const stdout = String(safe.stdout || '');
   const stderr = String(safe.stderr || '');
   const exitCode = typeof safe.exitCode === 'number' ? safe.exitCode : 0;
-  const body = formatExec({ stdout, stderr, exitCode, durationMs: safe.durationMs });
-  return { content: body, is_error: exitCode !== 0, raw: safe };
+  const outputDiagnostics = safe.outputDiagnostics || analyzeCommandOutput(safe);
+  const raw = safe.outputDiagnostics ? safe : { ...safe, outputDiagnostics };
+  const body = formatExec({ stdout, stderr, exitCode, durationMs: safe.durationMs, outputDiagnostics });
+  return { content: body, is_error: exitCode !== 0, raw };
 }
 
-function formatExec({ stdout, stderr, exitCode, durationMs }) {
+function formatExec({ stdout, stderr, exitCode, durationMs, outputDiagnostics }) {
   const parts = [];
   parts.push(`exitCode=${exitCode}${typeof durationMs === 'number' ? ` durationMs=${durationMs}` : ''}`);
+  const diagnosticsText = formatOutputDiagnostics(outputDiagnostics);
+  if (diagnosticsText) parts.push(diagnosticsText);
   if (stdout) parts.push(`stdout:\n${stdout}`);
   if (stderr) parts.push(`stderr:\n${stderr}`);
   return parts.join('\n');
@@ -136,6 +142,13 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
         throw err; // 取消信号透传给上层 loop
       }
       logger?.warn?.(`[harness] executor error: ${err.message}`);
+      const failure = executionErrorToResult(err);
+      if (failure) {
+        const safe = redactResult(failure, context.secrets);
+        const safeMsg = redactText(String(err.message || err), context.secrets);
+        trace.end(traceId, { error: safeMsg, result: safe, exitCode: safe.exitCode });
+        return toToolResult(safe);
+      }
       const safeMsg = redactText(String(err.message || err), context.secrets);
       trace.end(traceId, { error: safeMsg });
       return { content: `[ERROR] ${safeMsg}`, is_error: true };
@@ -152,6 +165,27 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
     });
 
     return toToolResult(safe);
+  };
+}
+
+function executionErrorToResult(err) {
+  if (!err || typeof err !== 'object') return null;
+  const hasExecutionContext = ['stdout', 'stderr', 'partialOutput', 'exitCode', 'durationMs', 'interactivePromptDetected']
+    .some((key) => Object.prototype.hasOwnProperty.call(err, key));
+  if (!hasExecutionContext) return null;
+  const stdout = String(err.stdout ?? err.partialOutput ?? '');
+  const stderrParts = [];
+  if (err.stderr) stderrParts.push(String(err.stderr));
+  if (err.message && !stderrParts.some((part) => part.includes(err.message))) stderrParts.push(String(err.message));
+  if (err.interactivePromptDetected === true) stderrParts.push('[1Shell] interactivePromptDetected=true');
+  const exitCode = typeof err.exitCode === 'number' ? err.exitCode : (err.code === 'EXEC_TIMEOUT' ? 124 : -1);
+  return {
+    stdout,
+    stderr: stderrParts.join('\n'),
+    exitCode,
+    durationMs: typeof err.durationMs === 'number' ? err.durationMs : undefined,
+    errorCode: err.code || undefined,
+    interactivePromptDetected: err.interactivePromptDetected === true,
   };
 }
 

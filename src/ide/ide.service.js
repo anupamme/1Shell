@@ -13,6 +13,7 @@ const {
   composeSystemPrompt,
   resolveAiSkillContext,
 } = require('../skills/ai-skill-resolver');
+const { formatOutputDiagnostics } = require('../utils/output-diagnostics');
 const { canUseTool, createBudgetExceededResult } = require('../agent-runtime/budget');
 const {
   DEFAULT_IDE_AGENT_LIMITS,
@@ -100,38 +101,8 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
     let buffer = '';
     let resolved = false;
 
-    const TOOL_INPUT_PROGRESS_CHARS = 2000;
-    const TOOL_INPUT_PROGRESS_MS = 1200;
-
     function isCurrentRun() {
       return session?.currentRunId === runId && !session?.cancelled;
-    }
-
-    function formatProgressSize(size) {
-      if (size < 1024) return `${size} chars`;
-      return `${(size / 1024).toFixed(1)} KB`;
-    }
-
-    function emitToolInputProgress(blk, { force = false, done = false } = {}) {
-      if (!blk || blk.type !== 'tool_use' || !blk.id || !isCurrentRun()) return;
-      const size = String(blk._inputJson || '').length;
-      const now = Date.now();
-      const lastSize = blk._lastInputProgressSize || 0;
-      const lastAt = blk._lastInputProgressAt || 0;
-      if (!force && size - lastSize < TOOL_INPUT_PROGRESS_CHARS && now - lastAt < TOOL_INPUT_PROGRESS_MS) return;
-      blk._lastInputProgressSize = size;
-      blk._lastInputProgressAt = now;
-      const name = blk.name || '工具';
-      emitToSession(session, socket, 'ide:tool-delta', {
-        sessionId,
-        runId,
-        toolUseId: blk.id,
-        name,
-        stream: 'stdout',
-        text: done
-          ? `${name} 参数已生成，准备执行...\n`
-          : `正在准备 ${name} 参数... (${formatProgressSize(size)})\n`,
-      });
     }
 
     function buildResult() {
@@ -203,7 +174,6 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
         };
         const blk = blocks[evt.index];
         if (blk.type === 'tool_use' && blk.id && isCurrentRun()) {
-          blk._lastInputProgressAt = Date.now();
           emitToSession(session, socket, 'ide:tool-start', {
             sessionId,
             runId,
@@ -212,7 +182,6 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
             input: null,
             phase: 'preparing_input',
           });
-          emitToolInputProgress(blk, { force: true });
         }
         return;
       }
@@ -229,7 +198,6 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
         }
         if (d.type === 'input_json_delta') {
           blk._inputJson += d.partial_json || '';
-          emitToolInputProgress(blk);
         }
         return;
       }
@@ -237,7 +205,6 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
         const blk = blocks[evt.index];
         if (blk && blk._inputJson) {
           try { blk.input = JSON.parse(blk._inputJson); } catch { blk.input = {}; }
-          emitToolInputProgress(blk, { force: true, done: true });
           delete blk._inputJson;
         }
         return;
@@ -645,7 +612,7 @@ function repairDanglingToolUseMessages(messages) {
     const syntheticResults = missing.map((id) => ({
       type: 'tool_result',
       tool_use_id: id,
-      content: 'Previous tool call result is unavailable because the session was interrupted before it was recorded.',
+      content: 'Tool result missing: the session was interrupted before the final tool_result was persisted. No stdout, stderr, exit code, or completion state was recorded for this tool call.',
       is_error: true,
     }));
 
@@ -2213,6 +2180,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       content: contentText || facts.summary || stdout || stderr || '',
       stdout,
       stderr,
+      outputDiagnostics: facts.outputDiagnostics || raw.outputDiagnostics || result.outputDiagnostics || null,
       summary: facts.summary || '',
       error: String(result.error || facts.error || (isError ? facts.summary : '') || '').slice(0, 1000),
     };
@@ -2296,6 +2264,9 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     if (!target.error && source.error !== undefined) target.error = String(source.error || '');
     if (!target.stdout && source.stdout !== undefined) target.stdout = String(source.stdout || '');
     if (!target.stderr && source.stderr !== undefined) target.stderr = String(source.stderr || '');
+    if (!target.outputDiagnostics && source.outputDiagnostics && typeof source.outputDiagnostics === 'object' && !Array.isArray(source.outputDiagnostics)) {
+      target.outputDiagnostics = source.outputDiagnostics;
+    }
   }
 
   function parseToolResultJson(contentText = '') {
@@ -2336,6 +2307,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       observation.error ? `error=${String(observation.error).slice(0, 1000)}` : '',
       observation.summary ? `summary=${String(observation.summary).slice(0, 1000)}` : '',
     ].filter(Boolean);
+    const diagnosticsText = formatOutputDiagnostics(observation.outputDiagnostics);
+    if (diagnosticsText) lines.push(diagnosticsText);
     if (observation.toolName === 'list_hosts') {
       const parsed = parseToolResultJson(body);
       const hosts = parsed?.data && typeof parsed.data === 'object' && Array.isArray(parsed.data.hosts)
