@@ -3,7 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const { DATA_DIR } = require('../config/env');
 
 /**
@@ -37,6 +39,46 @@ function createFileService({ hostService, probeAgentService = null }) {
   /**
    * 获取 Windows 所有可用盘符
    */
+  function randomTransferSuffix() {
+    return typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  }
+
+  function buildLocalTempSibling(finalPath, label = 'upload') {
+    const dir = path.dirname(finalPath);
+    const base = path.basename(finalPath);
+    return path.join(dir, `.${base}.1shell-${label}-${randomTransferSuffix()}.part`);
+  }
+
+  function buildRemoteTempSibling(finalPath, label = 'upload') {
+    const clean = String(finalPath || '').replace(/\/+$/, '');
+    return `${clean}.1shell-${label}-${randomTransferSuffix()}.part`;
+  }
+
+  async function renameRemoteReplacing(sftp, tempPath, finalPath) {
+    try {
+      await sftpCall(sftp, 'rename', tempPath, finalPath);
+      return;
+    } catch (firstErr) {
+      const exists = await sftpCall(sftp, 'lstat', finalPath).then(() => true).catch(() => false);
+      if (!exists) throw firstErr;
+      const backupPath = buildRemoteTempSibling(finalPath, 'replace-backup');
+      let backupCreated = false;
+      try {
+        await sftpCall(sftp, 'rename', finalPath, backupPath);
+        backupCreated = true;
+        await sftpCall(sftp, 'rename', tempPath, finalPath);
+        await sftpCall(sftp, 'unlink', backupPath).catch(() => {});
+      } catch (replaceErr) {
+        if (backupCreated) {
+          await sftpCall(sftp, 'rename', backupPath, finalPath).catch(() => {});
+        }
+        throw replaceErr;
+      }
+    }
+  }
+
   function getWindowsDrives() {
     const drives = [];
     const possibleDrives = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
@@ -152,6 +194,7 @@ function createFileService({ hostService, probeAgentService = null }) {
 
   function createParallelSftpReadStream(sftp, filePath, fileSize, options = {}) {
     const totalSize = Math.max(0, Number(fileSize) || 0);
+    const startOffset = clampInt(options.startOffset, 0, 0, totalSize);
     const chunkSize = clampInt(options.chunkSize, DEFAULT_DOWNLOAD_CHUNK_SIZE, 16 * 1024, DEFAULT_DOWNLOAD_CHUNK_SIZE);
     const concurrency = clampInt(options.concurrency, DEFAULT_DOWNLOAD_CONCURRENCY, 1, 128);
     const bufferedChunks = clampInt(options.bufferedChunks, DEFAULT_DOWNLOAD_BUFFERED_CHUNKS, concurrency, 256);
@@ -162,10 +205,10 @@ function createFileService({ hostService, probeAgentService = null }) {
     let closing = false;
     let ended = false;
     let failed = false;
-    let nextOffset = 0;
+    let nextOffset = startOffset;
     let nextIndex = 0;
     let expectedIndex = 0;
-    let deliveredBytes = 0;
+    let deliveredBytes = startOffset;
     let inflight = 0;
     let effectiveSize = totalSize;
     let backpressured = false;
@@ -556,13 +599,14 @@ function createFileService({ hostService, probeAgentService = null }) {
   /**
    * 下载本机文件，返回可读流和元信息
    */
-  async function downloadLocal(filePath) {
+  async function downloadLocal(filePath, options = {}) {
     assertSafeFilePath(filePath, '下载');
     const resolved = path.resolve(filePath);
     const stat = await fs.promises.stat(resolved);
     if (stat.isDirectory()) throw new Error('不能下载目录');
+    const startOffset = clampInt(options.startOffset, 0, 0, stat.size);
     return {
-      stream: fs.createReadStream(resolved),
+      stream: fs.createReadStream(resolved, startOffset > 0 ? { start: startOffset } : undefined),
       size: stat.size,
       filename: path.basename(resolved),
       source: 'local',
@@ -605,7 +649,7 @@ function createFileService({ hostService, probeAgentService = null }) {
     });
   }
 
-  async function downloadRemoteViaExec(hostId, filePath) {
+  async function downloadRemoteViaExec(hostId, filePath, options = {}) {
     assertSafeFilePath(filePath, '下载');
     const { client, proxyClient } = await hostService.connectToHost(hostId, { readyTimeout: 15000, probeOs: false });
     let closed = false;
@@ -619,7 +663,10 @@ function createFileService({ hostService, probeAgentService = null }) {
 
     try {
       const size = await statRemoteFileViaExec(client, filePath);
-      const command = `exec cat < ${shellQuote(filePath)}`;
+      const startOffset = clampInt(options.startOffset, 0, 0, size);
+      const command = startOffset > 0
+        ? `exec tail -c +${startOffset + 1} -- ${shellQuote(filePath)}`
+        : `exec cat < ${shellQuote(filePath)}`;
       const stream = await new Promise((resolve, reject) => {
         client.exec(command, { pty: false }, (err, execStream) => {
           if (err) return reject(err);
@@ -641,7 +688,7 @@ function createFileService({ hostService, probeAgentService = null }) {
     }
   }
 
-  async function downloadRemoteViaSftp(hostId, filePath) {
+  async function downloadRemoteViaSftp(hostId, filePath, options = {}) {
     assertSafeFilePath(filePath, '下载');
     const { client, proxyClient } = await hostService.connectToHost(hostId, { readyTimeout: 15000 });
 
@@ -662,7 +709,8 @@ function createFileService({ hostService, probeAgentService = null }) {
             return reject(new Error('不能下载目录'));
           }
 
-          const tuning = getSftpReadTuning(sftp);
+          const startOffset = clampInt(options.startOffset, 0, 0, stats.size);
+          const tuning = { ...getSftpReadTuning(sftp), startOffset };
           const stream = createParallelSftpReadStream(sftp, filePath, stats.size, tuning);
           const filename = filePath.split('/').pop() || 'download';
 
@@ -682,24 +730,24 @@ function createFileService({ hostService, probeAgentService = null }) {
   /**
    * 统一入口：下载文件
    */
-  async function downloadRemote(hostId, filePath) {
+  async function downloadRemote(hostId, filePath, options = {}) {
     if (process.env.ONESHELL_FILE_DOWNLOAD_MODE !== 'sftp') {
       try {
-        return await downloadRemoteViaExec(hostId, filePath);
+        return await downloadRemoteViaExec(hostId, filePath, options);
       } catch (err) {
         if (process.env.ONESHELL_FILE_DOWNLOAD_MODE === 'exec') throw err;
       }
     }
-    return downloadRemoteViaSftp(hostId, filePath);
+    return downloadRemoteViaSftp(hostId, filePath, options);
   }
 
-  async function downloadFile(hostId, filePath) {
+  async function downloadFile(hostId, filePath, options = {}) {
     const host = hostService.findHost(hostId);
     if (!host) throw new Error('主机不存在');
     if (host.type === 'local' || host.id === 'local') {
-      return downloadLocal(filePath);
+      return downloadLocal(filePath, options);
     }
-    return downloadRemote(hostId, filePath);
+    return downloadRemote(hostId, filePath, options);
   }
 
   // ─── 文件上传 ─────────────────────────────────────────────────────────────
@@ -708,6 +756,11 @@ function createFileService({ hostService, probeAgentService = null }) {
    * 上传文件到本机
    */
   async function uploadLocal(dirPath, filename, buffer) {
+    const safeName = safeUploadFilename(filename);
+    return uploadLocalStream(dirPath, safeName, Readable.from(buffer), buffer.length);
+  }
+
+  async function uploadLocalDirectOld(dirPath, filename, buffer) {
     const safeName = safeUploadFilename(filename);
     const resolved = path.resolve(dirPath, safeName);
     try {
@@ -718,12 +771,38 @@ function createFileService({ hostService, probeAgentService = null }) {
     return { path: resolved, size: buffer.length };
   }
 
+  async function uploadLocalStream(dirPath, filename, readStream, size = null) {
+    const safeName = safeUploadFilename(filename);
+    const resolved = path.resolve(dirPath, safeName);
+    const tempPath = buildLocalTempSibling(resolved);
+    try {
+      await pipeline(readStream, fs.createWriteStream(tempPath, { flags: 'wx' }));
+      const tempStat = await fs.promises.stat(tempPath);
+      const expectedSize = Number(size);
+      if (Number.isFinite(expectedSize) && tempStat.size !== expectedSize) {
+        throw new Error(`upload size mismatch: expected ${expectedSize}, got ${tempStat.size}`);
+      }
+      await fs.promises.rename(tempPath, resolved);
+    } catch (err) {
+      await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+      throw await enrichLocalWriteError(err, resolved, '上传');
+    }
+    const stat = await fs.promises.stat(resolved);
+    return { path: resolved, size: stat.size };
+  }
+
   /**
    * 上传文件到远程主机
    */
   async function uploadRemote(hostId, dirPath, filename, buffer) {
     const safeName = safeUploadFilename(filename);
+    return uploadRemoteStream(hostId, dirPath, safeName, Readable.from(buffer), buffer.length);
+  }
+
+  async function uploadRemoteDirectOld(hostId, dirPath, filename, buffer) {
+    const safeName = safeUploadFilename(filename);
     const remotePath = dirPath.endsWith('/') ? dirPath + safeName : dirPath + '/' + safeName;
+    const tempPath = buildRemoteTempSibling(remotePath);
     assertSafeFilePath(remotePath, '上传');
 
     const entry = await acquireSftp(hostId);
@@ -750,6 +829,35 @@ function createFileService({ hostService, probeAgentService = null }) {
     }
   }
 
+  async function uploadRemoteStream(hostId, dirPath, filename, readStream, size = null) {
+    const safeName = safeUploadFilename(filename);
+    const remotePath = dirPath.endsWith('/') ? dirPath + safeName : dirPath + '/' + safeName;
+    const tempPath = buildRemoteTempSibling(remotePath);
+    assertSafeFilePath(remotePath, '上传');
+
+    const entry = await acquireSftp(hostId);
+    const { sftp } = entry;
+
+    try {
+      const writeStream = sftp.createWriteStream(tempPath);
+      await pipeline(readStream, writeStream);
+      const tempStats = await sftpCall(sftp, 'stat', tempPath).catch(() => null);
+      const expectedSize = Number(size);
+      if (Number.isFinite(expectedSize) && tempStats?.size !== expectedSize) {
+        throw new Error(`upload size mismatch: expected ${expectedSize}, got ${tempStats?.size ?? 0}`);
+      }
+      await renameRemoteReplacing(sftp, tempPath, remotePath);
+      const stats = await sftpCall(sftp, 'stat', remotePath).catch(() => null);
+      return { path: remotePath, size: stats?.size ?? tempStats?.size ?? 0 };
+    } catch (err) {
+      await sftpCall(sftp, 'unlink', tempPath).catch(() => {});
+      releaseSftp(hostId);
+      throw err;
+    } finally {
+      returnSftp(hostId);
+    }
+  }
+
   /**
    * 统一入口：上传文件
    */
@@ -760,6 +868,16 @@ function createFileService({ hostService, probeAgentService = null }) {
       return uploadLocal(dirPath, filename, buffer);
     }
     return uploadRemote(hostId, dirPath, filename, buffer);
+  }
+
+  async function uploadFileStream(hostId, dirPath, filename, readStream, size = null) {
+    const host = hostService.findHost(hostId);
+    if (!host) throw new Error('主机不存在');
+    if (!readStream || typeof readStream.pipe !== 'function') throw new Error('上传流无效');
+    if (host.type === 'local' || host.id === 'local') {
+      return uploadLocalStream(dirPath, filename, readStream, size);
+    }
+    return uploadRemoteStream(hostId, dirPath, filename, readStream, size);
   }
 
   // ─── 文件写入（编辑保存） ──────────────────────────────────────────────
@@ -1113,6 +1231,7 @@ function createFileService({ hostService, probeAgentService = null }) {
     readFile,
     downloadFile,
     uploadFile,
+    uploadFileStream,
     writeFile,
     createDirectory,
     createFile,

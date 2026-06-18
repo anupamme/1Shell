@@ -45,7 +45,7 @@ onMounted(syncFromDom);
 </script>
 
 <template>
-  <header class="shrink-0 flex items-center h-12 px-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 transition-colors">
+  <header class="app-header shrink-0 flex items-center h-12 px-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 transition-colors">
     <!-- 左侧：Logo + 导航 -->
     <div class="flex items-center gap-2">
       <RouterLink
@@ -56,12 +56,12 @@ onMounted(syncFromDom);
         <img src="/logo.png" alt="1Shell" class="w-full h-full object-cover" />
       </RouterLink>
       <div class="w-px h-5 bg-slate-200 dark:bg-slate-700 mx-1"></div>
-      <nav class="flex gap-1">
+      <nav class="app-header-nav flex gap-1">
         <RouterLink
           v-for="item in navItems"
           :key="item.to"
           :to="item.to"
-          class="px-3 py-1.5 text-sm font-medium rounded-md transition-colors duration-150"
+          class="app-header-nav-link px-3 py-1.5 text-sm font-medium rounded-md transition-colors duration-150"
           :class="isActive(item)
             ? 'text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-500/10'
             : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/[0.06]'"
@@ -72,12 +72,12 @@ onMounted(syncFromDom);
     </div>
 
     <!-- 右侧：GitHub + 设置 + 主题 -->
-    <div class="flex items-center gap-1 ml-auto">
+    <div class="app-header-actions flex items-center gap-1 ml-auto">
       <a
         :href="GITHUB_URL"
         target="_blank"
         rel="noopener noreferrer"
-        class="flex items-center justify-center w-9 h-9 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] rounded-md transition-colors duration-150"
+        class="app-header-github flex items-center justify-center w-9 h-9 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] rounded-md transition-colors duration-150"
         title="GitHub 项目主页"
       >
         <AppIcon name="github" :size="20" />

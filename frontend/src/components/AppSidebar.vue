@@ -21,8 +21,8 @@ const navItems: NavItem[] = [
 </script>
 
 <template>
-  <aside class="sidebar-aside shrink-0 w-16 flex flex-col items-stretch py-3">
-    <nav class="flex flex-col gap-1 px-1">
+  <aside class="sidebar-aside app-sidebar shrink-0 w-16 flex flex-col items-stretch py-3">
+    <nav class="app-sidebar-nav flex flex-col gap-1 px-1">
       <RouterLink
         v-for="item in navItems"
         :key="item.to"

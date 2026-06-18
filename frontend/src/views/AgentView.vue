@@ -21,6 +21,7 @@ import {
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { renderMarkdown } from '@/utils/markdown';
 import { displayAssistantTextAfterToolResult, parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
+import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlashCommand } from '@/utils/agentSlashCommands';
 import type { HostInfo, HostsListResponse } from '@/utils/scripts';
 
 // ── provider model ──
@@ -156,21 +157,7 @@ const rewindHighlight = ref(0);
 const rewindModalRef = ref<HTMLElement | null>(null);
 
 // ── slash commands ──
-interface SlashCmd {
-  cmd: string; label: string; desc: string; icon: string;
-}
-
-const SLASH_COMMANDS: SlashCmd[] = [
-  { cmd: '/model', label: '选择模型', desc: '切换 AI 模型与渠道', icon: 'spark' },
-  { cmd: '/task',  label: '任务模式', desc: '描述目标，AI 只读探索推演出需要的输入并打包任务', icon: 'save' },
-  { cmd: '/goal',  label: '设置目标', desc: '设定 Agent 工作目标', icon: 'target' },
-  { cmd: '/host',  label: '选择主机', desc: '限定目标主机范围', icon: 'server' },
-  { cmd: '/mode',  label: '审批模式', desc: '手动审批 / 委托 / 完全访问', icon: 'shield' },
-  { cmd: '/compact', label: '压缩上下文', desc: '总结旧消息并保留最近上下文', icon: 'history' },
-  { cmd: '/remind', label: '回溯', desc: '列出或回到某次输入，并撤销之后的文件改动', icon: 'history' },
-  { cmd: '/clear', label: '清空时间线', desc: '重置当前会话', icon: 'close' },
-];
-
+const SLASH_COMMANDS = agentSlashCommandsForSurface('agent');
 const slashHighlight = ref(0);
 const slashSubView = ref<string | null>(null);
 const slashSubHighlight = ref(0);
@@ -247,14 +234,10 @@ const composerPlaceholder = computed(() => {
     : '输入目标、命令，或直接粘贴图片/文件后发送…';
 });
 
-const slashCmds = computed<SlashCmd[]>(() => {
+const slashCmds = computed<AgentSlashCommand[]>(() => {
   if (isGoalComposerMode.value) return [];
   if (slashSubView.value) return [];
-  const v = composerInput.value;
-  if (!v.startsWith('/')) return [];
-  const prefix = v.slice(1).toLowerCase();
-  if (!prefix) return SLASH_COMMANDS;
-  return SLASH_COMMANDS.filter(c => c.cmd.slice(1).toLowerCase().includes(prefix));
+  return filterAgentSlashCommands(composerInput.value, SLASH_COMMANDS);
 });
 
 const showSlashMenu = computed(() => !rewindModalOpen.value && !showModelDropdown.value && !showModeDropdown.value && (slashCmds.value.length > 0 || slashSubView.value !== null));
@@ -318,7 +301,7 @@ function closeSlashMenu(): void {
   slashSubView.value = null;
 }
 
-function selectSlashCmd(cmd: SlashCmd): void {
+function selectSlashCmd(cmd: AgentSlashCommand): void {
   if (cmd.cmd === '/model') { openSlashModel(); return; }
   if (cmd.cmd === '/task') { openSlashTask(); return; }
   if (cmd.cmd === '/goal') { openGoalComposer(); return; }
@@ -1305,8 +1288,9 @@ function approveAction(action: 'allow' | 'deny'): void {
 </script>
 
 <template>
-  <div class="flex h-full bg-white dark:bg-[#0b0f19] text-slate-800 dark:text-slate-200 transition-colors">
+  <div class="agent-view-shell flex h-full bg-white dark:bg-[#0b0f19] text-slate-800 dark:text-slate-200 transition-colors">
     <AgentSessionRail
+      class="agent-view-rail"
       :sessions="railSessions"
       :active-id="ide.currentSessionId.value"
       :loading="sessionsLoading"
@@ -1320,9 +1304,9 @@ function approveAction(action: 'allow' | 'deny'): void {
       @delete="onDeleteSession"
       @select-host="onRailSelectHost"
     />
-    <div class="flex flex-col flex-1 min-w-0 h-full">
+    <div class="agent-view-main flex flex-col flex-1 min-w-0 h-full">
     <!-- ── status bar ── -->
-    <header class="shrink-0 flex items-center gap-3 px-5 h-11 border-b border-slate-200 dark:border-white/[0.05] bg-stone-50 dark:bg-[#0f1321] select-none">
+    <header class="agent-view-header shrink-0 flex items-center gap-3 px-5 h-11 border-b border-slate-200 dark:border-white/[0.05] bg-stone-50 dark:bg-[#0f1321] select-none">
       <span class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">Agent</span>
       <div class="flex items-center gap-2 text-xs">
         <span class="text-slate-400 dark:text-slate-500">目标</span>
@@ -1348,7 +1332,7 @@ function approveAction(action: 'allow' | 'deny'): void {
     </header>
 
     <!-- ── body ── -->
-    <div class="flex-1 flex min-h-0 overflow-hidden">
+    <div class="agent-view-body flex-1 flex min-h-0 overflow-hidden">
       <!-- timeline -->
       <div ref="scrollEl" class="flex-1 overflow-y-auto overflow-x-hidden" @scroll="onScroll">
         <!-- empty state -->
@@ -1467,7 +1451,7 @@ function approveAction(action: 'allow' | 'deny'): void {
       </div>
 
       <!-- approval sidebar -->
-      <div v-if="ide.approveRequest.value" class="w-[380px] shrink-0 border-l border-slate-200 dark:border-white/[0.06] bg-stone-50 dark:bg-[#0f1321] flex flex-col overflow-hidden">
+      <div v-if="ide.approveRequest.value" class="agent-approval-panel w-[380px] shrink-0 border-l border-slate-200 dark:border-white/[0.06] bg-stone-50 dark:bg-[#0f1321] flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-3 text-sm font-semibold text-amber-600 dark:text-amber-400 border-b border-slate-200 dark:border-white/[0.06]">
           <AppIcon name="clock" :size="18" />
           <span>等待确认</span>

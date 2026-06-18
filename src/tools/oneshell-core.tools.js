@@ -2,10 +2,28 @@
 
 const fs = require('fs');
 const path = require('path');
-const { ROOT_DIR } = require('../config/env');
+const crypto = require('crypto');
+const { once } = require('events');
+const { Transform } = require('stream');
+const { pipeline } = require('stream/promises');
+const { DATA_DIR, ROOT_DIR } = require('../config/env');
 const { execLocalCommand } = require('../../lib/exec-local');
 const { emitIdeEvent } = require('../ide/ide.events');
 const { MCP_STANDARD_TOOL_SET } = require('./mcp-tool-profiles');
+
+const INLINE_UPLOAD_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_INLINE_UPLOAD_MAX_BYTES', 1024 * 1024);
+const TEXT_WRITE_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_TEXT_WRITE_MAX_BYTES', 2 * 1024 * 1024);
+const UPLOAD_CHUNK_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_UPLOAD_CHUNK_MAX_BYTES', 1024 * 1024);
+const UPLOAD_SESSION_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_UPLOAD_SESSION_MAX_BYTES', 512 * 1024 * 1024);
+const UPLOAD_SESSION_TTL_MS = envPositiveNumber('ONESHELL_MCP_UPLOAD_SESSION_TTL_MS', 30 * 60 * 1000);
+const MCP_UPLOAD_TMP_DIR = path.join(DATA_DIR || path.join(ROOT_DIR, 'data'), 'tmp', 'mcp-uploads');
+const FILE_TRANSFER_TMP_DIR = path.join(DATA_DIR || path.join(ROOT_DIR, 'data'), 'tmp', 'file-transfers');
+const FILE_TRANSFER_RESULT_TTL_MS = envPositiveNumber('ONESHELL_MCP_FILE_TRANSFER_RESULT_TTL_MS', 24 * 60 * 60 * 1000);
+const SYNC_ASK_DEFAULT_TIMEOUT_MS = 300000;
+const SYNC_ASK_MAX_TIMEOUT_MS = 600000;
+const DETACHED_ASK_DEFAULT_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_TIMEOUT_MS', 60 * 60 * 1000);
+const DETACHED_ASK_MAX_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_MAX_TIMEOUT_MS', 6 * 60 * 60 * 1000);
+const DETACHED_ASK_RESULT_TTL_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_RESULT_TTL_MS', 24 * 60 * 60 * 1000);
 
 function commandHasTruncationMarker(command) {
   const text = String(command || '');
@@ -60,7 +78,7 @@ const TOOL_DEFS = [
   {
     name: 'ask_1shell_ai',
     targets: ['mcp'],
-    description: '把复杂运维、监控、脚本、审计或诊断目标委托给 1Shell AI，由它在内部选择合适工具并返回结果摘要。',
+    description: '把复杂运维、监控、脚本、审计或诊断目标委托给 1Shell AI，由它在内部选择合适工具并返回结果摘要。长任务请传 background=true，然后用 get_1shell_ai_run 查询结果，避免单次 MCP 请求断开导致等待失败。',
     schema: {
       type: 'object',
       properties: {
@@ -68,9 +86,24 @@ const TOOL_DEFS = [
         hostId: { type: 'string', description: '可选的目标主机 ID，用于限定目标范围' },
         mode: { type: 'string', enum: ['answer', 'plan', 'execute'], description: '执行模式：answer 只回答，plan 只制定计划，execute 可执行必要动作；默认 answer' },
         requireConfirmation: { type: 'boolean', description: '是否要求 1Shell AI 在变更型动作前走确认；默认 true' },
-        timeoutMs: { type: 'number', description: '等待 1Shell AI 完成的超时时间，默认 300000，最大 600000' },
+        timeoutMs: { type: 'number', description: '等待 1Shell AI 完成的超时时间；同步默认 300000 最大 600000，后台默认 3600000 最大 21600000' },
+        background: { type: 'boolean', description: 'true 时立即返回 runId，1Shell AI 在后台继续运行' },
+        async: { type: 'boolean', description: 'background 的别名；true 时后台运行' },
+        wait: { type: 'boolean', description: 'false 时等同 background=true' },
       },
       required: ['goal'],
+    },
+  },
+  {
+    name: 'get_1shell_ai_run',
+    targets: ['mcp'],
+    description: '查询 ask_1shell_ai background=true 启动的后台运行状态和最终结果。',
+    schema: {
+      type: 'object',
+      properties: {
+        runId: { type: 'string', description: 'ask_1shell_ai 返回的 runId' },
+      },
+      required: ['runId'],
     },
   },
   {
@@ -132,7 +165,7 @@ const TOOL_DEFS = [
   {
     name: 'write_remote_file',
     targets: ['mcp', 'ide'],
-    description: '写入指定主机上的文本文件。可设置 backup=true 在覆盖前写一份同目录 .1shell-backup 备份。',
+    description: `写入指定主机上的小型文本文件。content 上限 ${TEXT_WRITE_MAX_BYTES} bytes；大文件请使用 upload_file localPath 或分片上传工具。可设置 backup=true 在覆盖前写一份同目录 .1shell-backup 备份。`,
     schema: {
       type: 'object',
       properties: {
@@ -147,7 +180,7 @@ const TOOL_DEFS = [
   {
     name: 'upload_file',
     targets: ['mcp', 'ide'],
-    description: '把 1Shell 本机文件或传入内容上传到指定主机目录。localPath 相对 1Shell 根目录或绝对路径；也可传 content/base64Content。',
+    description: `把 1Shell 本机文件或小内容上传到指定主机目录。localPath 相对 1Shell 根目录或绝对路径并走流式上传；content/base64Content 仅适合小文件，上限 ${INLINE_UPLOAD_MAX_BYTES} bytes。外部 MCP 客户端上传大文件请使用 start_file_upload/append_file_upload/finish_file_upload 分片流程。`,
     schema: {
       type: 'object',
       properties: {
@@ -159,6 +192,111 @@ const TOOL_DEFS = [
         base64Content: { type: 'string', description: '直接上传的 base64 内容' },
       },
       required: ['hostId', 'dirPath'],
+    },
+  },
+  {
+    name: 'start_file_upload',
+    targets: ['mcp'],
+    description: '为外部 MCP 客户端创建大文件分片上传会话。随后用 append_file_upload 逐块传 base64，最后 finish_file_upload 流式写入目标主机。',
+    schema: {
+      type: 'object',
+      properties: {
+        hostId: { type: 'string', description: '目标主机 ID，local 表示本机' },
+        dirPath: { type: 'string', description: '目标目录路径' },
+        filename: { type: 'string', description: '目标文件名' },
+        size: { type: 'number', description: '可选，总字节数；超过服务器上限会被拒绝' },
+      },
+      required: ['hostId', 'dirPath', 'filename'],
+    },
+  },
+  {
+    name: 'append_file_upload',
+    targets: ['mcp'],
+    description: `向分片上传会话追加一个 base64 分片。单个分片解码后上限 ${UPLOAD_CHUNK_MAX_BYTES} bytes；offset 必须等于服务端返回的 nextOffset。`,
+    schema: {
+      type: 'object',
+      properties: {
+        uploadId: { type: 'string', description: 'start_file_upload 返回的 uploadId' },
+        offset: { type: 'number', description: '本分片起始字节偏移，必须等于上次返回的 nextOffset' },
+        base64Content: { type: 'string', description: '本分片的 base64 内容' },
+      },
+      required: ['uploadId', 'offset', 'base64Content'],
+    },
+  },
+  {
+    name: 'finish_file_upload',
+    targets: ['mcp'],
+    description: '完成分片上传，将暂存文件流式上传到目标主机并清理本地暂存文件。',
+    schema: {
+      type: 'object',
+      properties: {
+        uploadId: { type: 'string', description: 'start_file_upload 返回的 uploadId' },
+      },
+      required: ['uploadId'],
+    },
+  },
+  {
+    name: 'cancel_file_upload',
+    targets: ['mcp'],
+    description: '取消分片上传会话并删除本地暂存文件。',
+    schema: {
+      type: 'object',
+      properties: {
+        uploadId: { type: 'string', description: 'start_file_upload 返回的 uploadId' },
+      },
+      required: ['uploadId'],
+    },
+  },
+  {
+    name: 'start_file_download',
+    targets: ['mcp'],
+    description: 'Start a background file download. Data is staged outside the final path, supports progress, resume, sha256 verification, and commits to localPath only after validation.',
+    schema: {
+      type: 'object',
+      properties: {
+        hostId: { type: 'string', description: 'Source host ID; local means this machine' },
+        path: { type: 'string', description: 'Source file path' },
+        localPath: { type: 'string', description: 'Destination path on the 1Shell machine, relative to project root or absolute' },
+        expectedSha256: { type: 'string', description: 'Optional expected sha256 before commit' },
+        sha256: { type: 'string', description: 'Alias of expectedSha256' },
+      },
+      required: ['hostId', 'path', 'localPath'],
+    },
+  },
+  {
+    name: 'get_file_transfer',
+    targets: ['mcp'],
+    description: 'Get status, progress, checksum, error, and final path for a background file transfer.',
+    schema: {
+      type: 'object',
+      properties: {
+        transferId: { type: 'string', description: 'transferId returned by start_file_download' },
+      },
+      required: ['transferId'],
+    },
+  },
+  {
+    name: 'resume_file_transfer',
+    targets: ['mcp'],
+    description: 'Resume a failed background download from the staged partial file offset.',
+    schema: {
+      type: 'object',
+      properties: {
+        transferId: { type: 'string', description: 'transferId returned by start_file_download' },
+      },
+      required: ['transferId'],
+    },
+  },
+  {
+    name: 'cancel_file_transfer',
+    targets: ['mcp'],
+    description: 'Cancel a background file transfer and clean uncommitted staged data.',
+    schema: {
+      type: 'object',
+      properties: {
+        transferId: { type: 'string', description: 'transferId returned by start_file_download' },
+      },
+      required: ['transferId'],
     },
   },
   {
@@ -469,6 +607,9 @@ const TOOL_DEFS = [
 
 function createOneShellCoreTools(deps = {}) {
   const toolMap = new Map(TOOL_DEFS.map((tool) => [tool.name, tool]));
+  const aiRuns = new Map();
+  const uploadSessions = new Map();
+  const fileTransfers = new Map();
 
   const IN_DOCKER = process.env.ONESHELL_IN_DOCKER === '1' || fs.existsSync('/.dockerenv');
   const READONLY_MOUNT_HINT = [
@@ -513,6 +654,8 @@ function createOneShellCoreTools(deps = {}) {
         return handleListHosts(context);
       case 'ask_1shell_ai':
         return handleAskOneShellAi(input, context);
+      case 'get_1shell_ai_run':
+        return handleGetOneShellAiRun(input);
       case 'list_scripts':
         return handleListScripts(input);
       case 'run_script':
@@ -525,6 +668,22 @@ function createOneShellCoreTools(deps = {}) {
         return handleWriteRemoteFile(input, context);
       case 'upload_file':
         return handleUploadFile(input, context);
+      case 'start_file_upload':
+        return handleStartFileUpload(input, context);
+      case 'append_file_upload':
+        return handleAppendFileUpload(input, context);
+      case 'finish_file_upload':
+        return handleFinishFileUpload(input, context);
+      case 'cancel_file_upload':
+        return handleCancelFileUpload(input, context);
+      case 'start_file_download':
+        return handleStartFileDownload(input, context);
+      case 'get_file_transfer':
+        return handleGetFileTransfer(input);
+      case 'resume_file_transfer':
+        return handleResumeFileTransfer(input, context);
+      case 'cancel_file_transfer':
+        return handleCancelFileTransfer(input, context);
       case 'download_file':
         return handleDownloadFile(input, context);
       case 'create_directory':
@@ -651,6 +810,81 @@ function createOneShellCoreTools(deps = {}) {
     return structured(true, hosts.length > 0 ? '主机列表读取成功' : '无允许访问的主机', { hosts });
   }
 
+  function normalizeAskTimeout(input, background = false) {
+    const raw = Number(input.timeoutMs);
+    const fallback = background ? DETACHED_ASK_DEFAULT_TIMEOUT_MS : SYNC_ASK_DEFAULT_TIMEOUT_MS;
+    const max = background ? DETACHED_ASK_MAX_TIMEOUT_MS : SYNC_ASK_MAX_TIMEOUT_MS;
+    return raw > 0 ? Math.min(raw, max) : Math.min(fallback, max);
+  }
+
+  function pruneAiRuns() {
+    const now = Date.now();
+    for (const [runId, run] of aiRuns) {
+      if (!run.finishedAtMs) continue;
+      if (now - run.finishedAtMs > DETACHED_ASK_RESULT_TTL_MS) aiRuns.delete(runId);
+    }
+  }
+
+  function publicAiRun(run) {
+    const data = {
+      runId: run.runId,
+      sessionId: run.sessionId,
+      status: run.status,
+      mode: run.mode,
+      hostId: run.hostId || null,
+      startedAt: run.startedAt,
+      updatedAt: run.updatedAt,
+      finishedAt: run.finishedAt || null,
+      timeoutMs: run.timeoutMs,
+      goalPreview: run.goalPreview,
+      response: run.result?.text || '',
+      toolCalls: run.result?.toolCalls || [],
+      error: run.error || null,
+    };
+    return data;
+  }
+
+  function startDetachedAiRun({ askPayload, mode, hostId, goal, timeoutMs }) {
+    pruneAiRuns();
+    const runId = createRuntimeId('ai-run');
+    const sessionId = createRuntimeId('mcp-ai');
+    const now = new Date().toISOString();
+    const run = {
+      runId,
+      sessionId,
+      status: 'running',
+      mode,
+      hostId: hostId || '',
+      timeoutMs,
+      goalPreview: String(goal || '').replace(/\s+/g, ' ').slice(0, 240),
+      startedAt: now,
+      updatedAt: now,
+      finishedAt: null,
+      finishedAtMs: 0,
+      result: null,
+      error: null,
+    };
+    aiRuns.set(runId, run);
+
+    void deps.ideService.ask({ ...askPayload, sessionId, detached: true })
+      .then((result) => {
+        run.status = 'succeeded';
+        run.result = { text: result.text || '', toolCalls: result.toolCalls || [], events: result.events || [] };
+        run.updatedAt = new Date().toISOString();
+        run.finishedAt = run.updatedAt;
+        run.finishedAtMs = Date.now();
+      })
+      .catch((err) => {
+        run.status = 'failed';
+        run.error = err?.message || '1Shell AI 执行失败';
+        run.updatedAt = new Date().toISOString();
+        run.finishedAt = run.updatedAt;
+        run.finishedAtMs = Date.now();
+      });
+
+    return run;
+  }
+
   async function handleAskOneShellAi(input, context) {
     if (!deps.ideService?.ask) return err('1Shell AI gateway 未初始化');
     const goal = String(input.goal || '').trim();
@@ -658,7 +892,8 @@ function createOneShellCoreTools(deps = {}) {
     const mode = ['answer', 'plan', 'execute'].includes(input.mode) ? input.mode : 'answer';
     const hostId = String(input.hostId || '').trim();
     const requireConfirmation = input.requireConfirmation !== false;
-    const timeoutMs = Number(input.timeoutMs) > 0 ? Math.min(Number(input.timeoutMs), 600000) : 300000;
+    const background = input.background === true || input.async === true || input.wait === false;
+    const timeoutMs = normalizeAskTimeout(input, background);
     const host = hostId && deps.hostService?.findHost ? deps.hostService.findHost(hostId) : null;
     const contextHosts = host ? [{
       id: host.id,
@@ -673,7 +908,7 @@ function createOneShellCoreTools(deps = {}) {
       '[MCP_GATEWAY_REQUEST]',
       `mode=${mode}`,
       hostId ? `hostId=${hostId}` : '',
-      'External MCP clients directly see only these tools: list_hosts, host_exec, list_remote_dir, read_remote_file, write_remote_file, create_directory, delete_path, rename_path, upload_file, download_file, ask_1shell_ai.',
+      'External MCP clients directly see only these tools: list_hosts, host_exec, list_remote_dir, read_remote_file, write_remote_file, create_directory, delete_path, rename_path, upload_file, download_file, start_file_upload, append_file_upload, finish_file_upload, cancel_file_upload, start_file_download, get_file_transfer, resume_file_transfer, cancel_file_transfer, ask_1shell_ai, get_1shell_ai_run.',
       'Scripts, automations, probes, audit, diagnostics, and MCP registry operations are delegated capabilities behind ask_1shell_ai; do not describe them as directly visible external MCP tools.',
       requireConfirmation ? 'mutating actions require confirmation; if confirmation is unavailable, explain what would be done instead of forcing the action.' : 'the caller explicitly allowed execution without interactive confirmation.',
       mode === 'answer' ? 'Answer the request. Prefer read-only inspection and do not make changes.' : '',
@@ -683,23 +918,33 @@ function createOneShellCoreTools(deps = {}) {
       goal,
     ].filter(Boolean).join('\n');
 
-    try {
-      const result = await deps.ideService.ask({
-        message: guidance,
-        context: {
-          hosts: contextHosts,
-          toolPolicy: {
-            allowedTools: Array.isArray(context.allowedTools) ? context.allowedTools : [],
-            allowedHosts: Array.isArray(context.allowedHosts) ? context.allowedHosts : [],
-            allowedScripts: Array.isArray(context.allowedScripts) ? context.allowedScripts : [],
-            allowedPaths: Array.isArray(context.allowedPaths) ? context.allowedPaths : [],
-            gatewayMode: mode,
-          },
+    const askPayload = {
+      message: guidance,
+      context: {
+        hosts: contextHosts,
+        toolPolicy: {
+          allowedTools: Array.isArray(context.allowedTools) ? context.allowedTools : [],
+          allowedHosts: Array.isArray(context.allowedHosts) ? context.allowedHosts : [],
+          allowedScripts: Array.isArray(context.allowedScripts) ? context.allowedScripts : [],
+          allowedPaths: Array.isArray(context.allowedPaths) ? context.allowedPaths : [],
+          gatewayMode: mode,
         },
-        entry: 'core',
-        timeoutMs,
-        approvalAction: requireConfirmation ? 'deny' : 'allow',
+      },
+      entry: 'core',
+      timeoutMs,
+      approvalAction: requireConfirmation ? 'deny' : 'allow',
+    };
+
+    if (background) {
+      const run = startDetachedAiRun({ askPayload, mode, hostId, goal, timeoutMs });
+      return structured(true, '1Shell AI 后台运行已启动', {
+        ...publicAiRun(run),
+        pollTool: 'get_1shell_ai_run',
       });
+    }
+
+    try {
+      const result = await deps.ideService.ask(askPayload);
       return structured(true, '1Shell AI 已完成请求', {
         mode,
         hostId: hostId || null,
@@ -709,6 +954,15 @@ function createOneShellCoreTools(deps = {}) {
     } catch (e) {
       return err(e.message);
     }
+  }
+
+  function handleGetOneShellAiRun(input) {
+    pruneAiRuns();
+    const runId = String(input.runId || '').trim();
+    if (!runId) return err('runId 为必填');
+    const run = aiRuns.get(runId);
+    if (!run) return err(`后台运行不存在或结果已过期: ${runId}`);
+    return structured(run.status !== 'failed', run.status === 'running' ? '1Shell AI 仍在运行' : '1Shell AI 后台运行已结束', publicAiRun(run), run.status === 'failed');
   }
 
   function handleListScripts(input) {
@@ -787,6 +1041,10 @@ function createOneShellCoreTools(deps = {}) {
     const filePath = String(input.path || '').trim();
     if (!hostId || !filePath) return err('hostId 和 path 为必填');
     if (typeof input.content !== 'string') return err('content 必须是字符串');
+    const contentBytes = Buffer.byteLength(input.content, 'utf8');
+    if (contentBytes > TEXT_WRITE_MAX_BYTES) {
+      return err(`content 过大 (${formatBytes(contentBytes)})，write_remote_file 只用于小型文本/配置文件，当前上限 ${formatBytes(TEXT_WRITE_MAX_BYTES)}。请先把大文件放到 1Shell 本机后用 upload_file localPath，或使用 start_file_upload/append_file_upload/finish_file_upload 分片上传。`);
+    }
     try {
       let backupPath = null;
       if (input.backup) {
@@ -815,13 +1073,28 @@ function createOneShellCoreTools(deps = {}) {
       let filename = input.filename ? String(input.filename) : '';
       let buffer;
       if (typeof input.base64Content === 'string') {
-        buffer = Buffer.from(input.base64Content, 'base64');
+        const normalized = normalizeBase64Content(input.base64Content);
+        const decodedBytes = decodedBase64ByteLength(normalized);
+        if (decodedBytes > INLINE_UPLOAD_MAX_BYTES) {
+          return err(`base64Content 过大 (${formatBytes(decodedBytes)})，单次 inline 上传上限 ${formatBytes(INLINE_UPLOAD_MAX_BYTES)}。大文件请使用 start_file_upload/append_file_upload/finish_file_upload 分片流程，或把文件放到 1Shell 本机后传 localPath。`);
+        }
+        buffer = Buffer.from(normalized, 'base64');
       } else if (typeof input.content === 'string') {
+        const contentBytes = Buffer.byteLength(input.content, 'utf8');
+        if (contentBytes > INLINE_UPLOAD_MAX_BYTES) {
+          return err(`content 过大 (${formatBytes(contentBytes)})，单次 inline 上传上限 ${formatBytes(INLINE_UPLOAD_MAX_BYTES)}。大文件请使用 start_file_upload/append_file_upload/finish_file_upload 分片流程，或把文件放到 1Shell 本机后传 localPath。`);
+        }
         buffer = Buffer.from(input.content, 'utf8');
       } else if (input.localPath) {
         const localPath = resolveLocalPath(input.localPath);
-        buffer = await fs.promises.readFile(localPath);
+        const stat = await fs.promises.stat(localPath);
+        if (stat.isDirectory()) return err('localPath 不能是目录');
         if (!filename) filename = path.basename(localPath);
+        if (!filename) return err('filename 为必填');
+        const stream = fs.createReadStream(localPath);
+        const result = await deps.fileService.uploadFileStream(hostId, dirPath, filename, stream, stat.size);
+        deps.auditService?.log?.({ action: 'mcp_file_upload', source: context.source || 'core_tools', hostId, command: `${dirPath}/${filename}`, details: JSON.stringify({ size: result.size, localPath }) });
+        return structured(true, '文件上传成功', { hostId, filename, source: 'localPath', ...result });
       } else {
         return err('localPath / content / base64Content 必须提供一个');
       }
@@ -834,26 +1107,558 @@ function createOneShellCoreTools(deps = {}) {
     }
   }
 
+  async function pruneUploadSessions() {
+    const now = Date.now();
+    const expired = [];
+    for (const [uploadId, session] of uploadSessions) {
+      if (session.expiresAtMs <= now) expired.push([uploadId, session]);
+    }
+    for (const [uploadId, session] of expired) {
+      uploadSessions.delete(uploadId);
+      await fs.promises.rm(session.tempPath, { force: true }).catch(() => {});
+    }
+  }
+
+  async function getUploadSession(uploadId) {
+    await pruneUploadSessions();
+    const id = String(uploadId || '').trim();
+    if (!id) return { error: 'uploadId 为必填' };
+    const session = uploadSessions.get(id);
+    if (!session) return { error: `上传会话不存在或已过期: ${id}` };
+    return { session };
+  }
+
+  async function handleStartFileUpload(input, context) {
+    if (!deps.fileService?.uploadFileStream) return err('fileService 不支持流式上传');
+    const hostId = String(input.hostId || '').trim();
+    const dirPath = String(input.dirPath || '').trim();
+    const filename = normalizeUploadSessionFilename(input.filename);
+    if (!hostId || !dirPath || !filename) return err('hostId、dirPath、filename 均为必填');
+    const declaredSize = Number(input.size);
+    const hasDeclaredSize = Number.isFinite(declaredSize) && declaredSize >= 0;
+    if (hasDeclaredSize && declaredSize > UPLOAD_SESSION_MAX_BYTES) {
+      return err(`文件过大 (${formatBytes(declaredSize)})，当前分片上传总上限 ${formatBytes(UPLOAD_SESSION_MAX_BYTES)}`);
+    }
+    try {
+      await pruneUploadSessions();
+      await fs.promises.mkdir(MCP_UPLOAD_TMP_DIR, { recursive: true });
+      const uploadId = createRuntimeId('upload');
+      const tempPath = path.join(MCP_UPLOAD_TMP_DIR, `${uploadId}.part`);
+      await fs.promises.writeFile(tempPath, Buffer.alloc(0), { flag: 'wx' });
+      const now = Date.now();
+      const session = {
+        uploadId,
+        hostId,
+        dirPath,
+        filename,
+        tempPath,
+        declaredSize: hasDeclaredSize ? declaredSize : null,
+        maxBytes: hasDeclaredSize ? declaredSize : UPLOAD_SESSION_MAX_BYTES,
+        receivedBytes: 0,
+        createdAt: new Date(now).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+        expiresAtMs: now + UPLOAD_SESSION_TTL_MS,
+      };
+      uploadSessions.set(uploadId, session);
+      deps.auditService?.log?.({ action: 'mcp_file_upload_start', source: context.source || 'core_tools', hostId, command: `${dirPath}/${filename}`, details: JSON.stringify({ uploadId, declaredSize: session.declaredSize }) });
+      return structured(true, '分片上传会话已创建', {
+        uploadId,
+        hostId,
+        dirPath,
+        filename,
+        receivedBytes: 0,
+        nextOffset: 0,
+        declaredSize: session.declaredSize,
+        chunkMaxBytes: UPLOAD_CHUNK_MAX_BYTES,
+        maxBytes: session.maxBytes,
+        expiresAt: new Date(session.expiresAtMs).toISOString(),
+      });
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  async function handleAppendFileUpload(input) {
+    const { session, error } = await getUploadSession(input.uploadId);
+    if (error) return err(error);
+    const offset = Number(input.offset);
+    if (!Number.isFinite(offset) || offset < 0) return err('offset 必须是非负数字');
+    if (offset !== session.receivedBytes) {
+      return err(`offset 不匹配：当前 nextOffset=${session.receivedBytes}，收到 offset=${offset}`);
+    }
+    try {
+      const normalized = normalizeBase64Content(input.base64Content);
+      const decodedBytes = decodedBase64ByteLength(normalized);
+      if (decodedBytes <= 0) return err('base64Content 分片为空');
+      if (decodedBytes > UPLOAD_CHUNK_MAX_BYTES) {
+        return err(`分片过大 (${formatBytes(decodedBytes)})，单分片上限 ${formatBytes(UPLOAD_CHUNK_MAX_BYTES)}`);
+      }
+      if (session.receivedBytes + decodedBytes > session.maxBytes) {
+        return err(`分片会超过本上传会话大小上限：当前 ${formatBytes(session.receivedBytes)} + 分片 ${formatBytes(decodedBytes)} > ${formatBytes(session.maxBytes)}`);
+      }
+      const buffer = Buffer.from(normalized, 'base64');
+      await fs.promises.appendFile(session.tempPath, buffer);
+      session.receivedBytes += buffer.length;
+      session.updatedAt = new Date().toISOString();
+      session.expiresAtMs = Date.now() + UPLOAD_SESSION_TTL_MS;
+      return structured(true, '分片已接收', {
+        uploadId: session.uploadId,
+        receivedBytes: session.receivedBytes,
+        nextOffset: session.receivedBytes,
+        declaredSize: session.declaredSize,
+        complete: session.declaredSize !== null && session.receivedBytes === session.declaredSize,
+        expiresAt: new Date(session.expiresAtMs).toISOString(),
+      });
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  async function handleFinishFileUpload(input, context) {
+    if (!deps.fileService?.uploadFileStream) return err('fileService 不支持流式上传');
+    const { session, error } = await getUploadSession(input.uploadId);
+    if (error) return err(error);
+    if (session.declaredSize !== null && session.receivedBytes !== session.declaredSize) {
+      return err(`上传尚未完整：已接收 ${formatBytes(session.receivedBytes)}，声明大小 ${formatBytes(session.declaredSize)}`);
+    }
+    try {
+      if (input.background === true) {
+        return createUploadTransfer(session, context);
+      }
+      const stream = fs.createReadStream(session.tempPath);
+      const result = await deps.fileService.uploadFileStream(session.hostId, session.dirPath, session.filename, stream, session.receivedBytes);
+      uploadSessions.delete(session.uploadId);
+      await fs.promises.rm(session.tempPath, { force: true }).catch(() => {});
+      deps.auditService?.log?.({ action: 'mcp_file_upload_finish', source: context.source || 'core_tools', hostId: session.hostId, command: `${session.dirPath}/${session.filename}`, details: JSON.stringify({ uploadId: session.uploadId, size: result.size }) });
+      return structured(true, '分片上传完成', {
+        uploadId: session.uploadId,
+        hostId: session.hostId,
+        dirPath: session.dirPath,
+        filename: session.filename,
+        size: result.size,
+        path: result.path,
+      });
+    } catch (e) {
+      session.updatedAt = new Date().toISOString();
+      session.expiresAtMs = Date.now() + UPLOAD_SESSION_TTL_MS;
+      return err(e.message);
+    }
+  }
+
+  async function handleCancelFileUpload(input, context) {
+    const { session, error } = await getUploadSession(input.uploadId);
+    if (error) return err(error);
+    uploadSessions.delete(session.uploadId);
+    await fs.promises.rm(session.tempPath, { force: true }).catch(() => {});
+    deps.auditService?.log?.({ action: 'mcp_file_upload_cancel', source: context.source || 'core_tools', hostId: session.hostId, command: `${session.dirPath}/${session.filename}`, details: JSON.stringify({ uploadId: session.uploadId, receivedBytes: session.receivedBytes }) });
+    return structured(true, '分片上传已取消', {
+      uploadId: session.uploadId,
+      receivedBytes: session.receivedBytes,
+    });
+  }
+
+  function normalizeExpectedSha256(input) {
+    const value = String(input.expectedSha256 || input.sha256 || '').trim().toLowerCase();
+    if (!value) return '';
+    if (!/^[a-f0-9]{64}$/.test(value)) throw new Error('expectedSha256 must be a 64-character hex sha256');
+    return value;
+  }
+
+  function publicFileTransfer(job) {
+    const totalBytes = Number(job.totalBytes) || 0;
+    const receivedBytes = Number(job.receivedBytes) || 0;
+    const progress = totalBytes > 0 ? Math.min(1, receivedBytes / totalBytes) : 0;
+    return {
+      transferId: job.transferId,
+      type: job.type,
+      status: job.status,
+      hostId: job.hostId,
+      path: job.path || null,
+      dirPath: job.dirPath || null,
+      filename: job.filename || null,
+      localPath: job.localPath || null,
+      finalPath: job.finalPath || null,
+      uploadId: job.uploadId || null,
+      totalBytes: job.totalBytes,
+      receivedBytes,
+      progress,
+      sha256: job.sha256 || null,
+      expectedSha256: job.expectedSha256 || null,
+      error: job.error || null,
+      startedAt: job.startedAt,
+      updatedAt: job.updatedAt,
+      finishedAt: job.finishedAt || null,
+      canResume: job.status === 'failed' && (job.type === 'upload' || receivedBytes > 0),
+      pollTool: 'get_file_transfer',
+      resumeTool: 'resume_file_transfer',
+      cancelTool: 'cancel_file_transfer',
+    };
+  }
+
+  function markTransferUpdated(job) {
+    job.updatedAt = new Date().toISOString();
+  }
+
+  async function pruneFileTransfers() {
+    const now = Date.now();
+    for (const [transferId, job] of fileTransfers) {
+      if (!job.finishedAtMs) continue;
+      if (now - job.finishedAtMs > FILE_TRANSFER_RESULT_TTL_MS) {
+        fileTransfers.delete(transferId);
+      }
+    }
+  }
+
+  async function getFileTransfer(transferId) {
+    await pruneFileTransfers();
+    const id = String(transferId || '').trim();
+    if (!id) return { error: 'transferId is required' };
+    const job = fileTransfers.get(id);
+    if (!job) return { error: `file transfer not found or expired: ${id}` };
+    return { job };
+  }
+
+  async function createDownloadTransfer(input, context = {}) {
+    if (!deps.fileService?.downloadFile) return err('fileService does not support downloads');
+    const hostId = String(input.hostId || '').trim();
+    const filePath = String(input.path || '').trim();
+    const localPathInput = String(input.localPath || '').trim();
+    if (!hostId || !filePath || !localPathInput) return err('hostId, path, and localPath are required');
+    let expectedSha256 = '';
+    try {
+      expectedSha256 = normalizeExpectedSha256(input);
+    } catch (e) {
+      return err(e.message);
+    }
+    try {
+      await pruneFileTransfers();
+      await fs.promises.mkdir(FILE_TRANSFER_TMP_DIR, { recursive: true });
+      const transferId = createRuntimeId('transfer');
+      const now = new Date().toISOString();
+      const job = {
+        transferId,
+        type: 'download',
+        status: 'queued',
+        hostId,
+        path: filePath,
+        localPath: resolveLocalPath(localPathInput),
+        finalPath: null,
+        tempPath: path.join(FILE_TRANSFER_TMP_DIR, `${transferId}.part`),
+        expectedSha256,
+        sha256: null,
+        totalBytes: null,
+        receivedBytes: 0,
+        error: null,
+        cancelRequested: false,
+        abort: null,
+        startedAt: now,
+        updatedAt: now,
+        finishedAt: null,
+        finishedAtMs: 0,
+        source: context.source || 'core_tools',
+      };
+      fileTransfers.set(transferId, job);
+      void runDownloadTransfer(job);
+      return structured(true, 'file download started in background', publicFileTransfer(job));
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  async function createUploadTransfer(session, context = {}) {
+    if (!deps.fileService?.uploadFileStream) return err('fileService does not support stream uploads');
+    try {
+      await pruneFileTransfers();
+      const transferId = createRuntimeId('transfer');
+      const now = new Date().toISOString();
+      const job = {
+        transferId,
+        type: 'upload',
+        status: 'queued',
+        uploadId: session.uploadId,
+        hostId: session.hostId,
+        path: null,
+        dirPath: session.dirPath,
+        filename: session.filename,
+        localPath: null,
+        finalPath: null,
+        tempPath: session.tempPath,
+        expectedSha256: '',
+        sha256: null,
+        totalBytes: session.receivedBytes,
+        receivedBytes: 0,
+        error: null,
+        cancelRequested: false,
+        abort: null,
+        startedAt: now,
+        updatedAt: now,
+        finishedAt: null,
+        finishedAtMs: 0,
+        source: context.source || 'core_tools',
+      };
+      fileTransfers.set(transferId, job);
+      void runUploadTransfer(job);
+      return structured(true, 'file upload finish started in background', publicFileTransfer(job));
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  async function handleStartFileDownload(input, context) {
+    return createDownloadTransfer(input, context);
+  }
+
+  function handleGetFileTransfer(input) {
+    return getFileTransfer(input.transferId).then(({ job, error }) => {
+      if (error) return err(error);
+      return structured(job.status !== 'failed', job.status === 'running' ? 'file transfer is running' : 'file transfer status', publicFileTransfer(job), job.status === 'failed');
+    });
+  }
+
+  async function handleResumeFileTransfer(input) {
+    const { job, error } = await getFileTransfer(input.transferId);
+    if (error) return err(error);
+    if (job.status === 'running' || job.status === 'queued') return structured(true, 'file transfer is already running', publicFileTransfer(job));
+    if (job.status === 'succeeded') return structured(true, 'file transfer already succeeded', publicFileTransfer(job));
+    if (job.status === 'cancelled') return err('cancelled transfer cannot be resumed');
+    job.cancelRequested = false;
+    job.error = null;
+    if (job.type === 'upload') {
+      job.receivedBytes = 0;
+      void runUploadTransfer(job);
+    } else {
+      void runDownloadTransfer(job);
+    }
+    return structured(true, 'file transfer resume started', publicFileTransfer(job));
+  }
+
+  async function handleCancelFileTransfer(input, context) {
+    const { job, error } = await getFileTransfer(input.transferId);
+    if (error) return err(error);
+    if (job.status === 'succeeded') return structured(true, 'file transfer already succeeded', publicFileTransfer(job));
+    job.cancelRequested = true;
+    job.abort?.();
+    if (job.status !== 'running') {
+      await fs.promises.rm(job.tempPath, { force: true }).catch(() => {});
+      if (job.uploadId) uploadSessions.delete(job.uploadId);
+      job.status = 'cancelled';
+      job.error = 'cancelled';
+      markTransferUpdated(job);
+      job.finishedAt = job.updatedAt;
+      job.finishedAtMs = Date.now();
+    }
+    deps.auditService?.log?.({ action: 'mcp_file_transfer_cancel', source: context.source || 'core_tools', hostId: job.hostId, command: job.path, details: JSON.stringify({ transferId: job.transferId, receivedBytes: job.receivedBytes }) });
+    return structured(true, 'file transfer cancelled', publicFileTransfer(job));
+  }
+
+  async function runDownloadTransfer(job) {
+    if (job.status === 'running') return;
+    job.status = 'running';
+    job.error = null;
+    job.finishedAt = null;
+    job.finishedAtMs = 0;
+    markTransferUpdated(job);
+
+    let result = null;
+    let writeStream = null;
+    let progressStream = null;
+    try {
+      await fs.promises.mkdir(FILE_TRANSFER_TMP_DIR, { recursive: true });
+      await fs.promises.mkdir(path.dirname(job.localPath), { recursive: true });
+      let partial = await fs.promises.stat(job.tempPath).then((stat) => stat.size).catch(() => 0);
+      result = await deps.fileService.downloadFile(job.hostId, job.path, { startOffset: partial });
+      if (partial > result.size) {
+        result.stream.destroy?.();
+        await fs.promises.rm(job.tempPath, { force: true }).catch(() => {});
+        partial = 0;
+        result = await deps.fileService.downloadFile(job.hostId, job.path, { startOffset: 0 });
+      }
+      job.totalBytes = result.size;
+      job.receivedBytes = partial;
+      markTransferUpdated(job);
+
+      await writeReadableToFile(result.stream, job.tempPath, {
+        flags: partial > 0 ? 'a' : 'w',
+        onChunk(chunk) {
+          job.receivedBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+          markTransferUpdated(job);
+        },
+        setAbort(fn) {
+          job.abort = fn;
+        },
+      });
+
+      const tempStat = await fs.promises.stat(job.tempPath);
+      job.receivedBytes = tempStat.size;
+      if (tempStat.size !== result.size) {
+        throw new Error(`download size mismatch: expected ${result.size}, got ${tempStat.size}`);
+      }
+      job.sha256 = await hashFile(job.tempPath);
+      if (job.expectedSha256 && job.sha256 !== job.expectedSha256) {
+        throw new Error(`sha256 mismatch: expected ${job.expectedSha256}, got ${job.sha256}`);
+      }
+      await commitLocalTempFile(job.tempPath, job.localPath, job.transferId);
+      job.status = 'succeeded';
+      job.finalPath = job.localPath;
+      job.error = null;
+      markTransferUpdated(job);
+      job.finishedAt = job.updatedAt;
+      job.finishedAtMs = Date.now();
+      deps.auditService?.log?.({ action: 'mcp_file_transfer_finish', source: job.source || 'core_tools', hostId: job.hostId, command: job.path, details: JSON.stringify({ transferId: job.transferId, localPath: job.localPath, size: job.receivedBytes, sha256: job.sha256 }) });
+    } catch (e) {
+      job.abort = null;
+      if (job.cancelRequested || e?.name === 'AbortError' || e?.code === 'CANCELLED') {
+        await fs.promises.rm(job.tempPath, { force: true }).catch(() => {});
+        job.status = 'cancelled';
+        job.error = 'cancelled';
+      } else {
+        job.status = 'failed';
+        job.error = e.message;
+        job.receivedBytes = await fs.promises.stat(job.tempPath).then((stat) => stat.size).catch(() => job.receivedBytes || 0);
+      }
+      markTransferUpdated(job);
+      job.finishedAt = job.updatedAt;
+      job.finishedAtMs = Date.now();
+    }
+  }
+
+  async function runUploadTransfer(job) {
+    if (job.status === 'running') return;
+    job.status = 'running';
+    job.error = null;
+    job.finishedAt = null;
+    job.finishedAtMs = 0;
+    job.receivedBytes = 0;
+    markTransferUpdated(job);
+
+    let readStream = null;
+    let progressStream = null;
+    try {
+      const tempStat = await fs.promises.stat(job.tempPath);
+      job.totalBytes = tempStat.size;
+      job.sha256 = await hashFile(job.tempPath);
+      readStream = fs.createReadStream(job.tempPath);
+      progressStream = new Transform({
+        transform(chunk, encoding, callback) {
+          job.receivedBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk, encoding);
+          markTransferUpdated(job);
+          callback(null, chunk);
+        },
+      });
+      job.abort = () => {
+        const abortErr = makeAbortError();
+        readStream?.destroy?.(abortErr);
+        progressStream?.destroy?.(abortErr);
+      };
+      const result = await deps.fileService.uploadFileStream(job.hostId, job.dirPath, job.filename, readStream.pipe(progressStream), tempStat.size);
+      job.abort = null;
+      job.status = 'succeeded';
+      job.finalPath = result.path;
+      job.receivedBytes = result.size ?? tempStat.size;
+      job.error = null;
+      markTransferUpdated(job);
+      job.finishedAt = job.updatedAt;
+      job.finishedAtMs = Date.now();
+      if (job.uploadId) uploadSessions.delete(job.uploadId);
+      await fs.promises.rm(job.tempPath, { force: true }).catch(() => {});
+      deps.auditService?.log?.({ action: 'mcp_file_upload_finish', source: job.source || 'core_tools', hostId: job.hostId, command: `${job.dirPath}/${job.filename}`, details: JSON.stringify({ transferId: job.transferId, uploadId: job.uploadId, size: job.receivedBytes, sha256: job.sha256, path: result.path }) });
+    } catch (e) {
+      job.abort = null;
+      if (job.cancelRequested || e?.name === 'AbortError' || e?.code === 'CANCELLED') {
+        await fs.promises.rm(job.tempPath, { force: true }).catch(() => {});
+        if (job.uploadId) uploadSessions.delete(job.uploadId);
+        job.status = 'cancelled';
+        job.error = 'cancelled';
+      } else {
+        job.status = 'failed';
+        job.error = e.message;
+        job.receivedBytes = 0;
+      }
+      markTransferUpdated(job);
+      job.finishedAt = job.updatedAt;
+      job.finishedAtMs = Date.now();
+    }
+  }
+
+  async function downloadToLocalPathAtomic(hostId, filePath, localPath, input, context = {}) {
+    const expectedSha256 = normalizeExpectedSha256(input);
+    await fs.promises.mkdir(FILE_TRANSFER_TMP_DIR, { recursive: true });
+    await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
+    const tempPath = path.join(FILE_TRANSFER_TMP_DIR, `${createRuntimeId('sync-download')}.part`);
+    let result = null;
+    let writeStream = null;
+    let progressStream = null;
+    try {
+      result = await deps.fileService.downloadFile(hostId, filePath);
+      let receivedBytes = 0;
+      writeStream = fs.createWriteStream(tempPath, { flags: 'wx' });
+      progressStream = new Transform({
+        transform(chunk, encoding, callback) {
+          receivedBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk, encoding);
+          callback(null, chunk);
+        },
+      });
+      const onAbort = () => {
+        const abortErr = makeAbortError();
+        result?.stream?.destroy?.(abortErr);
+        progressStream?.destroy?.(abortErr);
+        writeStream?.destroy?.(abortErr);
+      };
+      context.signal?.addEventListener?.('abort', onAbort, { once: true });
+      try {
+        await pipeline(result.stream, progressStream, writeStream);
+      } finally {
+        context.signal?.removeEventListener?.('abort', onAbort);
+      }
+      const tempStat = await fs.promises.stat(tempPath);
+      if (tempStat.size !== result.size) {
+        throw new Error(`download size mismatch: expected ${result.size}, got ${tempStat.size}`);
+      }
+      const sha256 = await hashFile(tempPath);
+      if (expectedSha256 && sha256 !== expectedSha256) {
+        throw new Error(`sha256 mismatch: expected ${expectedSha256}, got ${sha256}`);
+      }
+      await commitLocalTempFile(tempPath, localPath, createRuntimeId('sync-commit'));
+      return {
+        filename: result.filename,
+        size: tempStat.size,
+        sha256,
+        receivedBytes,
+      };
+    } catch (e) {
+      await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+      throw e;
+    }
+  }
+
   async function handleDownloadFile(input, context) {
     if (!deps.fileService) return err('fileService 未初始化');
     const hostId = String(input.hostId || '').trim();
     const filePath = String(input.path || '').trim();
     if (!hostId || !filePath) return err('hostId 和 path 为必填');
     try {
+      if (input.localPath && input.background === true) {
+        return createDownloadTransfer(input, context);
+      }
       const result = await deps.fileService.downloadFile(hostId, filePath);
       const maxBytes = Number(input.maxBytes) > 0 ? Number(input.maxBytes) : 1024 * 1024;
       if (!input.localPath && result.size > maxBytes) {
         result.stream.destroy?.();
         return err(`文件过大 (${result.size} bytes)，请传 localPath 保存到 1Shell 本机，或调大 maxBytes`);
       }
-      const buffer = await streamToBuffer(result.stream, context.signal);
       if (input.localPath) {
         const localPath = resolveLocalPath(input.localPath);
+        result.stream.destroy?.();
+        const saved = await downloadToLocalPathAtomic(hostId, filePath, localPath, input, context);
+        deps.auditService?.log?.({ action: 'mcp_file_download', source: context.source || 'core_tools', hostId, command: filePath, details: JSON.stringify({ localPath, size: saved.size, sha256: saved.sha256 }) });
+        return structured(true, '鏂囦欢涓嬭浇鎴愬姛', { hostId, path: filePath, localPath, filename: saved.filename, size: saved.size, sha256: saved.sha256 });
         await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
-        await fs.promises.writeFile(localPath, buffer);
-        deps.auditService?.log?.({ action: 'mcp_file_download', source: context.source || 'core_tools', hostId, command: filePath, details: JSON.stringify({ localPath, size: buffer.length }) });
-        return structured(true, '文件下载成功', { hostId, path: filePath, localPath, filename: result.filename, size: buffer.length });
+        await streamToFile(result.stream, localPath, context.signal);
+        const stat = await fs.promises.stat(localPath);
+        deps.auditService?.log?.({ action: 'mcp_file_download', source: context.source || 'core_tools', hostId, command: filePath, details: JSON.stringify({ localPath, size: stat.size }) });
+        return structured(true, '文件下载成功', { hostId, path: filePath, localPath, filename: result.filename, size: stat.size });
       }
+      const buffer = await streamToBuffer(result.stream, context.signal);
       return structured(true, '文件下载成功', { hostId, path: filePath, filename: result.filename, size: buffer.length, base64Content: buffer.toString('base64') });
     } catch (e) {
       return err(e.message);
@@ -1275,10 +2080,80 @@ function emitTool(context, toolName, input, result) {
   });
 }
 
+function envPositiveNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function createRuntimeId(prefix) {
+  const suffix = typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} bytes`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+function normalizeBase64Content(value) {
+  const text = String(value || '').replace(/\s+/g, '');
+  if (!text) return '';
+  if (text.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) {
+    throw new Error('base64Content 不是有效的标准 base64 字符串');
+  }
+  return text;
+}
+
+function decodedBase64ByteLength(value) {
+  const text = String(value || '');
+  if (!text) return 0;
+  const padding = text.endsWith('==') ? 2 : (text.endsWith('=') ? 1 : 0);
+  return Math.max(0, Math.floor((text.length * 3) / 4) - padding);
+}
+
+function normalizeUploadSessionFilename(value) {
+  const safeName = path.basename(String(value || '').replace(/\\/g, '/')).trim();
+  if (!safeName || safeName === '.' || safeName === '..') return '';
+  return safeName;
+}
+
 function resolveLocalPath(inputPath) {
   const raw = String(inputPath || '').trim();
   if (!raw) throw new Error('localPath 为空');
   return path.isAbsolute(raw) ? raw : path.resolve(ROOT_DIR, raw);
+}
+
+function streamToFile(stream, filePath, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      try { stream.destroy?.(); } catch { /* ignore */ }
+      return reject(makeAbortError());
+    }
+    const writeStream = fs.createWriteStream(filePath);
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener?.('abort', onAbort);
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    const onAbort = () => {
+      try { stream.destroy?.(); } catch { /* ignore */ }
+      try { writeStream.destroy?.(); } catch { /* ignore */ }
+      settle(reject, makeAbortError());
+    };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    pipeline(stream, writeStream).then(
+      () => settle(resolve),
+      (err) => settle(reject, err),
+    );
+  });
 }
 
 function streamToBuffer(stream, signal) {
@@ -1306,6 +2181,71 @@ function streamToBuffer(stream, signal) {
     stream.on('close', () => settle(resolve, Buffer.concat(chunks)));
     stream.on('error', (err) => settle(reject, err));
   });
+}
+
+async function writeReadableToFile(readStream, filePath, { flags = 'w', signal = null, onChunk = null, setAbort = null } = {}) {
+  const writeStream = fs.createWriteStream(filePath, { flags });
+  let abortError = null;
+  const abort = () => {
+    abortError = makeAbortError();
+    readStream.destroy?.(abortError);
+  };
+  const onAbort = () => abort();
+  signal?.addEventListener?.('abort', onAbort, { once: true });
+  setAbort?.(abort);
+  try {
+    for await (const chunk of readStream) {
+      if (signal?.aborted) throw makeAbortError();
+      if (!writeStream.write(chunk)) await once(writeStream, 'drain');
+      onChunk?.(chunk);
+    }
+    writeStream.end();
+    await once(writeStream, 'finish');
+  } catch (e) {
+    if (abortError || e?.name === 'AbortError' || e?.code === 'CANCELLED') {
+      writeStream.destroy(e);
+    } else {
+      writeStream.end();
+      await once(writeStream, 'finish').catch(() => {});
+    }
+    throw e;
+  } finally {
+    signal?.removeEventListener?.('abort', onAbort);
+    setAbort?.(null);
+  }
+}
+
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
+}
+
+async function commitLocalTempFile(tempPath, finalPath, transferId) {
+  await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
+  try {
+    await fs.promises.rename(tempPath, finalPath);
+    return;
+  } catch (e) {
+    if (e.code !== 'EXDEV') throw e;
+  }
+
+  const stagePath = path.join(
+    path.dirname(finalPath),
+    `.${path.basename(finalPath)}.1shell-transfer-${String(transferId || createRuntimeId('commit')).replace(/[^A-Za-z0-9_.-]/g, '_')}.part`,
+  );
+  try {
+    await pipeline(fs.createReadStream(tempPath), fs.createWriteStream(stagePath, { flags: 'wx' }));
+    await fs.promises.rename(stagePath, finalPath);
+    await fs.promises.rm(tempPath, { force: true });
+  } catch (e) {
+    await fs.promises.rm(stagePath, { force: true }).catch(() => {});
+    throw e;
+  }
 }
 
 function structured(okValue, summary, data, isError = false) {

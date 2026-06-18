@@ -303,6 +303,14 @@ const COMPACT_MAX_SOURCE_CHARS = 60000;
 const COMPACT_MAX_SUMMARY_CHARS = 12000;
 const COMPACT_SUMMARY_PREFIX = '[1Shell compact summary]';
 const DETACHED_TOOL_RESULT_TEXT_PREFIX = 'Previous tool result was detached from its tool call.';
+const HEADLESS_SYNC_ASK_MAX_TIMEOUT_MS = 600000;
+const HEADLESS_DETACHED_ASK_DEFAULT_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_TIMEOUT_MS', 60 * 60 * 1000);
+const HEADLESS_DETACHED_ASK_MAX_TIMEOUT_MS = envPositiveNumber('ONESHELL_MCP_DETACHED_ASK_MAX_TIMEOUT_MS', 6 * 60 * 60 * 1000);
+
+function envPositiveNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 function toolContentPreview(content) {
   if (typeof content === 'string') return content;
@@ -2596,7 +2604,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
   function createEmptyModelResponseObservation({ entry, attempt }) {
     const inTaskMode = normalizePromptEntry(entry) === 'task';
     const guidance = inTaskMode
-      ? 'You are still in /task authoring mode. Continue by asking for missing required inputs, running the next real/sandbox practice tool, or explaining the blocker in visible assistant text. Do not call create_ai_task/update_ai_task until successful practice and verify_outcome evidence exist.'
+      ? 'You are still in /task authoring mode. This mode is read-only task deduction: ask for missing required inputs, run only read-only inspection tools if useful, preview/save the task structure with create_ai_task/update_ai_task when inputs and steps are clear, or explain the blocker in visible assistant text. Do not perform installs, writes, restarts, deployments, or require practice/verify_outcome evidence before saving.'
       : 'Continue by producing visible assistant text, calling the next appropriate tool, asking a required user question, or explaining the blocker.';
     const content = [
       'RUNTIME_EMPTY_MODEL_RESPONSE',
@@ -3705,10 +3713,11 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   }
 
-  async function ask({ message, context = null, safeMode = undefined, claudeCodeEnabled = false, unlimitedTurns = undefined, entry = 'core', approvalMode = null, timeoutMs = 300000, approvalAction = 'deny' } = {}) {
+  async function ask({ message, context = null, safeMode = undefined, claudeCodeEnabled = false, unlimitedTurns = undefined, entry = 'core', approvalMode = null, timeoutMs = 300000, approvalAction = 'deny', sessionId: requestedSessionId = '', detached = false } = {}) {
     const text = String(message || '').trim();
     if (!text) throw new Error('message 为空');
-    const sessionId = `mcp-ai-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    const requestedId = String(requestedSessionId || '').trim();
+    const sessionId = requestedId || `mcp-ai-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
     const socket = new EventEmitter();
     socket.id = sessionId;
     const events = [];
@@ -3776,7 +3785,9 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       return originalEmit(event, payload);
     };
 
-    const timeout = Number(timeoutMs) > 0 ? Math.min(Number(timeoutMs), 600000) : 300000;
+    const timeoutMax = detached ? HEADLESS_DETACHED_ASK_MAX_TIMEOUT_MS : HEADLESS_SYNC_ASK_MAX_TIMEOUT_MS;
+    const timeoutFallback = detached ? HEADLESS_DETACHED_ASK_DEFAULT_TIMEOUT_MS : 300000;
+    const timeout = Number(timeoutMs) > 0 ? Math.min(Number(timeoutMs), timeoutMax) : Math.min(timeoutFallback, timeoutMax);
     let timer = null;
     try {
       await Promise.race([
@@ -3789,7 +3800,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
         }),
       ]);
       if (error) throw new Error(error);
-      return { text: output.trim(), events, toolCalls };
+      return { sessionId, text: output.trim(), events, toolCalls };
     } finally {
       if (timer) clearTimeout(timer);
       sessions.delete(sessionId);

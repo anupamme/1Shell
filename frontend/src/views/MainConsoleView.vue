@@ -242,7 +242,7 @@ watch(() => hosts.filterKeyword, () => {
 
       <!-- 左栏：主机 / 文件 tab 切换 -->
       <aside
-        class="console-paper-panel console-side-panel w-[20%] shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
+        class="console-paper-panel console-side-panel console-left-panel w-[20%] shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
         :class="{ hidden: sidebarCollapsed || terminalFullscreen }"
       >
         <div class="ai-side-tabs">
@@ -310,7 +310,7 @@ watch(() => hosts.filterKeyword, () => {
       <!-- 宽度跟随 tab：IDE/Agent 激活时 w-[40%]（整体 2:4:4 同老版 setIdePanelOpen/setAgentPanelOpen）；AI Chat 时 w-[20%] -->
       <aside
         v-if="!aiPanelCollapsed && !terminalFullscreen"
-        class="console-paper-panel console-side-panel shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
+        class="console-paper-panel console-side-panel console-right-panel shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
         :class="rightTab === 'ide' || rightTab === 'agent' ? 'w-[40%]' : 'w-[20%]'"
       >
         <!-- tab 头：feedback-right-aside-tabs 拍板 -->

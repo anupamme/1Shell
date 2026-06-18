@@ -5,6 +5,7 @@ import AppIcon from '@/components/AppIcon.vue';
 import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
 import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import IdeApprovalModeMenu from '@/components/ide/IdeApprovalModeMenu.vue';
+import IdeSlashCommandMenu from '@/components/ide/IdeSlashCommandMenu.vue';
 import { useConfirm } from '@/composables/useConfirm';
 import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
@@ -12,12 +13,21 @@ import { useHostsStore } from '@/stores/hosts';
 import {
   agentGoalObjective,
   emptyAgentGoalState,
-  formatAgentGoalLabel,
   parseAgentGoalCommand,
   reduceAgentGoalCommand,
   serializeAgentGoal,
   type AgentGoalCommand,
 } from '@/utils/agentGoal';
+import {
+  agentSlashCommandsForSurface,
+  filterAgentSlashCommands,
+  parseAgentClearCommand,
+  parseAgentModeCommand,
+  parseAgentModelCommand,
+  parseAgentTaskCommand,
+  type AgentSlashCommand,
+} from '@/utils/agentSlashCommands';
+import { buildTaskAuthoringPrompt, looksLikeTaskPackRequest, type TaskAuthoringMode } from '@/utils/taskAuthoring';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
@@ -31,6 +41,10 @@ const approvalMode = ref<IdeApprovalMode>('manual');
 const agentGoal = ref(emptyAgentGoalState());
 const composerMode = ref<'chat' | 'goal'>('chat');
 const currentModel = ref('默认模型');
+const nextEntry = ref<'console' | 'task'>('console');
+const taskAuthoringContext = ref<Record<string, unknown> | null>(null);
+const slashHighlight = ref(0);
+const slashCommands = agentSlashCommandsForSurface('console');
 const chatAreaEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
 let followOutput = true;
@@ -40,13 +54,15 @@ const activeHostName = computed(() => {
   return host?.name || '本机';
 });
 
-const agentGoalLabel = computed(() => formatAgentGoalLabel(agentGoal.value));
-const modelLabel = computed(() => currentModel.value || '默认模型');
-const modeLabel = computed(() => approvalModeLabel(approvalMode.value));
 const isGoalComposerMode = computed(() => composerMode.value === 'goal');
+const slashCmds = computed<AgentSlashCommand[]>(() => {
+  if (isGoalComposerMode.value || ide.isRunning.value) return [];
+  return filterAgentSlashCommands(ide.inputText.value, slashCommands);
+});
+const showSlashMenu = computed(() => slashCmds.value.length > 0);
 const inputPlaceholder = computed(() => isGoalComposerMode.value
   ? '1Shell 应继续朝哪个目标努力？'
-  : '输入目标，或使用 /goal、/model 设置上下文...'
+  : '输入目标或问题，按 Enter 发送，Shift + Enter 换行...'
 );
 
 const ide = useIdeChat({
@@ -61,6 +77,7 @@ const ide = useIdeChat({
       agentGoal: agentGoalObjective(agentGoal.value) || undefined,
       threadGoal: serializeAgentGoal(agentGoal.value),
       modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
+      taskAuthoring: taskAuthoringContext.value,
       activeSessionId: sessionTerminal.activeSessionId.value,
       terminalStatus: sessionTerminal.statusText.value,
       hosts: host ? [{
@@ -73,7 +90,7 @@ const ide = useIdeChat({
     };
   },
   messagePayload: () => ({
-    entry: 'console',
+    entry: nextEntry.value,
     approvalMode: approvalMode.value,
     goal: agentGoalObjective(agentGoal.value) || undefined,
     goalStatus: serializeAgentGoal(agentGoal.value)?.status,
@@ -85,6 +102,7 @@ const ide = useIdeChat({
 
 watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollToBottom()); });
 watch(() => ide.timeline.value, () => { void nextTick(() => scrollToBottom()); }, { deep: true });
+watch(() => ide.inputText.value, () => { slashHighlight.value = 0; });
 watch(() => props.active, (active) => {
   if (active) void nextTick(() => scrollToBottom(true));
 });
@@ -108,9 +126,36 @@ function onInputKeydown(event: KeyboardEvent): void {
     closeGoalComposer();
     return;
   }
+  if (showSlashMenu.value) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      slashHighlight.value = Math.min(slashHighlight.value + 1, slashCmds.value.length - 1);
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      slashHighlight.value = Math.max(slashHighlight.value - 1, 0);
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      selectSlashCommand(slashCmds.value[slashHighlight.value]);
+      return;
+    }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      ide.inputText.value = `${slashCmds.value[slashHighlight.value]?.cmd || ''} `;
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      ide.inputText.value = '';
+      return;
+    }
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
-    sendOrHandleCommand();
+    void sendOrHandleCommand();
   }
 }
 
@@ -133,13 +178,7 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
   approvalMode.value = mode;
 }
 
-function parseAgentShellCommand(value: string): { name: 'model'; arg: string } | null {
-  const match = String(value || '').trim().match(/^\/model(?:\s+([\s\S]*))?$/i);
-  if (!match) return null;
-  return { name: 'model', arg: String(match[1] || '').trim() };
-}
-
-function handleAgentShellCommand(value: string): boolean {
+async function handleAgentShellCommand(value: string): Promise<boolean> {
   const goalCommand = parseAgentGoalCommand(value);
   if (goalCommand) {
     ide.inputText.value = '';
@@ -155,7 +194,36 @@ function handleAgentShellCommand(value: string): boolean {
     return true;
   }
 
-  const command = parseAgentShellCommand(value);
+  const modeCommand = parseAgentModeCommand(value);
+  if (modeCommand) {
+    ide.inputText.value = '';
+    if (!modeCommand.raw) {
+      ide.pushSystemEvent('/mode', `当前审批模式：${approvalModeLabel(approvalMode.value)}`);
+      return true;
+    }
+    if (!modeCommand.mode) {
+      ide.pushSystemEvent('/mode', '用法：/mode manual | delegated | full', 'warning');
+      return true;
+    }
+    await setApprovalMode(modeCommand.mode);
+    ide.pushSystemEvent('/mode', `审批模式已切换为：${approvalModeLabel(approvalMode.value)}`, 'success');
+    return true;
+  }
+
+  if (parseAgentClearCommand(value)) {
+    ide.inputText.value = '';
+    await clearChat();
+    return true;
+  }
+
+  const taskIntent = parseAgentTaskCommand(value);
+  if (taskIntent !== null) {
+    ide.inputText.value = '';
+    startTaskAuthoring(taskIntent);
+    return true;
+  }
+
+  const command = parseAgentModelCommand(value);
   if (!command) return false;
   ide.inputText.value = '';
 
@@ -206,22 +274,47 @@ function approvalModeLabel(mode: IdeApprovalMode): string {
   return '人工审批';
 }
 
-function sendOrHandleCommand(): void {
+async function sendOrHandleCommand(): Promise<void> {
   if (isGoalComposerMode.value) {
     submitGoalComposer();
     return;
   }
-  if (handleAgentShellCommand(ide.inputText.value)) return;
+  if (await handleAgentShellCommand(ide.inputText.value)) return;
   ide.sendMessage();
 }
 
-function prefillCommand(command: '/goal' | '/model'): void {
+async function clearChat(): Promise<void> {
   if (ide.isRunning.value) return;
-  if (command === '/goal') {
-    openGoalComposer();
+  if (!ide.hasMessages.value) {
+    ide.resetChat();
     return;
   }
-  ide.inputText.value = `${command} `;
+  const ok = await confirm({ title: '清空', message: '清空当前 1Shell AI 对话时间线？' });
+  if (ok) ide.resetChat();
+}
+
+function startTaskAuthoring(intent: string): void {
+  const mode: TaskAuthoringMode = looksLikeTaskPackRequest(intent) ? 'pack' : 'new';
+  nextEntry.value = 'task';
+  taskAuthoringContext.value = { mode, intent: intent.trim() };
+  ide.inputText.value = buildTaskAuthoringPrompt({ mode, intent });
+  window.setTimeout(() => {
+    ide.sendMessage();
+    nextEntry.value = 'console';
+    taskAuthoringContext.value = null;
+  }, 0);
+}
+
+function selectSlashCommand(command: AgentSlashCommand | undefined): void {
+  if (!command || ide.isRunning.value) return;
+  slashHighlight.value = 0;
+  if (command.cmd === '/goal') { ide.inputText.value = ''; openGoalComposer(); return; }
+  if (command.cmd === '/task') { ide.inputText.value = '/task '; void nextTick(() => inputEl.value?.focus()); return; }
+  if (command.cmd === '/compact') { ide.inputText.value = ''; ide.prefillAndSend('/compact'); return; }
+  if (command.cmd === '/remind') { ide.inputText.value = ''; ide.prefillAndSend('/remind'); return; }
+  if (command.cmd === '/clear') { ide.inputText.value = ''; void clearChat(); return; }
+  ide.inputText.value = `${command.cmd} `;
+  void nextTick(() => inputEl.value?.focus());
 }
 </script>
 
@@ -236,22 +329,6 @@ function prefillCommand(command: '/goal' | '/model'): void {
           <strong>1Shell AI</strong>
           <span>{{ activeHostName }}</span>
         </div>
-        <span class="console-ide-badge">IDE</span>
-      </div>
-
-      <div class="console-ide-context" aria-label="当前 Agent 上下文">
-        <span class="console-ide-context-chip console-ide-context-chip--goal">
-          <span>Goal</span>
-          <strong>{{ agentGoalLabel }}</strong>
-        </span>
-        <span class="console-ide-context-chip">
-          <span>Model</span>
-          <strong>{{ modelLabel }}</strong>
-        </span>
-        <span class="console-ide-context-chip">
-          <span>Mode</span>
-          <strong>{{ modeLabel }}</strong>
-        </span>
       </div>
 
       <div class="console-ide-actions">
@@ -267,7 +344,7 @@ function prefillCommand(command: '/goal' | '/model'): void {
           type="button"
           class="console-ide-ghost-btn"
           :disabled="ide.isRunning.value || !ide.hasMessages.value"
-          @click="ide.resetChat"
+          @click="clearChat"
         >
           清空
         </button>
@@ -297,6 +374,13 @@ function prefillCommand(command: '/goal' | '/model'): void {
         @custom="ide.approveCustom"
         @secret-submit="onSecretRefSubmit"
       />
+      <IdeSlashCommandMenu
+        v-if="showSlashMenu"
+        :commands="slashCmds"
+        :highlighted="slashHighlight"
+        density="compact"
+        @select="selectSlashCommand"
+      />
       <div v-if="isGoalComposerMode" class="console-ide-goal-banner">
         <span class="console-ide-goal-icon">
           <AppIcon name="target" :size="13" />
@@ -320,21 +404,6 @@ function prefillCommand(command: '/goal' | '/model'): void {
         spellcheck="false"
         @keydown="onInputKeydown"
       />
-      <div class="console-ide-command-row" aria-label="Agent Shell 快捷命令">
-        <button
-          type="button"
-          :class="{ 'console-ide-command-active': isGoalComposerMode }"
-          :disabled="ide.isRunning.value"
-          @click="prefillCommand('/goal')"
-        >
-          <strong>/goal</strong>
-          <span>目标</span>
-        </button>
-        <button type="button" :disabled="ide.isRunning.value" @click="prefillCommand('/model')">
-          <strong>/model</strong>
-          <span>模型</span>
-        </button>
-      </div>
       <div class="console-ide-composer-row">
         <div class="console-ide-left-actions">
           <IdeApprovalModeMenu
@@ -452,15 +521,6 @@ function prefillCommand(command: '/goal' | '/model'): void {
   color: #94a3b8;
 }
 
-.console-ide-badge {
-  border-radius: 999px;
-  padding: 2px 7px;
-  color: #0369a1;
-  background: rgba(14, 165, 233, 0.1);
-  font-size: 10px;
-  font-weight: 750;
-}
-
 .console-ide-toggle,
 .console-ide-ghost-btn,
 .console-ide-send-btn,
@@ -569,6 +629,7 @@ function prefillCommand(command: '/goal' | '/model'): void {
 }
 
 .console-ide-composer {
+  position: relative;
   display: grid;
   gap: 9px;
   padding: 12px;
@@ -698,72 +759,6 @@ function prefillCommand(command: '/goal' | '/model'): void {
 
 :global(.dark) .console-ide-goal-icon {
   background: rgba(52, 211, 153, 0.1);
-}
-
-.console-ide-command-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.console-ide-command-row button {
-  min-height: 32px;
-  border: 1px solid rgba(148, 163, 184, 0.34);
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  color: #334155;
-  background: rgba(248, 250, 252, 0.82);
-  cursor: pointer;
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
-}
-
-.console-ide-command-row button:hover:not(:disabled),
-.console-ide-command-row button:focus-visible,
-.console-ide-command-row .console-ide-command-active {
-  border-color: rgba(14, 165, 233, 0.48);
-  color: #0369a1;
-  background: #f0f9ff;
-  outline: none;
-}
-
-.console-ide-command-row button:focus-visible {
-  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.16);
-}
-
-.console-ide-command-row button:disabled {
-  opacity: 0.52;
-  cursor: not-allowed;
-}
-
-.console-ide-command-row strong {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-  font-size: 11px;
-}
-
-.console-ide-command-row span {
-  color: #64748b;
-  font-size: 11px;
-}
-
-:global(.dark) .console-ide-command-row button {
-  border-color: rgba(71, 85, 105, 0.76);
-  color: #cbd5e1;
-  background: rgba(2, 6, 23, 0.42);
-}
-
-:global(.dark) .console-ide-command-row button:hover:not(:disabled),
-:global(.dark) .console-ide-command-row button:focus-visible,
-:global(.dark) .console-ide-command-row .console-ide-command-active {
-  border-color: rgba(56, 189, 248, 0.34);
-  color: #7dd3fc;
-  background: rgba(14, 165, 233, 0.12);
-}
-
-:global(.dark) .console-ide-command-row span {
-  color: #94a3b8;
 }
 
 .console-ide-composer-row {

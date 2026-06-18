@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.2.1 - 2026-06-18
+
+4.2.1 is a test patch release for validating the 4.2 feature set. It synchronizes the latest agent, MCP, transfer, terminal, mobile layout, and slash-command fixes into the 4.2 source tree.
+
+- Fix terminal progress-output and resize behavior by stabilizing xterm sizing, delaying remote PTY resize updates until layout settles, resetting terminal state on session switches, and clamping backend PTY dimensions.
+- Add MCP core transfer coverage and safer large-file transfer paths, including chunk upload and background task checks.
+- Sync 1Shell AI slash-command support and structured tool-result rendering across IDE/Agent surfaces.
+- Remove leftover UI noise from the frontend and improve mobile layout behavior for the 4.2 console.
+- Keep 4.2's Node engine constraint and release baseline while bumping package metadata to 4.2.1.
+
 ## 4.2.0 - 2026-06-18
 
 4.2 是在 4.1 主体闭环上的一次大版本级补强，但版本号仍保留在 4.x。它把 1Shell 从“WebSSH + 程序化工作流面板”进一步收敛为“人和 Agent 共用的本地优先运维 runtime”：模型负责判断，runtime 负责状态、工具、安全边界、审计和可恢复运行。

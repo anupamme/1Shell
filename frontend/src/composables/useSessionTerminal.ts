@@ -25,6 +25,12 @@ type InputListener = (payload: { data: string; meta: SessionInputMeta }) => void
 type OutputListener = (payload: { sessionId: string; data: string }) => void;
 type LifecycleListener = (payload: LifecyclePayload) => void;
 
+const DEFAULT_TERMINAL_COLS = 120;
+const DEFAULT_TERMINAL_ROWS = 36;
+const MIN_TERMINAL_COLS = 24;
+const MIN_TERMINAL_ROWS = 8;
+const RESIZE_SETTLE_MS = 90;
+
 export interface SessionTerminalApi {
   /** xterm 实例（shallowRef · markRaw,Vue 响应式不代理） */
   readonly term: ShallowRef<Terminal | null>;
@@ -91,12 +97,15 @@ function create(): SessionTerminalApi {
 
   /* ── xterm ─────────────────────────────────── */
   const _term = markRaw(new Terminal({
+    cols: DEFAULT_TERMINAL_COLS,
+    rows: DEFAULT_TERMINAL_ROWS,
     cursorBlink: true,
     cursorStyle: 'bar',
     fontSize: 14,
     fontFamily: '"Cascadia Code", "JetBrains Mono", Consolas, monospace',
     lineHeight: 1.25,
     scrollback: 5000,
+    windowsMode: true,
     theme: isDark() ? DARK_THEME : LIGHT_THEME,
   }));
   const _fit = markRaw(new FitAddon());
@@ -116,6 +125,8 @@ function create(): SessionTerminalApi {
   let onDataDispose: { dispose(): void } | null = null;
   let _resizeObserver: ResizeObserver | null = null;
   let _resizeRafId: number | null = null;
+  let _resizeSettleTimerId: number | null = null;
+  let lastSentSizeKey = '';
   let userInputPaused = false;
   let suppressStrayInputUntil = 0;
 
@@ -157,6 +168,71 @@ function create(): SessionTerminalApi {
     statusText.value = text;
   }
 
+  function minUsableCols(): number {
+    return MIN_TERMINAL_COLS;
+  }
+
+  function isUsableTerminalSize(cols: number, rows: number): boolean {
+    return Number.isFinite(cols)
+      && Number.isFinite(rows)
+      && cols >= minUsableCols()
+      && rows >= MIN_TERMINAL_ROWS;
+  }
+
+  function trimSessionBuffer(value: string): string {
+    if (value.length <= SESSION_BUFFER_LIMIT) return value;
+    const start = value.length - SESSION_BUFFER_LIMIT;
+    const newline = value.indexOf('\n', start);
+    return value.slice(newline >= 0 ? newline + 1 : start);
+  }
+
+  function safeTerminalSize(): { cols: number; rows: number } {
+    return {
+      cols: Math.max(_term.cols || DEFAULT_TERMINAL_COLS, minUsableCols()),
+      rows: Math.max(_term.rows || DEFAULT_TERMINAL_ROWS, MIN_TERMINAL_ROWS),
+    };
+  }
+
+  function fitTerminal(): { cols: number; rows: number } | null {
+    try {
+      const proposed = _fit.proposeDimensions();
+      if (!proposed || !isUsableTerminalSize(proposed.cols, proposed.rows)) return null;
+      _fit.fit();
+      return { cols: _term.cols, rows: _term.rows };
+    } catch {
+      return null;
+    }
+  }
+
+  function syncTerminalSize(force = false): void {
+    const fitted = fitTerminal();
+    const size = fitted || safeTerminalSize();
+    if (!isUsableTerminalSize(size.cols, size.rows)) return;
+    const key = `${size.cols}x${size.rows}`;
+    if (!force && key === lastSentSizeKey) return;
+    lastSentSizeKey = key;
+    if (socket && activeSessionId.value) {
+      socket.emit('session:resize', {
+        sessionId: activeSessionId.value,
+        cols: size.cols,
+        rows: size.rows,
+      });
+    }
+  }
+
+  function nextFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  async function ensureFittedForSession(): Promise<{ cols: number; rows: number }> {
+    for (let i = 0; i < 3; i += 1) {
+      const fitted = fitTerminal();
+      if (fitted) return fitted;
+      await nextFrame();
+    }
+    return safeTerminalSize();
+  }
+
   function updateSessionMap(mutator: (m: Map<string, SessionInfo>) => void): void {
     const next = new Map(sessions.value);
     mutator(next);
@@ -166,30 +242,26 @@ function create(): SessionTerminalApi {
   /* ── 终端控制 ─────────────────────────────────── */
   function clearTerminal(): void {
     _term.clear();
+    if (activeSessionId.value) sessionBuffers.set(activeSessionId.value, '');
     notifyLifecycle('clear');
     _term.focus();
   }
 
   function resetTerminal(): void {
+    _term.reset();
     _term.clear();
     notifyLifecycle('reset');
   }
 
   function fit(): void {
-    try { _fit.fit(); } catch { /* container 尚未尺寸化 */ }
+    fitTerminal();
   }
 
   function focusTerminal(): void {
     requestAnimationFrame(() => {
       try {
-        _fit.fit();
-        if (socket && activeSessionId.value) {
-          socket.emit('session:resize', {
-            sessionId: activeSessionId.value,
-            cols: _term.cols,
-            rows: _term.rows,
-          });
-        }
+        fitTerminal();
+        scheduleResize();
         _term.focus();
       } catch { /* 静默 */ }
     });
@@ -213,12 +285,13 @@ function create(): SessionTerminalApi {
     return null;
   }
 
-  function callSessionCreate(hostId: string): Promise<SessionInfo> {
+  async function callSessionCreate(hostId: string): Promise<SessionInfo> {
+    const size = await ensureFittedForSession();
     return new Promise((resolve, reject) => {
       if (!socket) { reject(new Error('Socket 未连接')); return; }
       socket.emit(
         'session:create',
-        { hostId, cols: _term.cols, rows: _term.rows },
+        { hostId, cols: size.cols, rows: size.rows },
         (result: { ok: boolean; session?: SessionInfo; error?: string }) => {
           if (!result?.ok) { reject(new Error(result?.error || '会话创建失败')); return; }
           resolve(result.session as SessionInfo);
@@ -236,7 +309,7 @@ function create(): SessionTerminalApi {
     hosts.select(hostId);
     terminalHint.value = `正在连接 ${host.name}…`;
     setStatus('connecting', '连接中…');
-    clearTerminal();
+    resetTerminal();
 
     try {
       let session: SessionInfo | null = null;
@@ -260,6 +333,7 @@ function create(): SessionTerminalApi {
 
       activeSessionId.value = session.id;
       notifyLifecycle('session-change', { hostId, sessionId: session.id, forceReconnect });
+      syncTerminalSize(true);
       _term.write(sessionBuffers.get(session.id) || '', () => scrollTerminalToBottom());
       scrollTerminalToBottom();
       if (hostId !== LOCAL_HOST_ID) {
@@ -382,7 +456,7 @@ function create(): SessionTerminalApi {
       if (!sessionId) return;
       const output = String(data || '');
       const previous = sessionBuffers.get(sessionId) || '';
-      const next = (previous + output).slice(-SESSION_BUFFER_LIMIT);
+      const next = trimSessionBuffer(previous + output);
       sessionBuffers.set(sessionId, next);
       if (sessionId !== activeSessionId.value) return;
       notifyOutput({ sessionId, data: output });
@@ -459,7 +533,7 @@ function create(): SessionTerminalApi {
   }
 
   /* ── DOM mount ─────────────────────────────────── */
-  const onWindowResize = (): void => focusTerminal();
+  const onWindowResize = (): void => scheduleResize();
 
   /**
    * 容器尺寸变更（flex 重排 / 面板展开 / 窗口缩放 / 父级首屏 layout 抖动）时,
@@ -468,20 +542,17 @@ function create(): SessionTerminalApi {
    *      后续 layout 完成无人触发 fit,xterm 仍保留首屏尺寸把父级撑大。
    */
   function scheduleResize(): void {
-    if (_resizeRafId !== null) return;
-    _resizeRafId = requestAnimationFrame(() => {
-      _resizeRafId = null;
-      try {
-        _fit.fit();
-        if (socket && activeSessionId.value) {
-          socket.emit('session:resize', {
-            sessionId: activeSessionId.value,
-            cols: _term.cols,
-            rows: _term.rows,
-          });
-        }
-      } catch { /* container 尚未尺寸化或已卸载 */ }
-    });
+    if (_resizeRafId === null) {
+      _resizeRafId = requestAnimationFrame(() => {
+        _resizeRafId = null;
+        fitTerminal();
+      });
+    }
+    if (_resizeSettleTimerId !== null) window.clearTimeout(_resizeSettleTimerId);
+    _resizeSettleTimerId = window.setTimeout(() => {
+      _resizeSettleTimerId = null;
+      syncTerminalSize();
+    }, RESIZE_SETTLE_MS);
   }
 
   function mount(container: HTMLElement): void {
@@ -503,7 +574,7 @@ function create(): SessionTerminalApi {
       return;
     }
     _term.open(container);
-    try { _fit.fit(); } catch { /* 静默 */ }
+    fitTerminal();
     onDataDispose = _term.onData((data: string) => {
       const payload = normalizeXtermInput(data);
       if (!payload) return;
@@ -525,6 +596,7 @@ function create(): SessionTerminalApi {
     _resizeObserver?.disconnect();
     _resizeObserver = null;
     if (_resizeRafId !== null) { cancelAnimationFrame(_resizeRafId); _resizeRafId = null; }
+    if (_resizeSettleTimerId !== null) { window.clearTimeout(_resizeSettleTimerId); _resizeSettleTimerId = null; }
     // 注意:不 dispose onDataDispose 也不 reset initialized —— xterm 实例单例,
     // 切换路由再回来时 mount 复用 _term.element + onData。
   }

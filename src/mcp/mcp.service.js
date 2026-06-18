@@ -153,7 +153,9 @@ function createMcpService(deps = {}) {
       delete_path: ['path'],
       rename_path: ['path', 'newPath'],
       upload_file: ['dirPath', 'localPath'],
+      start_file_upload: ['dirPath'],
       download_file: ['path', 'localPath'],
+      start_file_download: ['path', 'localPath'],
     };
     const fields = pathFieldsByTool[toolName];
     if (!fields) return null;
@@ -188,7 +190,7 @@ function createMcpService(deps = {}) {
 
   function summarizeArgs(args) {
     try {
-      const s = JSON.stringify(args || {}, (key, value) => /token|key|secret|password/i.test(key) ? '<redacted>' : value);
+      const s = JSON.stringify(args || {}, (key, value) => /token|key|secret|password|content|base64|chunk/i.test(key) ? '<redacted>' : value);
       return s.length > 200 ? s.slice(0, 200) + '…' : s;
     } catch { return '<unserializable>'; }
   }

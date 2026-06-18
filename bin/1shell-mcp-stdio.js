@@ -19,6 +19,7 @@ const readline = require('readline');
 const BASE_URL = (process.env.ONESHELL_URL || 'http://127.0.0.1:3301').replace(/\/$/, '');
 const TOKEN = process.env.ONESHELL_TOKEN || '';
 const TOKEN_HEADER = process.env.ONESHELL_TOKEN_HEADER || (TOKEN.startsWith('1smcp_') ? 'X-Remote-Mcp-Token' : 'X-Bridge-Token');
+const REQUEST_TIMEOUT_MS = Number(process.env.ONESHELL_MCP_REQUEST_TIMEOUT_MS || 600000);
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
@@ -86,9 +87,11 @@ function postMessage(body) {
     });
 
     req.on('error', reject);
-    req.setTimeout(120000, () => {
-      req.destroy(new Error('Request timeout'));
-    });
+    if (Number.isFinite(REQUEST_TIMEOUT_MS) && REQUEST_TIMEOUT_MS > 0) {
+      req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+        req.destroy(new Error(`Request timeout (${REQUEST_TIMEOUT_MS}ms)`));
+      });
+    }
 
     req.write(payload);
     req.end();

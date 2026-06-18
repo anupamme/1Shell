@@ -11,9 +11,26 @@ const {
 } = require('../config/env');
 const {
   createId,
-  normalizePort,
   nowIso,
 } = require('../utils/common');
+
+const MIN_TERMINAL_COLS = 24;
+const MIN_TERMINAL_ROWS = 8;
+const MAX_TERMINAL_COLS = 500;
+const MAX_TERMINAL_ROWS = 200;
+
+function normalizeTerminalDimension(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function normalizeTerminalSize(cols, rows) {
+  return {
+    cols: normalizeTerminalDimension(cols, DEFAULT_COLS, MIN_TERMINAL_COLS, MAX_TERMINAL_COLS),
+    rows: normalizeTerminalDimension(rows, DEFAULT_ROWS, MIN_TERMINAL_ROWS, MAX_TERMINAL_ROWS),
+  };
+}
 
 function createSessionService({ hostService }) {
   const socketSessions = new Map();
@@ -255,14 +272,15 @@ function createSessionService({ hostService }) {
     const host = hostService.findHost(hostId);
     if (!host) throw new Error('主机不存在');
 
+    const size = normalizeTerminalSize(cols, rows);
     const existing = getExistingSessionByHost(socket.id, hostId);
     if (existing) return existing;
 
     if (host.type === 'local') {
-      return createLocalSession(socket, host, cols, rows);
+      return createLocalSession(socket, host, size.cols, size.rows);
     }
 
-    return createSshSession(socket, host, cols, rows);
+    return createSshSession(socket, host, size.cols, size.rows);
   }
 
   function writeToSession(socketId, sessionId, data) {
@@ -274,10 +292,8 @@ function createSessionService({ hostService }) {
   function resizeSession(socketId, sessionId, cols, rows) {
     const session = getSocketSessionMap(socketId).get(sessionId);
     if (!session || session.isFinalized) return;
-    session.resize(
-      normalizePort(cols, DEFAULT_COLS),
-      normalizePort(rows, DEFAULT_ROWS),
-    );
+    const size = normalizeTerminalSize(cols, rows);
+    session.resize(size.cols, size.rows);
   }
 
   function closeSession(socket, sessionId) {

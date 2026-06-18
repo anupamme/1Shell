@@ -723,9 +723,9 @@ onMounted(() => { void loadHosts(); });
 </script>
 
 <template>
-  <div class="h-screen min-h-0 overflow-hidden p-3 bg-slate-100 text-slate-900 dark:bg-[#07111f] dark:text-slate-100">
+  <div class="host-repository-page h-full min-h-0 overflow-hidden p-3 bg-slate-100 text-slate-900 dark:bg-[#07111f] dark:text-slate-100">
     <div class="h-full min-h-0 flex flex-col gap-3">
-      <header class="shrink-0 h-14 flex items-center px-5 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
+      <header class="host-repository-header shrink-0 min-h-14 flex items-center px-5 py-2 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
         <div class="flex items-center gap-3 shrink-0">
           <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
             <AppIcon name="server" :size="20" />
@@ -743,8 +743,8 @@ onMounted(() => { void loadHosts(); });
         >刷新</button>
       </header>
 
-      <main class="grid flex-1 min-h-0 grid-cols-[20%_30%_50%] gap-3">
-        <section class="min-w-0 min-h-0 rounded-3xl border border-white/70 bg-white/82 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#0b1324]/86 flex flex-col overflow-hidden">
+      <main class="host-repository-layout grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[20%_30%_50%] gap-3">
+        <section class="host-repository-section min-w-0 min-h-0 rounded-3xl border border-white/70 bg-white/82 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#0b1324]/86 flex flex-col overflow-hidden">
           <div class="shrink-0 border-b border-slate-200/70 px-4 py-3 dark:border-white/10">
             <div class="flex items-center justify-between gap-2">
               <div>
@@ -836,7 +836,7 @@ onMounted(() => { void loadHosts(); });
         </section>
 
         <section
-          class="min-w-0 min-h-0 rounded-3xl border bg-white/82 shadow-sm backdrop-blur dark:bg-[#0b1324]/86 flex flex-col overflow-hidden transition"
+          class="host-repository-section min-w-0 min-h-0 rounded-3xl border bg-white/82 shadow-sm backdrop-blur dark:bg-[#0b1324]/86 flex flex-col overflow-hidden transition"
           :class="repositoryDropActive ? 'border-rose-400 ring-2 ring-rose-200 dark:border-rose-400/60 dark:ring-rose-400/20' : 'border-white/70 dark:border-white/10'"
           @dragover="onRepositoryDragOver($event)"
           @dragleave="onRepositoryDragLeave($event)"
@@ -943,7 +943,7 @@ onMounted(() => { void loadHosts(); });
           </div>
         </section>
 
-        <section class="min-w-0 min-h-0 rounded-3xl border border-white/70 bg-white/82 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#0b1324]/86 flex flex-col overflow-hidden">
+        <section class="host-repository-section host-repository-detail min-w-0 min-h-0 rounded-3xl border border-white/70 bg-white/82 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#0b1324]/86 flex flex-col overflow-hidden">
           <div v-if="selectedHost" class="shrink-0 border-b border-slate-200/70 p-4 dark:border-white/10">
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
