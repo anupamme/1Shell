@@ -12,6 +12,21 @@
 - Improve Agent sidebar/mobile behavior, terminal resize refresh, and About/version display consistency.
 - Broaden the Node engine metadata for the 4.2 package line and keep the SQLite fallback path for newer local Node runtimes.
 
+### Release assets
+
+- Windows x64 updater package: `release/repacked/1shell-4.2.4-windows-x64.zip`
+  - SHA256: `f74a612f40add952cf871585c702495625b99833e1a91ac7443a2f2a23b7aced`
+- Linux x64 updater package: `release/repacked/1shell-4.2.4-linux-x64.tar.gz`
+  - SHA256: `07544245d9aec1fef5ab42b7e023622edfa7c967f2f7056b08b67a146e186a76`
+
+### Verification
+
+- `npm test`
+- `npm --prefix frontend run build`
+- Repacked Windows and Linux updater assets from the verified 4.2.0 offline release baseline.
+- Windows clean extract smoke test with bundled Node `v20.18.3`; `/api/health` returned `status:"ok"` and `usingFallbackSecret:false`.
+- Linux/vip-hk original offline release script build completed with bundled Node `v20.18.3`, native module checks, frontend build, agent build, SHA256 verification, and `/api/health` returning `status:"ok"` and `usingFallbackSecret:false`.
+
 ## 4.2.3 - 2026-06-19
 
 4.2.3 focuses on making 1Shell AI less blind during long-running command failures. It does not add more prompt rules; instead it passes execution facts from the tool layer back to the model so the agent can reason from complete context.
