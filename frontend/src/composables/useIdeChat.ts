@@ -268,8 +268,7 @@ function isStrayAssistantToolBoundaryFragment(value: string): boolean {
 
 function isStoredAssistantStray(items: IdeTimelineItem[], item: IdeTimelineItem, index: number): boolean {
   if (item.kind !== 'assistant' || item.status === 'streaming') return false;
-  if (isStrayAssistantFragment(item.text)) return true;
-  if (!isBareToolBoundaryFragment(item.text)) return false;
+  if (!isStrayAssistantToolBoundaryFragment(item.text)) return false;
   return nextTimelineKind(items, index) === 'tool';
 }
 
