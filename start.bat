@@ -7,7 +7,7 @@ if exist "%~dp0runtime\node\node.exe" set "NODE_EXE=%~dp0runtime\node\node.exe"
 
 echo.
 echo  +================================================+
-echo  ^|         1Shell v4.2.1                          ^|
+echo  ^|         1Shell v4.2.4                          ^|
 echo  ^|     One Shell to rule them all.                ^|
 echo  +================================================+
 echo.
@@ -15,7 +15,7 @@ echo.
 :: Check Node.js
 "%NODE_EXE%" -v >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] Node.js not found. Please install Node.js 20/22 or use the bundled Windows release package.
+    echo [ERROR] Node.js not found. Please install Node.js 20-24 or use the bundled Windows release package.
     echo Download: https://nodejs.org/
     pause
     exit /b 1
@@ -26,12 +26,12 @@ for /f "tokens=1 delims=v" %%i in ('"%NODE_EXE%" -v') do set "NODE_VER=%%i"
 for /f "tokens=1 delims=." %%i in ('"%NODE_EXE%" -v') do set "NODE_MAJOR=%%i"
 set "NODE_MAJOR=%NODE_MAJOR:v=%"
 if %NODE_MAJOR% LSS 20 (
-    echo [ERROR] Unsupported Node.js version. 1Shell requires Node.js 20 or 22.
+    echo [ERROR] Unsupported Node.js version. 1Shell requires Node.js 20-24.
     pause
     exit /b 1
 )
-if %NODE_MAJOR% GEQ 23 (
-    echo [ERROR] Unsupported Node.js version. 1Shell requires Node.js 20 or 22.
+if %NODE_MAJOR% GEQ 25 (
+    echo [ERROR] Unsupported Node.js version. 1Shell requires Node.js 20-24.
     pause
     exit /b 1
 )

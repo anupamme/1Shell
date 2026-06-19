@@ -1,6 +1,6 @@
 {
   "name": "1shell",
-  "version": "4.2.3",
+  "version": "4.2.4",
   "description": "1Shell - AI-assisted VPS and server management console",
   "homepage": "https://github.com/weidu12123/1Shell",
   "repository": {
@@ -36,7 +36,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=20.0.0 <23.0.0"
+    "node": ">=20.0.0 <25.0.0"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

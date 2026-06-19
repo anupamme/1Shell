@@ -36,7 +36,7 @@ download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$out" "$url"
   else
-    err "Neither curl nor wget is available. Install one or preinstall Node.js 20/22."
+    err "Neither curl nor wget is available. Install one or preinstall Node.js 20-24."
     return 1
   fi
 }
@@ -82,12 +82,12 @@ try_system_node() {
   major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || true)"
   [ -n "$major" ] || return 1
   [ "$major" -ge 20 ] || return 1
-  [ "$major" -lt 23 ] || return 1
+  [ "$major" -lt 25 ] || return 1
   NODE_EXE="$(command -v node)"
   NPM_CMD="$(command -v npm)"
 }
 
-log "1Shell v4.2.1 starter package"
+log "1Shell v4.2.4 starter package"
 if [ ! -x "$NODE_EXE" ]; then
   if [ "${ONE_SHELL_USE_SYSTEM_NODE:-0}" = "1" ] && try_system_node; then
     :
@@ -106,10 +106,10 @@ if [ ! -x "$NPM_CMD" ] && ! command -v "$NPM_CMD" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d "$ROOT_DIR/node_modules" ] || ! "$NODE_EXE" -e "require('better-sqlite3'); require('node-pty'); require.resolve('express')" >/dev/null 2>&1; then
+if [ ! -d "$ROOT_DIR/node_modules" ] || ! "$NODE_EXE" -e "const { createDatabase } = require('./src/database/db'); const db = createDatabase(':memory:'); if (!db) throw new Error('sqlite unavailable'); db.close?.(); require('node-pty'); require.resolve('express')" >/dev/null 2>&1; then
   log "Installing backend production dependencies..."
   "$NPM_CMD" ci --omit=dev --include=optional --no-audit --fund=false
-  "$NODE_EXE" -e "require('better-sqlite3'); require('node-pty'); console.log('native modules ok')"
+  "$NODE_EXE" -e "const { createDatabase } = require('./src/database/db'); const db = createDatabase(':memory:'); if (!db) throw new Error('sqlite unavailable'); db.close?.(); require('node-pty'); console.log('runtime modules ok')"
 fi
 
 if [ ! -f "$ROOT_DIR/frontend/dist/index.html" ]; then

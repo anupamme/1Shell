@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.2.4 - 2026-06-19
+
+4.2.4 focuses on frontend correctness and release polish for the 4.2 patch line. It keeps the fixes in UI, rendering, and runtime plumbing rather than adding more prompt rules.
+
+- Wire real `/model` slash-command behavior into the main console 1Shell AI panel, standalone IDE/Panel page, and global floating 1Shell AI entry.
+- Add a shared model-provider loader and model slash menu so provider activation uses the same backend API across 1Shell AI surfaces.
+- Limit the floating 1Shell AI slash menu to commands it can actually execute: `/model`, `/mode`, `/compact`, `/remind`, and `/clear`.
+- Add safe Markdown table rendering for 1Shell AI timeline text: malformed pipe tables now fall back to literal code blocks instead of being rendered as misleading broken tables.
+- Preserve natural assistant text while continuing to filter duplicate tool-boundary fragments and repeated work-note noise.
+- Improve Agent sidebar/mobile behavior, terminal resize refresh, and About/version display consistency.
+- Broaden the Node engine metadata for the 4.2 package line and keep the SQLite fallback path for newer local Node runtimes.
+
 ## 4.2.3 - 2026-06-19
 
 4.2.3 focuses on making 1Shell AI less blind during long-running command failures. It does not add more prompt rules; instead it passes execution facts from the tool layer back to the model so the agent can reason from complete context.

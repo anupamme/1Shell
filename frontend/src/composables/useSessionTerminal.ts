@@ -127,6 +127,7 @@ function create(): SessionTerminalApi {
   let _resizeRafId: number | null = null;
   let _resizeSettleTimerId: number | null = null;
   let lastSentSizeKey = '';
+  let lastRenderedSizeKey = '';
   let userInputPaused = false;
   let suppressStrayInputUntil = 0;
 
@@ -198,16 +199,32 @@ function create(): SessionTerminalApi {
       const proposed = _fit.proposeDimensions();
       if (!proposed || !isUsableTerminalSize(proposed.cols, proposed.rows)) return null;
       _fit.fit();
-      return { cols: _term.cols, rows: _term.rows };
+      const size = { cols: _term.cols, rows: _term.rows };
+      refreshTerminalViewport(size);
+      return size;
     } catch {
       return null;
     }
+  }
+
+  function refreshTerminalViewport(size = safeTerminalSize()): void {
+    if (!isUsableTerminalSize(size.cols, size.rows)) return;
+    const key = `${size.cols}x${size.rows}`;
+    if (key === lastRenderedSizeKey) return;
+    lastRenderedSizeKey = key;
+    requestAnimationFrame(() => {
+      try {
+        _term.refresh(0, Math.max(0, _term.rows - 1));
+        _term.scrollToBottom();
+      } catch { /* 静默 */ }
+    });
   }
 
   function syncTerminalSize(force = false): void {
     const fitted = fitTerminal();
     const size = fitted || safeTerminalSize();
     if (!isUsableTerminalSize(size.cols, size.rows)) return;
+    refreshTerminalViewport(size);
     const key = `${size.cols}x${size.rows}`;
     if (!force && key === lastSentSizeKey) return;
     lastSentSizeKey = key;
@@ -545,7 +562,8 @@ function create(): SessionTerminalApi {
     if (_resizeRafId === null) {
       _resizeRafId = requestAnimationFrame(() => {
         _resizeRafId = null;
-        fitTerminal();
+        const fitted = fitTerminal();
+        if (fitted) refreshTerminalViewport(fitted);
       });
     }
     if (_resizeSettleTimerId !== null) window.clearTimeout(_resizeSettleTimerId);

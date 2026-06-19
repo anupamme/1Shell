@@ -107,6 +107,10 @@ const showHostDropdown = ref(false);
 const showModeDropdown = ref(false);
 const showModelDropdown = ref(false);
 const expandingToolId = ref<string | null>(null);
+const initialMobileRailLayout = typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches;
+const railCollapsed = ref(initialMobileRailLayout);
+const mobileRailLayout = ref(initialMobileRailLayout);
+let railAutoCollapsed = initialMobileRailLayout;
 let follow = true;
 
 type RailTab = 'chat' | 'files' | 'tools';
@@ -651,6 +655,37 @@ const modes: { key: IdeApprovalMode; label: string }[] = [
   { key: 'full_access', label: '完全访问' },
 ];
 
+function syncRailLayout(): void {
+  const isMobile = window.matchMedia('(max-width: 900px)').matches;
+  mobileRailLayout.value = isMobile;
+  if (isMobile && !railAutoCollapsed && !railCollapsed.value) {
+    railCollapsed.value = true;
+    railAutoCollapsed = true;
+  } else if (!isMobile && railAutoCollapsed) {
+    railCollapsed.value = false;
+    railAutoCollapsed = false;
+  }
+}
+
+function toggleRail(): void {
+  railCollapsed.value = !railCollapsed.value;
+  railAutoCollapsed = false;
+}
+
+function closeRailOnMobile(): void {
+  if (mobileRailLayout.value) railCollapsed.value = true;
+}
+
+async function onRailSelectSession(id: string): Promise<void> {
+  const ok = await onSelectSession(id);
+  if (ok) closeRailOnMobile();
+}
+
+function onRailNewSession(hostId = selectedHostId.value): void {
+  onNewSession(hostId);
+  closeRailOnMobile();
+}
+
 const FILE_TOOL_ACTIONS: Record<string, string> = {
   list_remote_dir: '列出目录',
   read_remote_file: '读取文件',
@@ -818,12 +853,15 @@ watch(() => [route.query.taskAuthoring, route.query.taskIntent], () => {
   consumeTaskAuthoringRoute();
 });
 onMounted(() => {
+  syncRailLayout();
+  window.addEventListener('resize', syncRailLayout);
   void loadHosts();
   void loadProviders();
   void loadSessions();
   consumeTaskAuthoringRoute();
 });
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncRailLayout);
   for (const runtime of runtimes.value) disposeRuntime(runtime);
   runtimes.value = [];
 });
@@ -1288,8 +1326,19 @@ function approveAction(action: 'allow' | 'deny'): void {
 </script>
 
 <template>
-  <div class="agent-view-shell flex h-full bg-white dark:bg-[#0b0f19] text-slate-800 dark:text-slate-200 transition-colors">
+  <div
+    class="agent-view-shell flex h-full bg-white dark:bg-[#0b0f19] text-slate-800 dark:text-slate-200 transition-colors"
+    :class="{ 'agent-view-shell--mobile-rail': mobileRailLayout, 'agent-view-shell--rail-open': !railCollapsed }"
+  >
+    <button
+      v-if="mobileRailLayout && !railCollapsed"
+      type="button"
+      class="agent-view-rail-backdrop"
+      aria-label="关闭侧栏"
+      @click="railCollapsed = true"
+    ></button>
     <AgentSessionRail
+      v-if="!railCollapsed"
       class="agent-view-rail"
       :sessions="railSessions"
       :active-id="ide.currentSessionId.value"
@@ -1298,8 +1347,8 @@ function approveAction(action: 'allow' | 'deny'): void {
       :hosts="hosts"
       :selected-host-id="selectedHostId"
       :file-focus="fileFocus"
-      @select="onSelectSession"
-      @new-session="onNewSession"
+      @select="onRailSelectSession"
+      @new-session="onRailNewSession"
       @rename="onRenameSession"
       @delete="onDeleteSession"
       @select-host="onRailSelectHost"
@@ -1307,6 +1356,15 @@ function approveAction(action: 'allow' | 'deny'): void {
     <div class="agent-view-main flex flex-col flex-1 min-w-0 h-full">
     <!-- ── status bar ── -->
     <header class="agent-view-header shrink-0 flex items-center gap-3 px-5 h-11 border-b border-slate-200 dark:border-white/[0.05] bg-stone-50 dark:bg-[#0f1321] select-none">
+      <button
+        type="button"
+        class="agent-view-rail-toggle"
+        :title="railCollapsed ? '显示侧栏' : '隐藏侧栏'"
+        :aria-pressed="!railCollapsed"
+        @click="toggleRail"
+      >
+        <AppIcon :name="railCollapsed ? 'library' : 'arrow-right'" :size="14" :class="railCollapsed ? '' : 'rotate-180'" />
+      </button>
       <span class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">Agent</span>
       <div class="flex items-center gap-2 text-xs">
         <span class="text-slate-400 dark:text-slate-500">目标</span>
@@ -1432,7 +1490,7 @@ function approveAction(action: 'allow' | 'deny'): void {
             <div v-else class="flex items-start gap-3">
               <span class="w-7 h-7 mt-0.5 rounded-lg bg-emerald-50 dark:bg-emerald-400/10 border border-emerald-200 dark:border-emerald-400/15 flex items-center justify-center shrink-0"><AppIcon name="robot" :size="14" class="text-emerald-500 dark:text-emerald-400" /></span>
               <div class="min-w-0 flex-1">
-                <div v-if="assistantDisplayText(item as IdeChatMessage, index)" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 space-y-3 markdown-body agent-md" v-html="renderMarkdown(assistantDisplayText(item as IdeChatMessage, index))"></div>
+                <div v-if="assistantDisplayText(item as IdeChatMessage, index)" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 space-y-3 markdown-body agent-md" v-html="renderMarkdown(assistantDisplayText(item as IdeChatMessage, index), { tables: 'safe' })"></div>
                 <div v-else class="flex items-center gap-1.5 py-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse"></span>
                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse" style="animation-delay: 0.15s"></span>
@@ -1859,6 +1917,76 @@ function approveAction(action: 'allow' | 'deny'): void {
 </template>
 
 <style scoped>
+.agent-view-rail-toggle {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  background: transparent;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+}
+
+.agent-view-rail-toggle:hover,
+.agent-view-rail-toggle:focus-visible {
+  color: #0f172a;
+  background: rgba(15, 23, 42, 0.06);
+  outline: none;
+}
+
+:global(.dark) .agent-view-rail-toggle {
+  color: #94a3b8;
+}
+
+:global(.dark) .agent-view-rail-toggle:hover,
+:global(.dark) .agent-view-rail-toggle:focus-visible {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.agent-view-rail-backdrop {
+  display: none;
+}
+
+.agent-view-shell--mobile-rail {
+  position: relative;
+}
+
+.agent-view-shell--mobile-rail :deep(.agent-view-rail) {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 42;
+  width: min(86vw, 360px);
+  min-width: min(86vw, 300px);
+  max-width: min(92vw, 420px);
+  box-shadow: 18px 0 38px rgba(15, 23, 42, 0.22);
+}
+
+.agent-view-shell--mobile-rail .agent-view-rail-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: block;
+  border: 0;
+  padding: 0;
+  background: rgba(15, 23, 42, 0.36);
+}
+
+@media (max-width: 700px) {
+  .agent-view-header {
+    padding-left: 12px;
+    padding-right: 12px;
+    gap: 8px;
+  }
+
+  .agent-view-header > .flex.items-center.gap-2.text-xs {
+    min-width: 0;
+  }
+}
+
 .agent-md :deep(pre) {
   background: #f5f5f4;
   border: 1px solid #e7e5e4;

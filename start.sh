@@ -27,7 +27,7 @@ fi
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         1Shell v4.2.1                          ║${NC}"
+echo -e "${GREEN}║         1Shell v4.2.4                          ║${NC}"
 echo -e "${GREEN}║     One Shell to rule them all.                ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -41,8 +41,8 @@ fi
 
 NODE_VER=$("$NODE_EXE" -v | tr -d 'v')
 NODE_MAJOR=$(echo "$NODE_VER" | cut -d. -f1)
-if [[ "$NODE_MAJOR" -lt 20 || "$NODE_MAJOR" -ge 23 ]]; then
-  err "Node.js 版本不受支持 (v${NODE_VER})，需要 v20 或 v22"
+if [[ "$NODE_MAJOR" -lt 20 || "$NODE_MAJOR" -ge 25 ]]; then
+  err "Node.js 版本不受支持 (v${NODE_VER})，需要 v20-v24"
   exit 1
 fi
 log "Node.js v${NODE_VER} 已检测到"

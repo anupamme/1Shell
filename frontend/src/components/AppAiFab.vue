@@ -6,8 +6,19 @@ import AppIcon from '@/components/AppIcon.vue';
 import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
 import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import IdeApprovalModeMenu from '@/components/ide/IdeApprovalModeMenu.vue';
+import IdeModelSlashMenu from '@/components/ide/IdeModelSlashMenu.vue';
+import IdeSlashCommandMenu from '@/components/ide/IdeSlashCommandMenu.vue';
 import { useConfirm } from '@/composables/useConfirm';
+import { useAgentModelProviders } from '@/composables/useAgentModelProviders';
 import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
+import {
+  agentSlashCommandsForSurface,
+  filterAgentSlashCommands,
+  parseAgentClearCommand,
+  parseAgentModeCommand,
+  parseAgentModelCommand,
+  type AgentSlashCommand,
+} from '@/utils/agentSlashCommands';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
 interface ModuleContext {
@@ -25,18 +36,25 @@ const route = useRoute();
 const { confirm } = useConfirm();
 const moduleCtx = ref<ModuleContext>({ name: '1Shell', icon: 'robot', hint: '' });
 const approvalMode = ref<IdeApprovalMode>('manual');
+const modelProviders = useAgentModelProviders();
 const ide = useIdeChat({
   sessionPrefix: 'fab',
   approvalMode: () => approvalMode.value,
   context: () => ({
     module: moduleCtx.value.name,
     moduleHint: moduleCtx.value.hint,
+    modelPreference: modelProviders.modelPreference.value !== '默认模型' ? modelProviders.modelPreference.value : undefined,
   }),
   messagePayload: () => ({
     entry: 'core',
     approvalMode: approvalMode.value,
+    modelPreference: modelProviders.modelPreference.value !== '默认模型' ? modelProviders.modelPreference.value : undefined,
   }),
 });
+const slashCommands = agentSlashCommandsForSurface('fab');
+const slashHighlight = ref(0);
+const slashSubView = ref<'model' | null>(null);
+const slashSubHighlight = ref(0);
 
 const EXCLUDED_ROUTES = new Set(['ide', 'agent', 'terminal']);
 const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
@@ -99,6 +117,7 @@ function loadPos(): Pos {
 const pos = ref<Pos>(loadPos());
 const panelOpen = ref(false);
 const chatEl = ref<HTMLElement | null>(null);
+const inputEl = ref<HTMLTextAreaElement | null>(null);
 let followOutput = true;
 let dragStartMouseX = 0;
 let dragStartMouseY = 0;
@@ -179,6 +198,13 @@ const panelPos = computed<{ left: number; top: number }>(() => {
 
 watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollChatToBottom()); });
 watch(() => ide.timeline.value, () => { void nextTick(() => scrollChatToBottom()); }, { deep: true });
+watch(() => ide.inputText.value, () => { slashHighlight.value = 0; });
+
+const slashCmds = computed<AgentSlashCommand[]>(() => {
+  if (slashSubView.value || ide.isRunning.value) return [];
+  return filterAgentSlashCommands(ide.inputText.value, slashCommands);
+});
+const showSlashMenu = computed(() => slashCmds.value.length > 0 || slashSubView.value !== null);
 
 function onChatScroll(): void {
   const el = chatEl.value;
@@ -190,9 +216,61 @@ function scrollChatToBottom(force = false): void {
 }
 
 function onInputKeydown(event: KeyboardEvent): void {
+  if (showSlashMenu.value) {
+    if (slashSubView.value === 'model') {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, modelProviders.enabledProviders.value.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        slashSubHighlight.value = Math.max(slashSubHighlight.value - 1, 0);
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const provider = slashSubHighlight.value === 0 ? null : modelProviders.enabledProviders.value[slashSubHighlight.value - 1];
+        void selectModelFromSlash(provider?.id || null);
+        return;
+      }
+      if (event.key === 'Escape' || event.key === 'Backspace') {
+        event.preventDefault();
+        closeSlashSubView();
+        return;
+      }
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      slashHighlight.value = Math.min(slashHighlight.value + 1, slashCmds.value.length - 1);
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      slashHighlight.value = Math.max(slashHighlight.value - 1, 0);
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      selectSlashCommand(slashCmds.value[slashHighlight.value]);
+      return;
+    }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      ide.inputText.value = `${slashCmds.value[slashHighlight.value]?.cmd || ''} `;
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      ide.inputText.value = '';
+      slashSubView.value = null;
+      return;
+    }
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
-    ide.sendMessage();
+    void sendOrHandleCommand();
   }
 }
 
@@ -213,6 +291,100 @@ async function setApprovalMode(mode: IdeApprovalMode): Promise<void> {
     if (!ok) return;
   }
   approvalMode.value = mode;
+}
+
+function approvalModeLabel(mode: IdeApprovalMode): string {
+  if (mode === 'full_access') return '完全权限';
+  if (mode === 'delegated') return '委托审批';
+  return '人工审批';
+}
+
+async function handleSlashTextCommand(value: string): Promise<boolean> {
+  const modeCommand = parseAgentModeCommand(value);
+  if (modeCommand) {
+    ide.inputText.value = '';
+    if (!modeCommand.raw) {
+      ide.pushSystemEvent('/mode', `当前审批模式：${approvalModeLabel(approvalMode.value)}`);
+      return true;
+    }
+    if (!modeCommand.mode) {
+      ide.pushSystemEvent('/mode', '用法：/mode manual | delegated | full', 'warning');
+      return true;
+    }
+    await setApprovalMode(modeCommand.mode);
+    ide.pushSystemEvent('/mode', `审批模式已切换为：${approvalModeLabel(approvalMode.value)}`, 'success');
+    return true;
+  }
+
+  if (parseAgentClearCommand(value)) {
+    ide.inputText.value = '';
+    await clearChat();
+    return true;
+  }
+
+  const modelCommand = parseAgentModelCommand(value);
+  if (!modelCommand) return false;
+  ide.inputText.value = '';
+  if (!modelCommand.arg) {
+    ide.pushSystemEvent('/model', `当前模型偏好：${modelProviders.modelPreference.value}`);
+    return true;
+  }
+  modelProviders.modelPreference.value = modelCommand.arg;
+  ide.pushSystemEvent('/model', `已记录本会话模型偏好：${modelCommand.arg}。实际模型路由以当前后端配置为准。`, 'success');
+  return true;
+}
+
+async function sendOrHandleCommand(): Promise<void> {
+  if (await handleSlashTextCommand(ide.inputText.value)) return;
+  ide.sendMessage();
+}
+
+async function clearChat(): Promise<void> {
+  if (ide.isRunning.value) return;
+  if (!ide.hasMessages.value) {
+    ide.resetChat();
+    return;
+  }
+  const ok = await confirm({ title: '清空', message: '清空当前 1Shell AI 对话时间线？' });
+  if (ok) ide.resetChat();
+}
+
+function openSlashModel(): void {
+  ide.inputText.value = '';
+  slashSubView.value = 'model';
+  slashSubHighlight.value = 0;
+  void modelProviders.loadProviders().catch((err) => {
+    ide.pushSystemEvent('/model', err instanceof Error ? err.message : String(err), 'warning');
+  });
+}
+
+function closeSlashSubView(): void {
+  slashSubView.value = null;
+  slashHighlight.value = 0;
+}
+
+async function selectModelFromSlash(providerId: string | null): Promise<void> {
+  try {
+    const nextModel = await modelProviders.selectProvider(providerId);
+    ide.inputText.value = '';
+    slashSubView.value = null;
+    ide.pushSystemEvent('/model', `模型偏好已切换为：${nextModel}`, 'success');
+  } catch (err) {
+    ide.pushSystemEvent('/model', err instanceof Error ? err.message : String(err), 'warning');
+  }
+  void nextTick(() => inputEl.value?.focus());
+}
+
+function selectSlashCommand(command: AgentSlashCommand | undefined): void {
+  if (!command || ide.isRunning.value) return;
+  slashHighlight.value = 0;
+  if (command.cmd === '/model') { openSlashModel(); return; }
+  if (command.cmd === '/mode') { ide.inputText.value = '/mode '; void nextTick(() => inputEl.value?.focus()); return; }
+  if (command.cmd === '/compact') { ide.inputText.value = ''; ide.prefillAndSend('/compact'); return; }
+  if (command.cmd === '/remind') { ide.inputText.value = ''; ide.prefillAndSend('/remind'); return; }
+  if (command.cmd === '/clear') { ide.inputText.value = ''; void clearChat(); return; }
+  ide.inputText.value = `${command.cmd} `;
+  void nextTick(() => inputEl.value?.focus());
 }
 
 onBeforeUnmount(() => {
@@ -294,9 +466,27 @@ onMounted(() => {
           @custom="ide.approveCustom"
           @secret-submit="onSecretRefSubmit"
         />
+        <IdeSlashCommandMenu
+          v-if="showSlashMenu && !slashSubView"
+          :commands="slashCmds"
+          :highlighted="slashHighlight"
+          density="compact"
+          @select="selectSlashCommand"
+        />
+        <IdeModelSlashMenu
+          v-if="slashSubView === 'model'"
+          :providers="modelProviders.enabledProviders.value"
+          :active-provider-id="modelProviders.activeProviderId.value"
+          :highlighted="slashSubHighlight"
+          :loading="modelProviders.loading.value"
+          density="compact"
+          @back="closeSlashSubView"
+          @select="selectModelFromSlash"
+        />
         <label class="sr-only" for="ai-fab-input">输入给 1Shell AI 的消息</label>
         <textarea
           id="ai-fab-input"
+          ref="inputEl"
           v-model="ide.inputText.value"
           rows="3"
           placeholder="输入你的目标..."
@@ -320,7 +510,7 @@ onMounted(() => {
             type="button"
             class="ai-fab-send-btn"
             :disabled="!ide.inputText.value.trim()"
-            @click="ide.sendMessage"
+            @click="sendOrHandleCommand"
           >
             <AppIcon name="arrow-up" :size="14" :stroke-width="2" />
             <span>发送</span>
@@ -548,6 +738,7 @@ onMounted(() => {
 }
 
 .ai-fab-input-area {
+  position: relative;
   display: grid;
   gap: 9px;
   padding: 12px;

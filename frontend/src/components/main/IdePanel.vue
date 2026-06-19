@@ -5,8 +5,10 @@ import AppIcon from '@/components/AppIcon.vue';
 import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
 import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import IdeApprovalModeMenu from '@/components/ide/IdeApprovalModeMenu.vue';
+import IdeModelSlashMenu from '@/components/ide/IdeModelSlashMenu.vue';
 import IdeSlashCommandMenu from '@/components/ide/IdeSlashCommandMenu.vue';
 import { useConfirm } from '@/composables/useConfirm';
+import { useAgentModelProviders } from '@/composables/useAgentModelProviders';
 import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useHostsStore } from '@/stores/hosts';
@@ -36,14 +38,16 @@ const props = defineProps<{ active?: boolean }>();
 const hosts = useHostsStore();
 const sessionTerminal = useSessionTerminal();
 const { confirm } = useConfirm();
-const claudeCodeEnabled = ref(false);
 const approvalMode = ref<IdeApprovalMode>('manual');
 const agentGoal = ref(emptyAgentGoalState());
 const composerMode = ref<'chat' | 'goal'>('chat');
-const currentModel = ref('默认模型');
+const modelProviders = useAgentModelProviders();
+const currentModel = modelProviders.modelPreference;
 const nextEntry = ref<'console' | 'task'>('console');
 const taskAuthoringContext = ref<Record<string, unknown> | null>(null);
 const slashHighlight = ref(0);
+const slashSubView = ref<'model' | null>(null);
+const slashSubHighlight = ref(0);
 const slashCommands = agentSlashCommandsForSurface('console');
 const chatAreaEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
@@ -56,10 +60,11 @@ const activeHostName = computed(() => {
 
 const isGoalComposerMode = computed(() => composerMode.value === 'goal');
 const slashCmds = computed<AgentSlashCommand[]>(() => {
+  if (slashSubView.value) return [];
   if (isGoalComposerMode.value || ide.isRunning.value) return [];
   return filterAgentSlashCommands(ide.inputText.value, slashCommands);
 });
-const showSlashMenu = computed(() => slashCmds.value.length > 0);
+const showSlashMenu = computed(() => slashCmds.value.length > 0 || slashSubView.value !== null);
 const inputPlaceholder = computed(() => isGoalComposerMode.value
   ? '1Shell 应继续朝哪个目标努力？'
   : '输入目标或问题，按 Enter 发送，Shift + Enter 换行...'
@@ -96,7 +101,7 @@ const ide = useIdeChat({
     goalStatus: serializeAgentGoal(agentGoal.value)?.status,
     threadGoal: serializeAgentGoal(agentGoal.value),
     modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
-    claudeCodeEnabled: claudeCodeEnabled.value,
+    claudeCodeEnabled: false,
   }),
 });
 
@@ -127,6 +132,30 @@ function onInputKeydown(event: KeyboardEvent): void {
     return;
   }
   if (showSlashMenu.value) {
+    if (slashSubView.value === 'model') {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, modelProviders.enabledProviders.value.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        slashSubHighlight.value = Math.max(slashSubHighlight.value - 1, 0);
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const provider = slashSubHighlight.value === 0 ? null : modelProviders.enabledProviders.value[slashSubHighlight.value - 1];
+        void selectModelFromSlash(provider?.id || null);
+        return;
+      }
+      if (event.key === 'Escape' || event.key === 'Backspace') {
+        event.preventDefault();
+        closeSlashSubView();
+        return;
+      }
+      return;
+    }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       slashHighlight.value = Math.min(slashHighlight.value + 1, slashCmds.value.length - 1);
@@ -236,6 +265,32 @@ async function handleAgentShellCommand(value: string): Promise<boolean> {
   return true;
 }
 
+function openSlashModel(): void {
+  ide.inputText.value = '';
+  slashSubView.value = 'model';
+  slashSubHighlight.value = 0;
+  void modelProviders.loadProviders().catch((err) => {
+    ide.pushSystemEvent('/model', err instanceof Error ? err.message : String(err), 'warning');
+  });
+}
+
+function closeSlashSubView(): void {
+  slashSubView.value = null;
+  slashHighlight.value = 0;
+}
+
+async function selectModelFromSlash(providerId: string | null): Promise<void> {
+  try {
+    const nextModel = await modelProviders.selectProvider(providerId);
+    ide.inputText.value = '';
+    slashSubView.value = null;
+    ide.pushSystemEvent('/model', `模型偏好已切换为：${nextModel}`, 'success');
+  } catch (err) {
+    ide.pushSystemEvent('/model', err instanceof Error ? err.message : String(err), 'warning');
+  }
+  void nextTick(() => inputEl.value?.focus());
+}
+
 function applyAgentGoalCommand(command: AgentGoalCommand): void {
   const result = reduceAgentGoalCommand(agentGoal.value, command);
   if (result.needsEditor) {
@@ -249,6 +304,7 @@ function applyAgentGoalCommand(command: AgentGoalCommand): void {
 function openGoalComposer(prefill = ''): void {
   if (ide.isRunning.value) return;
   composerMode.value = 'goal';
+  slashSubView.value = null;
   ide.inputText.value = prefill;
   void nextTick(() => inputEl.value?.focus());
 }
@@ -308,6 +364,7 @@ function startTaskAuthoring(intent: string): void {
 function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   if (!command || ide.isRunning.value) return;
   slashHighlight.value = 0;
+  if (command.cmd === '/model') { openSlashModel(); return; }
   if (command.cmd === '/goal') { ide.inputText.value = ''; openGoalComposer(); return; }
   if (command.cmd === '/task') { ide.inputText.value = '/task '; void nextTick(() => inputEl.value?.focus()); return; }
   if (command.cmd === '/compact') { ide.inputText.value = ''; ide.prefillAndSend('/compact'); return; }
@@ -332,14 +389,6 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
       </div>
 
       <div class="console-ide-actions">
-        <label
-          class="console-ide-toggle"
-          :class="{ 'console-ide-toggle--active': claudeCodeEnabled }"
-          title="Claude Code 协作"
-        >
-          <input v-model="claudeCodeEnabled" type="checkbox" />
-          <span>CC</span>
-        </label>
         <button
           type="button"
           class="console-ide-ghost-btn"
@@ -375,11 +424,21 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
         @secret-submit="onSecretRefSubmit"
       />
       <IdeSlashCommandMenu
-        v-if="showSlashMenu"
+        v-if="showSlashMenu && !slashSubView"
         :commands="slashCmds"
         :highlighted="slashHighlight"
         density="compact"
         @select="selectSlashCommand"
+      />
+      <IdeModelSlashMenu
+        v-if="slashSubView === 'model'"
+        :providers="modelProviders.enabledProviders.value"
+        :active-provider-id="modelProviders.activeProviderId.value"
+        :highlighted="slashSubHighlight"
+        :loading="modelProviders.loading.value"
+        density="compact"
+        @back="closeSlashSubView"
+        @select="selectModelFromSlash"
       />
       <div v-if="isGoalComposerMode" class="console-ide-goal-banner">
         <span class="console-ide-goal-icon">
@@ -521,7 +580,6 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   color: #94a3b8;
 }
 
-.console-ide-toggle,
 .console-ide-ghost-btn,
 .console-ide-send-btn,
 .console-ide-stop-btn {
@@ -535,7 +593,6 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
 }
 
-.console-ide-toggle,
 .console-ide-ghost-btn {
   border: 1px solid rgba(148, 163, 184, 0.42);
   background: rgba(255, 255, 255, 0.72);
@@ -545,16 +602,7 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   font-weight: 650;
 }
 
-.console-ide-toggle input {
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: #0284c7;
-}
-
-.console-ide-toggle:hover,
-.console-ide-ghost-btn:hover:not(:disabled),
-.console-ide-toggle--active {
+.console-ide-ghost-btn:hover:not(:disabled) {
   color: #0369a1;
   border-color: rgba(14, 165, 233, 0.42);
 }
@@ -565,16 +613,13 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   cursor: not-allowed;
 }
 
-:global(.dark) .console-ide-toggle,
 :global(.dark) .console-ide-ghost-btn {
   background: rgba(15, 23, 42, 0.72);
   border-color: rgba(71, 85, 105, 0.8);
   color: #cbd5e1;
 }
 
-:global(.dark) .console-ide-toggle:hover,
-:global(.dark) .console-ide-ghost-btn:hover:not(:disabled),
-:global(.dark) .console-ide-toggle--active {
+:global(.dark) .console-ide-ghost-btn:hover:not(:disabled) {
   color: #7dd3fc;
   border-color: rgba(56, 189, 248, 0.34);
   background: rgba(30, 41, 59, 0.84);

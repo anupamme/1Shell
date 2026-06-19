@@ -8,7 +8,7 @@
 
 给人和 AI Agent 共用的本地优先多主机运维平台。人可以把它当作 WebSSH / VPS 控制台使用；AI Agent 可以通过 MCP、1Shell AI 和受控工具层调用它，让多台 VPS 成为可观察、可操作、可审计、可协作的运维对象。
 
-[![version](https://img.shields.io/badge/version-4.2.3-4f8cff?style=flat-square)](https://github.com/weidu12123/1Shell/releases)
+[![version](https://img.shields.io/badge/version-4.2.4-4f8cff?style=flat-square)](https://github.com/weidu12123/1Shell/releases)
 [![node](https://img.shields.io/badge/node-20%20%2F%2022-43a047?style=flat-square&logo=node.js)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-f9a825?style=flat-square)](LICENSE)
 [![docker](https://img.shields.io/badge/docker-ready-2496ed?style=flat-square&logo=docker)](https://hub.docker.com)
@@ -192,8 +192,8 @@ Docker 部署时要注意容器视角与宿主机视角：
 
 ### 环境要求
 
-- Node.js 20.18.3 推荐，Node.js 22 也在 CI 中验证。
-- 当前原生依赖不支持 Node.js 24，请不要用 Node 24 安装。
+- Node.js 20.18.3 推荐；Node.js 22 和 24 可运行。
+- Node.js 22/24 会优先使用内置 `node:sqlite`，避免本机缺少 `better-sqlite3` 原生绑定时降级到文件存储。
 - npm。
 - Linux / Windows / macOS 均可运行服务端。
 - 远程 VPS 需支持 SSH。

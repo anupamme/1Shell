@@ -6,9 +6,11 @@ import AppIcon from '@/components/AppIcon.vue';
 import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
 import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import IdeApprovalModeMenu from '@/components/ide/IdeApprovalModeMenu.vue';
+import IdeModelSlashMenu from '@/components/ide/IdeModelSlashMenu.vue';
 import IdeSlashCommandMenu from '@/components/ide/IdeSlashCommandMenu.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
+import { useAgentModelProviders } from '@/composables/useAgentModelProviders';
 import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
 import { useNotifyStore } from '@/stores/notify';
 import {
@@ -46,9 +48,12 @@ const nextEntry = ref<'core' | 'task'>('core');
 const approvalMode = ref<IdeApprovalMode>('manual');
 const agentGoal = ref(emptyAgentGoalState());
 const composerMode = ref<'chat' | 'goal'>('chat');
-const currentModel = ref('默认模型');
+const modelProviders = useAgentModelProviders();
+const currentModel = modelProviders.modelPreference;
 const taskAuthoringContext = ref<Record<string, unknown> | null>(null);
 const slashHighlight = ref(0);
+const slashSubView = ref<'model' | null>(null);
+const slashSubHighlight = ref(0);
 const slashCommands = agentSlashCommandsForSurface('ide');
 const ide = useIdeChat({
   approvalMode: () => outgoingApprovalMode(),
@@ -72,10 +77,11 @@ let followOutput = true;
 
 const isGoalComposerMode = computed(() => composerMode.value === 'goal');
 const slashCmds = computed<AgentSlashCommand[]>(() => {
+  if (slashSubView.value) return [];
   if (isGoalComposerMode.value || ide.isRunning.value || taskModalOpen.value) return [];
   return filterAgentSlashCommands(ide.inputText.value, slashCommands);
 });
-const showSlashMenu = computed(() => slashCmds.value.length > 0);
+const showSlashMenu = computed(() => slashCmds.value.length > 0 || slashSubView.value !== null);
 const inputPlaceholder = computed(() => isGoalComposerMode.value
   ? '1Shell 应继续朝哪个目标努力？'
   : '输入目标或问题，按 Enter 发送，Shift + Enter 换行...'
@@ -123,6 +129,30 @@ function onInputKeydown(event: KeyboardEvent): void {
     return;
   }
   if (showSlashMenu.value) {
+    if (slashSubView.value === 'model') {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, modelProviders.enabledProviders.value.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        slashSubHighlight.value = Math.max(slashSubHighlight.value - 1, 0);
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const provider = slashSubHighlight.value === 0 ? null : modelProviders.enabledProviders.value[slashSubHighlight.value - 1];
+        void selectModelFromSlash(provider?.id || null);
+        return;
+      }
+      if (event.key === 'Escape' || event.key === 'Backspace') {
+        event.preventDefault();
+        closeSlashSubView();
+        return;
+      }
+      return;
+    }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       slashHighlight.value = Math.min(slashHighlight.value + 1, slashCmds.value.length - 1);
@@ -229,6 +259,32 @@ async function handleAgentShellCommand(value: string): Promise<boolean> {
   return true;
 }
 
+function openSlashModel(): void {
+  ide.inputText.value = '';
+  slashSubView.value = 'model';
+  slashSubHighlight.value = 0;
+  void modelProviders.loadProviders().catch((err) => {
+    ide.pushSystemEvent('/model', err instanceof Error ? err.message : String(err), 'warning');
+  });
+}
+
+function closeSlashSubView(): void {
+  slashSubView.value = null;
+  slashHighlight.value = 0;
+}
+
+async function selectModelFromSlash(providerId: string | null): Promise<void> {
+  try {
+    const nextModel = await modelProviders.selectProvider(providerId);
+    ide.inputText.value = '';
+    slashSubView.value = null;
+    ide.pushSystemEvent('/model', `模型偏好已切换为：${nextModel}`, 'success');
+  } catch (err) {
+    ide.pushSystemEvent('/model', err instanceof Error ? err.message : String(err), 'warning');
+  }
+  void nextTick(() => inputEl.value?.focus());
+}
+
 function applyAgentGoalCommand(command: AgentGoalCommand): void {
   const result = reduceAgentGoalCommand(agentGoal.value, command);
   if (result.needsEditor) {
@@ -242,6 +298,7 @@ function applyAgentGoalCommand(command: AgentGoalCommand): void {
 function openGoalComposer(prefill = ''): void {
   if (ide.isRunning.value) return;
   composerMode.value = 'goal';
+  slashSubView.value = null;
   ide.inputText.value = prefill;
   void nextTick(() => inputEl.value?.focus());
 }
@@ -332,6 +389,7 @@ async function clearChat(): Promise<void> {
 function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   if (!command || ide.isRunning.value) return;
   slashHighlight.value = 0;
+  if (command.cmd === '/model') { openSlashModel(); return; }
   if (command.cmd === '/goal') { ide.inputText.value = ''; openGoalComposer(); return; }
   if (command.cmd === '/task') { ide.inputText.value = ''; openTaskModal(''); return; }
   if (command.cmd === '/compact') { ide.inputText.value = ''; ide.prefillAndSend('/compact'); return; }
@@ -449,11 +507,21 @@ async function saveEmptyTaskDraft(): Promise<void> {
           @secret-submit="onSecretRefSubmit"
         />
         <IdeSlashCommandMenu
-          v-if="showSlashMenu"
+          v-if="showSlashMenu && !slashSubView"
           :commands="slashCmds"
           :highlighted="slashHighlight"
           density="full"
           @select="selectSlashCommand"
+        />
+        <IdeModelSlashMenu
+          v-if="slashSubView === 'model'"
+          :providers="modelProviders.enabledProviders.value"
+          :active-provider-id="modelProviders.activeProviderId.value"
+          :highlighted="slashSubHighlight"
+          :loading="modelProviders.loading.value"
+          density="full"
+          @back="closeSlashSubView"
+          @select="selectModelFromSlash"
         />
         <button
           v-if="taskSuggestionVisible"

@@ -178,6 +178,110 @@ function messageText(value: unknown): string {
   return String(value ?? '').trim();
 }
 
+const COMPLETE_SHORT_ASSISTANT_TEXT = new Set([
+  '\u597d',
+  '\u884c',
+  '\u55ef',
+  '\u662f',
+  '\u5bf9',
+  '\u5426',
+  '\u597d\u7684',
+  '\u6536\u5230',
+  '\u53ef\u4ee5',
+  '\u660e\u767d',
+  '\u4e86\u89e3',
+  '\u7a0d\u7b49',
+  '\u9a6c\u4e0a',
+  '\u7ee7\u7eed',
+  '\u5f00\u59cb',
+  '\u68c0\u67e5',
+  '\u8bfb\u53d6',
+  '\u6267\u884c',
+  '\u9a8c\u8bc1',
+  '\u4fee\u590d',
+  '\u5904\u7406',
+  '\u5b8c\u6210',
+  '\u5931\u8d25',
+  '\u6210\u529f',
+  '\u5f02\u5e38',
+  '\u9519\u8bef',
+  '\u6b63\u5e38',
+  '\u5728\u7ebf',
+  '\u79bb\u7ebf',
+  '\u8d85\u65f6',
+  '\u53ef\u7528',
+  '\u4e0d\u901a',
+  '\u5df2\u901a',
+  '\u7b49\u5f85',
+  '\u91cd\u8bd5',
+  '\u62c9\u53d6',
+  '\u4e0b\u8f7d',
+  '\u4e0a\u4f20',
+  '\u5b89\u88c5',
+  '\u90e8\u7f72',
+  '\u542f\u52a8',
+  '\u505c\u6b62',
+  '\u67e5\u770b',
+  '\u67e5\u8be2',
+  '\u6d4b\u8bd5',
+  '\u8fde\u63a5',
+  '\u65ad\u5f00',
+  '\u5199\u5165',
+  '\u66f4\u65b0',
+  '\u6e05\u7406',
+  '\u5220\u9664',
+  '\u521b\u5efa',
+  '\u5207\u6362',
+]);
+
+function isStrayAssistantFragment(value: string): boolean {
+  const text = value.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (!text || COMPLETE_SHORT_ASSISTANT_TEXT.has(text)) return false;
+
+  const chars = Array.from(text);
+  if (chars.length > 2) return false;
+  if (/[\sA-Za-z0-9`~!@#$%^&*()_\-+=\[\]{}\\|;:'",.<>\/?\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A\u3001]/u.test(text)) return false;
+
+  const hanChars = text.match(/\p{Script=Han}/gu)?.length || 0;
+  if (hanChars > 0 && hanChars === chars.length) return true;
+  return chars.length === 1 && /\p{L}/u.test(text);
+}
+
+function nextTimelineKind(items: IdeTimelineItem[], index: number): IdeTimelineKind | '' {
+  for (let i = index + 1; i < items.length; i += 1) {
+    const kind = items[i]?.kind;
+    if (kind && kind !== 'thinking' && kind !== 'system') return kind;
+  }
+  return '';
+}
+
+function isBareToolBoundaryFragment(value: string): boolean {
+  const text = value.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (!text || COMPLETE_SHORT_ASSISTANT_TEXT.has(text)) return false;
+  if (/\s/u.test(text) || Array.from(text).length > 12) return false;
+  return /^[A-Za-z0-9_-]{2,12}$/.test(text);
+}
+
+function isStrayAssistantToolBoundaryFragment(value: string): boolean {
+  return isStrayAssistantFragment(value) || isBareToolBoundaryFragment(value);
+}
+
+function isStoredAssistantStray(items: IdeTimelineItem[], item: IdeTimelineItem, index: number): boolean {
+  if (item.kind !== 'assistant' || item.status === 'streaming') return false;
+  if (isStrayAssistantFragment(item.text)) return true;
+  if (!isBareToolBoundaryFragment(item.text)) return false;
+  return nextTimelineKind(items, index) === 'tool';
+}
+
+function cleanAssistantWorkNote(value: unknown): string {
+  const text = messageText(value);
+  return text && !isStrayAssistantToolBoundaryFragment(text) ? text : '';
+}
+
+function normalizeTimelineItems(items: IdeTimelineItem[]): IdeTimelineItem[] {
+  return items.filter((item, index) => !isStoredAssistantStray(items, item, index));
+}
+
 function isCompactCommandText(value: string): boolean {
   return /^\/compact(?:\s|$)/i.test(value.trim());
 }
@@ -458,7 +562,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     if (assistantIndex >= 0) {
       currentAssistant.text = displayAssistantTextAfterToolResult(timeline.value, assistantIndex, currentAssistant.text);
     }
-    if (currentAssistant.text.trim()) {
+    if (currentAssistant.text.trim() && !isStrayAssistantFragment(currentAssistant.text)) {
       if (status) currentAssistant.status = status;
       touchTimeline();
     } else {
@@ -473,7 +577,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     if (!currentAssistant) return '';
     const assistant = currentAssistant;
     currentAssistant = null;
-    if (!assistant.text.trim()) {
+    if (!assistant.text.trim() || isStrayAssistantToolBoundaryFragment(assistant.text)) {
       timeline.value = timeline.value.filter((item) => item.id !== assistant.id);
       return '';
     }
@@ -513,18 +617,20 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     const name = String(toolName || '').trim();
     const tools = timeline.value.filter((item): item is IdeToolTimelineItem => item.kind === 'tool').slice().reverse();
     const exact = id ? tools.find((tool) => tool.toolUseId === id && tool.workNote?.trim()) : null;
-    if (exact?.workNote) return exact.workNote.trim();
+    const exactNote = cleanAssistantWorkNote(exact?.workNote);
+    if (exactNote) return exactNote;
     const matching = name ? tools.find((tool) => tool.name === name && tool.workNote?.trim()) : null;
-    if (matching?.workNote) return matching.workNote.trim();
+    const matchingNote = cleanAssistantWorkNote(matching?.workNote);
+    if (matchingNote) return matchingNote;
     const active = tools.find((tool) => ['preparing', 'running'].includes(tool.status) && tool.workNote?.trim());
-    return active?.workNote?.trim() || '';
+    return cleanAssistantWorkNote(active?.workNote);
   }
 
   function startTool(msg: StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown; workNote?: string; modelNote?: string }): void {
     const visibleWorkNote = convertCurrentAssistantToThinking();
     const tool = ensureTool(msg.toolUseId, msg.name || 'unknown');
     if (!tool) return;
-    const workNote = messageText(msg.workNote || msg.modelNote) || visibleWorkNote;
+    const workNote = cleanAssistantWorkNote(msg.workNote || msg.modelNote) || visibleWorkNote;
     if (workNote) tool.workNote = workNote;
     if (msg.phase === 'preparing_input' || msg.input === null) {
       if (tool.status !== 'running') tool.status = 'preparing';
@@ -731,7 +837,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         if (!matchesCurrentRun(msg)) return;
         deltaBuffer.clear();
         currentAssistant = null;
-        timeline.value = Array.isArray(msg.timeline) ? [...msg.timeline] : [];
+        timeline.value = Array.isArray(msg.timeline) ? normalizeTimelineItems([...msg.timeline]) : [];
         approveRequest.value = null;
         approveCustomText.value = '';
         clearApproveTick();
@@ -742,7 +848,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         if (!matchesCurrentRun(msg)) return;
         deltaBuffer.clear();
         currentAssistant = null;
-        timeline.value = Array.isArray(msg.timeline) ? [...msg.timeline] : timeline.value;
+        timeline.value = Array.isArray(msg.timeline) ? normalizeTimelineItems([...msg.timeline]) : timeline.value;
         approveRequest.value = null;
         approveCustomText.value = '';
         clearApproveTick();
@@ -797,7 +903,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
           title: msg.title || approval?.title || '操作需要确认',
           toolName: msg.toolName || approval?.toolName || '操作',
           detail: msg.detail || approval?.detail || '',
-          workNote: messageText(msg.workNote || msg.modelNote) || latestToolWorkNote(msg.toolUseId, msg.toolName || approval?.toolName),
+          workNote: cleanAssistantWorkNote(msg.workNote || msg.modelNote) || latestToolWorkNote(msg.toolUseId, msg.toolName || approval?.toolName),
           reason: msg.reason || approval?.reason || '',
           riskReason: msg.riskReason || approval?.riskReason || '',
           riskLevel: msg.riskLevel || approval?.riskLevel || '',
@@ -1064,7 +1170,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     if (isRunning.value || !session?.id) return;
     deltaBuffer.clear();
     setSessionId(session.id);
-    timeline.value = Array.isArray(session.timeline) ? [...session.timeline] : [];
+    timeline.value = Array.isArray(session.timeline) ? normalizeTimelineItems([...session.timeline]) : [];
     currentAssistant = null;
     activeRunId = session.runId || null;
     stoppedRunId = null;
