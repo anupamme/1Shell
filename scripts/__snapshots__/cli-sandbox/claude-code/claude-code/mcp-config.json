@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "1shell": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3399/mcp/sse",
+      "headers": {
+        "X-Bridge-Token": "BRIDGE_TOKEN_FOR_SNAPSHOT_TEST"
+      }
+    }
+  }
+}

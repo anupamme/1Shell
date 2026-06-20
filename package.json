@@ -23,7 +23,7 @@
     "desktop:build:mac": "electron-builder --mac",
     "build:agent": "node scripts/build-agent.js",
     "package:macos": "node scripts/package-macos-release.js",
-    "test": "node scripts/test-risk-rules.js && node scripts/test-file-service.js && node scripts/test-mcp-core-tools.js && node scripts/test-task-authoring-capability.js && node scripts/test-ai-skill-resolver.js && node scripts/test-ide-empty-response-guard.js"
+    "test": "node scripts/test-risk-rules.js && node scripts/test-file-service.js && node scripts/test-mcp-core-tools.js && node scripts/test-task-authoring-capability.js && node scripts/test-ai-skill-resolver.js && node scripts/test-ide-empty-response-guard.js && node scripts/test-cli-sandbox-snapshot.js"
   },
   "keywords": [
     "ssh",
