@@ -1,29 +1,54 @@
 'use strict';
 
-// Match IPv4 literal a.b.c.d (each 0-255). Doesn't validate ranges strictly
-// but is good enough to differentiate "203.0.113.42" from "vps.example.com".
-function isIpAddress(value) {
-  if (typeof value !== 'string') return false;
-  const parts = value.split('.');
-  if (parts.length !== 4) return false;
-  return parts.every((p) => {
-    if (!/^\d{1,3}$/.test(p)) return false;
-    const n = Number(p);
-    return n >= 0 && n <= 255;
-  });
+const net = require('net');
+
+function normalizeIpAddress(value) {
+  if (typeof value !== 'string') return '';
+  let text = value.trim();
+  if (!text) return '';
+  if (text.includes(',')) text = text.split(',')[0].trim();
+  if (text.startsWith('[') && text.includes(']')) {
+    text = text.slice(1, text.indexOf(']'));
+  }
+  if (/^::ffff:/i.test(text)) text = text.replace(/^::ffff:/i, '');
+  return net.isIP(text) ? text : '';
 }
 
-// RFC1918 + loopback + link-local — anything we shouldn't bother
-// querying GeoIP for.
+function isIpAddress(value) {
+  return Boolean(normalizeIpAddress(value));
+}
+
+// Private, loopback, link-local, and documentation ranges should not go to GeoIP.
 function isPrivateIp(ip) {
-  if (!isIpAddress(ip)) return false;
-  const [a, b] = ip.split('.').map(Number);
-  if (a === 10) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 127) return true;
-  if (a === 169 && b === 254) return true;
+  const clean = normalizeIpAddress(ip);
+  if (!clean) return false;
+
+  if (net.isIP(clean) === 4) {
+    const [a, b] = clean.split('.').map(Number);
+    if (a === 10) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 0) return true;
+    if (a === 192 && b === 0) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    if (a >= 224) return true;
+    return false;
+  }
+
+  const lower = clean.toLowerCase();
+  if (lower === '::' || lower === '::1') return true;
+  if (lower.startsWith('fe80:')) return true;
+  if (lower.startsWith('2001:db8:') || lower === '2001:db8::') return true;
+
+  const firstHextet = parseInt(lower.split(':')[0] || '0', 16);
+  if (Number.isFinite(firstHextet)) {
+    if ((firstHextet & 0xfe00) === 0xfc00) return true;
+    if ((firstHextet & 0xffc0) === 0xfe80) return true;
+  }
   return false;
 }
 
-module.exports = { isIpAddress, isPrivateIp };
+module.exports = { isIpAddress, isPrivateIp, normalizeIpAddress };
