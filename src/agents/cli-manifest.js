@@ -26,10 +26,12 @@ const CLI_MANIFESTS = [
       dirName: 'claude-code',
       configDirEnv: 'CLAUDE_CONFIG_DIR',
       defaultConfigDir: '.claude',
+      mcp: { transport: 'sse' },
       configFiles: [
         {
           name: 'settings.json',
           mergeStrategy: 'overwrite',
+          overwriteBuilder: 'env-overrides',
           overrideEnvKeys: {
             ANTHROPIC_AUTH_TOKEN: 'sk-1shell-proxy',
             ANTHROPIC_BASE_URL: '{serverUrl}/api/proxy/claude',
@@ -39,10 +41,15 @@ const CLI_MANIFESTS = [
         {
           name: 'config.json',
           mergeStrategy: 'overwrite',
+          overwriteBuilder: 'static',
+          content: { primaryApiKey: 'sk-1shell-proxy' },
         },
         {
           name: 'mcp-config.json',
           mergeStrategy: 'overwrite',
+          overwriteBuilder: 'mcp-config',
+          mcpServersKey: 'mcpServers',
+          mcpEntryName: '1shell',
         },
       ],
     },
@@ -54,6 +61,8 @@ const CLI_MANIFESTS = [
     },
 
     launchArgs: [],
+    launchArgsBuilder: 'claude-mcp-args',
+    postEnsureHooks: ['sync-claude-skills'],
     extraEnv: { CLAUDE_CODE_ENTRYPOINT: '1shell-agent-panel' },
   },
 
@@ -82,14 +91,22 @@ const CLI_MANIFESTS = [
       dirName: 'codex',
       configDirEnv: 'CODEX_HOME',
       defaultConfigDir: '.codex',
+      mcp: {
+        transport: 'stdio-bridge',
+        stdioCommand: 'node',
+        stdioBridgeScript: '../bin/1shell-mcp-stdio.js',
+      },
       configFiles: [
         {
           name: 'config.toml',
           mergeStrategy: 'template',
+          template: 'codex-config-toml',
         },
         {
           name: 'auth.json',
           mergeStrategy: 'overwrite',
+          overwriteBuilder: 'static',
+          content: { OPENAI_API_KEY: 'sk-1shell-proxy' },
         },
         {
           name: 'mcp.json',
@@ -134,6 +151,11 @@ const CLI_MANIFESTS = [
       configDirEnv: 'XDG_CONFIG_HOME',
       configSubDir: 'opencode',
       defaultConfigDir: '.opencode',
+      mcp: {
+        transport: 'stdio-bridge',
+        stdioCommand: 'node',
+        stdioBridgeScript: '../bin/1shell-mcp-stdio.js',
+      },
       configFiles: [
         {
           name: 'config.json',

@@ -149,18 +149,21 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
   }
 
   function buildMcpEntry(cliId = null) {
-    // Codex / OpenCode：使用 stdio 桥接脚本（最通用的 MCP 传输方式）
-    if (cliId === 'codex' || cliId === 'opencode') {
+    // 默认走 SSE(claude-code 形态);cliId=null 调用来自 buildClaudeMcpConfig
+    const mcp = cliId ? (getManifest(cliId)?.sandbox?.mcp) : { transport: 'sse' };
+    const transport = mcp?.transport || 'sse';
+
+    if (transport === 'stdio-bridge') {
       return {
-        command: 'node',
-        args: [path.join(dataDir, '..', 'bin', '1shell-mcp-stdio.js')],
+        command: mcp.stdioCommand || 'node',
+        args: [path.join(dataDir, mcp.stdioBridgeScript)],
         env: {
           ONESHELL_URL: serverOrigin,
           ONESHELL_TOKEN: bridgeToken,
         },
       };
     }
-    // Claude Code：直接 SSE 连接
+
     return {
       type: 'sse',
       url: `${serverOrigin}/mcp/sse`,
@@ -267,11 +270,16 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
       }
     }
 
-    if (cliId === 'claude-code') {
+    for (const hookId of (manifest.postEnsureHooks || [])) {
+      const hook = POST_ENSURE_HOOKS[hookId];
+      if (!hook) {
+        logger?.warn?.(`[cli-sandbox] 未知 postEnsureHook: ${hookId} (cliId=${cliId})`);
+        continue;
+      }
       try {
-        syncClaudeCodeSkills();
+        hook(cliId);
       } catch (err) {
-        logger?.warn?.(`[cli-sandbox] Claude Code Skill 同步失败: ${err.message}`);
+        logger?.warn?.(`[cli-sandbox] postEnsureHook '${hookId}' 失败: ${err.message}`);
       }
     }
 
@@ -407,6 +415,17 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     return path.join(getSandboxDir('claude-code'), 'mcp-config.json');
   }
 
+  // launchArgsBuilder 注册表 — 接 (cliId, manifest, ctx),返回追加的 arg 数组
+  // ctx 含:cwd、sandboxDir、helpers(getClaudeMcpConfigPath / getClaudeCodeActivationPrompt)
+  const LAUNCH_ARGS_BUILDERS = {
+    'claude-mcp-args': (cliId, manifest, ctx) => {
+      const extra = ['--strict-mcp-config', '--mcp-config', getClaudeMcpConfigPath()];
+      const activationPrompt = getClaudeCodeActivationPrompt();
+      if (activationPrompt) extra.push('--append-system-prompt', activationPrompt);
+      return extra;
+    },
+  };
+
   function buildLaunchArgs(cliId, { useLocalEnv = false, cwd } = {}) {
     const manifest = getManifest(cliId);
     if (!manifest) return [];
@@ -416,10 +435,14 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
 
     ensureSandbox(cliId, { cwd });
 
-    if (cliId === 'claude-code') {
-      args.push('--strict-mcp-config', '--mcp-config', getClaudeMcpConfigPath());
-      const activationPrompt = getClaudeCodeActivationPrompt();
-      if (activationPrompt) args.push('--append-system-prompt', activationPrompt);
+    const builderId = manifest.launchArgsBuilder;
+    if (builderId) {
+      const builder = LAUNCH_ARGS_BUILDERS[builderId];
+      if (builder) {
+        args.push(...builder(cliId, manifest, { cwd }));
+      } else {
+        logger?.warn?.(`[cli-sandbox] 未知 launchArgsBuilder: ${builderId} (cliId=${cliId})`);
+      }
     }
 
     return args;
@@ -456,48 +479,43 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     return shell === 'powershell' ? `& ${quotePowerShellArg(value)}` : quoteShellArg(value);
   }
 
-  function buildClaudeSettingsContent(configFile) {
-    return {
+  // postEnsureHooks 注册表 — 接 (cliId),在 ensureSandbox 写完所有 config 后跑
+  const POST_ENSURE_HOOKS = {
+    'sync-claude-skills': () => syncClaudeCodeSkills(),
+  };
+
+  // overwriteBuilder 注册表 — 每个 builder 接 (cliId, configFile),返回 JSON 对象
+  const OVERWRITE_BUILDERS = {
+    'env-overrides': (cliId, configFile) => ({
       env: resolveOverrideEnv(configFile),
-    };
-  }
-
-  function buildClaudeMcpConfig() {
-    return {
-      mcpServers: {
-        '1shell': buildMcpEntry(),
-      },
-    };
-  }
-
-  function buildClaudeConfigContent(fileName, configFile) {
-    if (fileName === 'settings.json') {
-      return buildClaudeSettingsContent(configFile);
-    }
-    if (fileName === 'config.json') {
-      return { primaryApiKey: 'sk-1shell-proxy' };
-    }
-    if (fileName === 'mcp-config.json') {
-      return buildClaudeMcpConfig();
-    }
-    return {};
-  }
+    }),
+    'static': (cliId, configFile) => (
+      configFile.content && typeof configFile.content === 'object' ? configFile.content : {}
+    ),
+    'mcp-config': (cliId, configFile) => {
+      const key = configFile.mcpServersKey || 'mcpServers';
+      const entryName = configFile.mcpEntryName || '1shell';
+      return { [key]: { [entryName]: buildMcpEntry(cliId) } };
+    },
+  };
 
   function generateOverwriteContent(cliId, fileName, configFile) {
-    if (cliId === 'claude-code') {
-      return buildClaudeConfigContent(fileName, configFile);
+    const builderId = configFile.overwriteBuilder;
+    if (!builderId) return {};
+    const builder = OVERWRITE_BUILDERS[builderId];
+    if (!builder) {
+      logger?.warn?.(`[cli-sandbox] 未知 overwriteBuilder: ${builderId} (cliId=${cliId} file=${fileName})`);
+      return {};
     }
-    if (cliId === 'codex' && fileName === 'auth.json') {
-      return { OPENAI_API_KEY: 'sk-1shell-proxy' };
-    }
-    return {};
+    return builder(cliId, configFile);
   }
 
-  function renderTemplate(cliId, fileName, { cwd }) {
-    if (cliId === 'codex' && fileName === 'config.toml') {
-      const active = getActiveProviderConfig('codex');
-      const model = active?.model || 'gpt-4o';
-      const projectsCwd = cwd || process.cwd();
+  // template 注册表 — 每个 template 接 (cliId, configFile, ctx),返回字符串
+  // ctx 含:cwd、active(active provider)、serverOrigin、helpers(escape/quote)
+  const TEMPLATE_BUILDERS = {
+    'codex-config-toml': (cliId, configFile, ctx) => {
+      const model = ctx.active?.model || 'gpt-4o';
+      const projectsCwd = ctx.cwd || process.cwd();
       return [
         `model_provider = "1shell-proxy"`,
         `model = "${escapeTomlBasicString(model)}"`,
@@ -506,7 +524,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         `[model_providers.1shell-proxy]`,
         `name = "1shell-proxy"`,
         `wire_api = "responses"`,
-        `base_url = "${serverOrigin}/api/proxy/codex"`,
+        `base_url = "${ctx.serverOrigin}/api/proxy/codex"`,
         `requires_openai_auth = true`,
         ``,
         `[projects.${tomlSingleQuotedKey(projectsCwd)}]`,
@@ -515,8 +533,25 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         `[windows]`,
         `sandbox = "elevated"`,
       ].join('\n');
+    },
+  };
+
+  function renderTemplate(cliId, fileName, { cwd }) {
+    const manifest = getManifest(cliId);
+    const configFile = manifest?.sandbox?.configFiles?.find(cf => cf.name === fileName);
+    const templateId = configFile?.template;
+    if (!templateId) return '';
+    const builder = TEMPLATE_BUILDERS[templateId];
+    if (!builder) {
+      logger?.warn?.(`[cli-sandbox] 未知 template: ${templateId} (cliId=${cliId} file=${fileName})`);
+      return '';
     }
-    return '';
+    const ctx = {
+      cwd,
+      active: getActiveProviderConfig(cliId),
+      serverOrigin,
+    };
+    return builder(cliId, configFile, ctx);
   }
 
   function writeManifestMeta(cliId, meta) {
