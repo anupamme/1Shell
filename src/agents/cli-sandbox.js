@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { execFile, execFileSync } = require('child_process');
 const { getManifest, getAllManifests, UPSTREAM_LABELS } = require('./cli-manifest');
+const { codexConfigTomlReasoningLine } = require('./reasoning');
 
 function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claudeCodeSkillRegistry, logger }) {
   const sandboxRoot = path.join(dataDir, 'cli-sandbox');
@@ -516,10 +517,18 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     'codex-config-toml': (cliId, configFile, ctx) => {
       const model = ctx.active?.model || 'gpt-4o';
       const projectsCwd = ctx.cwd || process.cwd();
-      return [
+      // v3 plan §4.2 轨 1:codex 的 reasoning 写到 config.toml 的 model_reasoning_effort
+      // (claude/1Shell AI 走 proxy 注入 = 轨 2,见 proxy.routes.js 的 maybeInjectReasoning)
+      // effort=auto 或未设时不输出该行,让 codex 自决 ── 也保证 snapshot 字节级不变
+      const reasoningLine = codexConfigTomlReasoningLine(ctx.active?.reasoningEffort);
+      const head = [
         `model_provider = "1shell-proxy"`,
         `model = "${escapeTomlBasicString(model)}"`,
-        `disable_response_storage = true`,
+      ];
+      if (reasoningLine) head.push(reasoningLine);
+      head.push(`disable_response_storage = true`);
+      return [
+        ...head,
         ``,
         `[model_providers.1shell-proxy]`,
         `name = "1shell-proxy"`,
