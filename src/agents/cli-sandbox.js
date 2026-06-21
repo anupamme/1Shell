@@ -6,8 +6,9 @@ const path = require('path');
 const { execFile, execFileSync } = require('child_process');
 const { getManifest, getAllManifests, UPSTREAM_LABELS } = require('./cli-manifest');
 const { codexConfigTomlReasoningLine } = require('./reasoning');
+const { getMcpPreset } = require('./mcp-presets');
 
-function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claudeCodeSkillRegistry, logger }) {
+function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claudeCodeSkillRegistry, mcpPresetStore, logger }) {
   const sandboxRoot = path.join(dataDir, 'cli-sandbox');
   const binaryOverridesPath = path.join(sandboxRoot, 'binary-overrides.json');
   const serverOrigin = `http://127.0.0.1:${port}`;
@@ -172,6 +173,47 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     };
   }
 
+  // 把 preset.server 的模板变量({rootDir}/{githubToken}/...)用 applied.config 替换
+  function renderPresetServer(presetServer, appliedConfig) {
+    const replacePlaceholders = (val) => {
+      if (typeof val !== 'string') return val;
+      return val.replace(/\{(\w+)\}/g, (_m, key) => {
+        const v = appliedConfig && appliedConfig[key];
+        return v != null ? String(v) : `{${key}}`;
+      });
+    };
+    const rendered = { command: presetServer.command };
+    if (Array.isArray(presetServer.args)) {
+      rendered.args = presetServer.args.map(replacePlaceholders);
+    }
+    if (presetServer.env && typeof presetServer.env === 'object') {
+      rendered.env = {};
+      for (const [k, v] of Object.entries(presetServer.env)) {
+        rendered.env[k] = replacePlaceholders(v);
+      }
+    }
+    return rendered;
+  }
+
+  /**
+   * 返回 cliId 沙箱应写入的所有 MCP entries:
+   *   '1shell' 基础 entry + 用户 apply 过的所有 preset(用 mcpPresetStore.getAppliedRaw)
+   * 用户没 apply 任何 preset 时返回 `{ '1shell': base }` ── 与 Sprint B baseline 字节级一致。
+   */
+  function buildAllMcpEntries(cliId) {
+    const entries = { '1shell': buildMcpEntry(cliId) };
+    const applied = mcpPresetStore?.getAppliedRaw?.(cliId) || [];
+    for (const item of applied) {
+      const preset = getMcpPreset(item.presetId);
+      if (!preset) {
+        logger?.warn?.(`[cli-sandbox] applied 列表里有未知 preset: ${item.presetId} (cliId=${cliId}),跳过`);
+        continue;
+      }
+      entries[preset.id] = renderPresetServer(preset.server, item.config);
+    }
+    return entries;
+  }
+
   function safeReadJSON(filePath) {
     if (!filePath) return null;
     try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { return null; }
@@ -231,6 +273,23 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     });
   }
 
+  // 把 buildAllMcpEntries(cliId) 写入 userConfig 的 mcpServers 父节点。
+  // mergePointer = 'mcpServers.1shell' 形式:取 'mcpServers' 为父路径,
+  // 把 entries map 里每个 entry deep-set 到 `parent.<entryKey>`,从而:
+  //   - 覆盖 1Shell 的 entry(老的 1shell key 被新的覆盖)
+  //   - 同时写入所有 applied preset 的 entry
+  //   - 不动 user 已有的其它 entry(如 user 自己加的别的 MCP server)
+  // 用户没 apply 任何 preset 时:只写一个 1shell entry,等价于原 deepSet 行为,字节级一致。
+  function writeMcpEntries(userConfig, configFile, cliId) {
+    const pointer = String(configFile.mergePointer || '');
+    const dotIdx = pointer.lastIndexOf('.');
+    const parentPath = dotIdx > 0 ? pointer.slice(0, dotIdx) : pointer;
+    const entries = buildAllMcpEntries(cliId);
+    for (const [entryKey, entryValue] of Object.entries(entries)) {
+      deepSet(userConfig, `${parentPath}.${entryKey}`, entryValue);
+    }
+  }
+
   function ensureSandbox(cliId, { cwd } = {}) {
     const manifest = getManifest(cliId);
     if (!manifest) throw new Error(`未知 CLI: ${cliId}`);
@@ -246,7 +305,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         if (configFile.mergeStrategy === 'deep-merge') {
           let userConfig = safeReadJSON(targetPath) || {};
           userConfig = cleanSandboxEnv(userConfig, configFile);
-          deepSet(userConfig, configFile.mergePointer, configFile.mergeValue || buildMcpEntry(cliId));
+          writeMcpEntries(userConfig, configFile, cliId);
           safeWriteJSON(targetPath, userConfig);
         }
         continue;
@@ -258,7 +317,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         const userConfigPath = path.join(home, manifest.sandbox.defaultConfigDir, configFile.name);
         let userConfig = safeReadJSON(userConfigPath) || {};
         userConfig = cleanSandboxEnv(userConfig, configFile);
-        deepSet(userConfig, configFile.mergePointer, configFile.mergeValue || buildMcpEntry(cliId));
+        writeMcpEntries(userConfig, configFile, cliId);
         safeWriteJSON(targetPath, userConfig);
 
       } else if (configFile.mergeStrategy === 'template') {
@@ -494,9 +553,10 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
       configFile.content && typeof configFile.content === 'object' ? configFile.content : {}
     ),
     'mcp-config': (cliId, configFile) => {
+      // 完整覆写 mcp-config.json:1shell 基础 entry + 所有 applied preset
+      // 当用户没 apply 任何 preset 时,等价于 `{ [key]: { [entryName]: buildMcpEntry } }`,字节级一致
       const key = configFile.mcpServersKey || 'mcpServers';
-      const entryName = configFile.mcpEntryName || '1shell';
-      return { [key]: { [entryName]: buildMcpEntry(cliId) } };
+      return { [key]: buildAllMcpEntries(cliId) };
     },
   };
 

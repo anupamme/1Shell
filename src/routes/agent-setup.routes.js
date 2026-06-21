@@ -3,6 +3,8 @@
 const { Router } = require('express');
 const { BRIDGE_TOKEN, PORT, PUBLIC_SERVER_URL } = require('../config/env');
 const { getAllManifests, getManifest, UPSTREAM_LABELS } = require('../agents/cli-manifest');
+const { getAllPresets, getPreset } = require('../agents/provider-presets');
+const { getAllMcpPresets, getMcpPreset } = require('../agents/mcp-presets');
 
 /**
  * Agent Setup Routes — 3.0 Sandbox
@@ -24,7 +26,7 @@ const { getAllManifests, getManifest, UPSTREAM_LABELS } = require('../agents/cli
  * DELETE /api/agent/providers/:cliId/:pid          删除 Provider
  * PUT  /api/agent/providers/:cliId/:pid/activate    设为活跃
  */
-function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
+function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore } = {}) {
   const router = Router();
 
   function resolveServerUrl(reqBody, req) {
@@ -310,6 +312,56 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox } = {}) {
     if (!validateCli(req.params.cliId, res)) return;
     const ok = proxyConfigStore.setActive(req.params.cliId, req.params.pid);
     if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+    return res.json({ ok: true });
+  });
+
+  // ─── Provider Preset 库(只读)──────────────────────────────────────────
+  router.get('/agent/provider-presets', (_req, res) => {
+    return res.json({ ok: true, presets: getAllPresets() });
+  });
+  router.get('/agent/provider-presets/:id', (req, res) => {
+    const preset = getPreset(req.params.id);
+    if (!preset) return res.status(404).json({ ok: false, error: 'preset 不存在' });
+    return res.json({ ok: true, preset });
+  });
+
+  // ─── MCP Preset 库 + applied 管理(v3 plan §4.1 F)──────────────────────
+  router.get('/agent/mcp-presets', (_req, res) => {
+    return res.json({ ok: true, presets: getAllMcpPresets() });
+  });
+
+  router.get('/agent/mcp-presets/applied/:cliId', (req, res) => {
+    if (!validateCli(req.params.cliId, res)) return;
+    if (!mcpPresetStore) return res.json({ ok: true, applied: [] });
+    return res.json({ ok: true, applied: mcpPresetStore.listApplied(req.params.cliId) });
+  });
+
+  // body: { cliId: 'codex', config: { githubToken: 'ghp_...' } }
+  router.post('/agent/mcp-presets/:presetId/apply', (req, res) => {
+    if (!mcpPresetStore) return res.status(503).json({ ok: false, error: 'MCP preset 存储未启用' });
+    const { presetId } = req.params;
+    const body = req.body || {};
+    if (!body.cliId || !validateCli(body.cliId, res)) return;
+    if (!getMcpPreset(presetId)) return res.status(404).json({ ok: false, error: `未知 MCP preset: ${presetId}` });
+    try {
+      mcpPresetStore.apply(body.cliId, presetId, body.config || {});
+      // 立即重写沙箱 config(下次启动 CLI 时新 entry 即生效)
+      try { cliSandbox?.ensureSandbox?.(body.cliId); } catch (err) {
+        // 沙箱重写失败不应该阻塞 apply ── apply 已写入 store,下次 ensureSandbox 自动生效
+        // (用户可能没有该 CLI 的有效配置,但仍可注册 preset 等待后续)
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.delete('/agent/mcp-presets/:presetId/apply/:cliId', (req, res) => {
+    if (!mcpPresetStore) return res.status(503).json({ ok: false, error: 'MCP preset 存储未启用' });
+    if (!validateCli(req.params.cliId, res)) return;
+    const ok = mcpPresetStore.remove(req.params.cliId, req.params.presetId);
+    if (!ok) return res.status(404).json({ ok: false, error: '该 CLI 未应用该 preset' });
+    try { cliSandbox?.ensureSandbox?.(req.params.cliId); } catch {}
     return res.json({ ok: true });
   });
 
