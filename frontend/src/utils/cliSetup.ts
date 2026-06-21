@@ -56,6 +56,8 @@ export interface CliReadiness {
   nextAction?: { id: string; label: string };
 }
 
+export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high';
+
 export interface ProviderInfo {
   id: string;
   name?: string;
@@ -64,8 +66,38 @@ export interface ProviderInfo {
   apiKey?: string;
   apiKeySet: boolean;
   model?: string;
+  reasoningEffort?: ReasoningEffort;
+  presetId?: string;
   enabled?: boolean;
 }
+
+export type PresetCategory = 'domestic' | 'overseas' | 'relay';
+
+export interface ProviderPreset {
+  id: string;
+  name: string;
+  apiBase: string;
+  protocol: UpstreamProtocol;
+  apiKeyField: string;
+  models: string[];
+  reasoningModels: string[];
+  docsUrl?: string;
+  category: PresetCategory;
+  isTemplate?: boolean;
+}
+
+export const PRESET_CATEGORY_LABELS: Record<PresetCategory, string> = {
+  domestic: '国内',
+  overseas: '海外',
+  relay: '中转模板',
+};
+
+export const REASONING_EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
+  { value: 'auto',   label: '自动',  hint: '模型自决,不强制' },
+  { value: 'low',    label: '低',    hint: 'Anthropic: 4k budget / OpenAI: low' },
+  { value: 'medium', label: '中',    hint: 'Anthropic: 16k budget / OpenAI: medium' },
+  { value: 'high',   label: '高',    hint: 'Anthropic: 64k budget / OpenAI: high' },
+];
 
 export interface ScanCounts {
   total: number;

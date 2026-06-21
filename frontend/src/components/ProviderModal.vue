@@ -5,8 +5,13 @@ import { useNotifyStore } from '@/stores/notify';
 import {
   SKILLS_SLOT_ID,
   UPSTREAM_LABELS,
+  PRESET_CATEGORY_LABELS,
+  REASONING_EFFORT_OPTIONS,
   type ProviderInfo,
   type ProvidersResponse,
+  type ProviderPreset,
+  type PresetCategory,
+  type ReasoningEffort,
   type UpstreamProtocol,
 } from '@/utils/cliSetup';
 
@@ -40,11 +45,86 @@ const fApiBase = ref('');
 const fApiKey = ref('');
 const fApiKeyPlaceholder = ref('sk-...');
 const fModel = ref('');
+const fReasoningEffort = ref<ReasoningEffort>('auto');
+const fPresetId = ref('');
 const statusText = ref('');
 const statusOk = ref<boolean | null>(null);
 const saving = ref(false);
 
+// Provider preset 库(添加模式下用)
+const presetsAll = ref<ProviderPreset[]>([]);
+const presetsLoaded = ref(false);
+const presetsCollapsed = ref(false);
+
+async function loadPresetsIfNeeded(): Promise<void> {
+  if (presetsLoaded.value) return;
+  try {
+    const resp = await requestJson<{ ok: boolean; presets: ProviderPreset[] }>('/api/agent/provider-presets');
+    presetsAll.value = resp.presets || [];
+    presetsLoaded.value = true;
+  } catch {
+    // 静默失败:用户仍能用手填模式
+  }
+}
+
+const presetsByCategory = computed<Record<PresetCategory, ProviderPreset[]>>(() => {
+  const out: Record<PresetCategory, ProviderPreset[]> = { domestic: [], overseas: [], relay: [] };
+  for (const p of presetsAll.value) {
+    if (!allowedUpstreams.value.includes(p.protocol)) continue;
+    out[p.category]?.push(p);
+  }
+  return out;
+});
+
+const presetCategoryEntries = computed<Array<{ id: PresetCategory; label: string; items: ProviderPreset[] }>>(() => (
+  (Object.keys(PRESET_CATEGORY_LABELS) as PresetCategory[]).map(id => ({
+    id,
+    label: PRESET_CATEGORY_LABELS[id],
+    items: presetsByCategory.value[id] || [],
+  })).filter(group => group.items.length > 0)
+));
+
+// 是否在添加模式(编辑现有 provider 时不显示 preset 选择器)
+const showPresetPicker = computed(() => !editingPid.value && presetCategoryEntries.value.length > 0);
+
+const activePreset = computed<ProviderPreset | null>(() => {
+  if (!fPresetId.value) return null;
+  return presetsAll.value.find(p => p.id === fPresetId.value) || null;
+});
+
+// 当前 model 是否被识别为 reasoning model(用于 reasoning select 的提示)
+const modelLooksReasoning = computed<boolean>(() => {
+  const m = (fModel.value || '').toLowerCase();
+  if (!m) return false;
+  // 复用 reasoning.js 白名单的同名前缀(前端简化版,只用于 UX 提示,后端再次校验)
+  const builtinPrefixes = [
+    'gpt-5', 'o1', 'o3', 'o4-mini',
+    'deepseek-reasoner', 'qwq', 'glm-z1', 'glm-zero',
+    'claude-3-7-sonnet', 'claude-3.7-sonnet',
+    'claude-opus-4', 'claude-sonnet-4', 'claude-fable-5',
+  ];
+  const extra = activePreset.value?.reasoningModels || [];
+  return [...builtinPrefixes, ...extra].some(p => m.startsWith(p.toLowerCase()));
+});
+
+function pickPreset(preset: ProviderPreset): void {
+  fPresetId.value = preset.id;
+  // 模板类(One-API/New-API)不填 apiBase,让用户自填
+  if (!preset.isTemplate) fApiBase.value = preset.apiBase;
+  fUpstream.value = preset.protocol;
+  if (!fName.value.trim()) fName.value = preset.name;
+  fApiKeyPlaceholder.value = preset.apiKeyField ? `请填 ${preset.apiKeyField}` : 'sk-...';
+  if (preset.models.length > 0 && !fModel.value.trim()) fModel.value = preset.models[0];
+  presetsCollapsed.value = true;
+}
+
+function clearPreset(): void {
+  fPresetId.value = '';
+  presetsCollapsed.value = false;
+}
+
 const isSkillsSlot = computed(() => props.cliId === SKILLS_SLOT_ID);
+const isCodex = computed(() => props.cliId === 'codex');
 const title = computed(() => {
   if (!props.cliId) return '配置 API 代理';
   if (isSkillsSlot.value) return '配置 1Shell AI 引擎';
@@ -87,6 +167,9 @@ function resetFormToAdd(): void {
   fApiKey.value = '';
   fApiKeyPlaceholder.value = 'sk-...';
   fModel.value = '';
+  fReasoningEffort.value = 'auto';
+  fPresetId.value = '';
+  presetsCollapsed.value = false;
   statusText.value = '';
   statusOk.value = null;
 }
@@ -99,6 +182,9 @@ function startEdit(p: ProviderInfo): void {
   fApiKey.value = '';
   fApiKeyPlaceholder.value = p.apiKeySet ? (p.apiKey || '已设置') : 'sk-...';
   fModel.value = p.model || '';
+  fReasoningEffort.value = (p.reasoningEffort as ReasoningEffort) || 'auto';
+  fPresetId.value = p.presetId || '';
+  presetsCollapsed.value = true;
   statusText.value = '';
   statusOk.value = null;
 }
@@ -127,6 +213,8 @@ async function onSave(): Promise<void> {
     apiBase: fApiBase.value.trim(),
     apiKey: fApiKey.value.trim() || undefined,
     model: fModel.value.trim() || undefined,
+    reasoningEffort: fReasoningEffort.value,
+    presetId: fPresetId.value || '',
     enabled: (editingPid.value ? providers.value.find(p => p.id === editingPid.value) : null)?.enabled,
   };
 
@@ -219,7 +307,7 @@ watch(() => props.open, async (v) => {
     activeProviderId.value = undefined;
     listError.value = null;
     resetFormToAdd();
-    await loadProviders();
+    await Promise.all([loadProviders(), loadPresetsIfNeeded()]);
   }
 });
 
@@ -229,7 +317,7 @@ watch(() => props.cliId, async (newId, oldId) => {
     activeProviderId.value = undefined;
     listError.value = null;
     resetFormToAdd();
-    await loadProviders();
+    await Promise.all([loadProviders(), loadPresetsIfNeeded()]);
   }
 });
 </script>
@@ -298,7 +386,44 @@ watch(() => props.cliId, async (newId, oldId) => {
         <div class="flex items-center gap-2">
           <span class="text-[11px] font-bold text-slate-600 dark:text-slate-300">{{ formLabel }}</span>
           <span v-if="editingPid" class="text-[9px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-300 font-semibold">编辑中</span>
+          <span v-if="activePreset" class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300 font-semibold">
+            来自 {{ activePreset.name }}
+          </span>
         </div>
+
+        <!-- Provider Preset 快速选择(仅添加模式 + 有可用 preset) -->
+        <div v-if="showPresetPicker" class="rounded-lg border border-cyan-200 dark:border-cyan-500/30 bg-cyan-50/50 dark:bg-cyan-500/5 p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-[10px] font-semibold text-cyan-700 dark:text-cyan-300 uppercase">⚡ 快速选择(可选)</div>
+            <button v-if="presetsCollapsed" type="button" class="text-[10px] text-cyan-600 dark:text-cyan-400 hover:underline" @click="presetsCollapsed = false">展开 ▾</button>
+            <button v-else type="button" class="text-[10px] text-slate-400 hover:underline" @click="presetsCollapsed = true">收起 ▴</button>
+          </div>
+          <div v-if="!presetsCollapsed" class="flex flex-col gap-2">
+            <div v-for="group in presetCategoryEntries" :key="group.id">
+              <div class="text-[9px] font-semibold text-slate-500 dark:text-slate-400 uppercase mb-1">{{ group.label }}</div>
+              <div class="flex flex-wrap gap-1.5">
+                <button
+                  v-for="preset in group.items"
+                  :key="preset.id"
+                  type="button"
+                  class="h-7 px-2.5 rounded-md text-[11px] border transition-colors"
+                  :class="fPresetId === preset.id
+                    ? 'bg-cyan-500 border-cyan-500 text-white'
+                    : 'bg-white dark:bg-[#0b1324] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-cyan-400 hover:text-cyan-600 dark:hover:text-cyan-400'"
+                  :title="preset.docsUrl || preset.name"
+                  @click="pickPreset(preset)"
+                >
+                  {{ preset.name }}
+                </button>
+              </div>
+            </div>
+            <div v-if="fPresetId" class="flex items-center gap-2 mt-1">
+              <span class="text-[10px] text-slate-500 dark:text-slate-400">已选 preset 会自动填地址 / 协议,可继续手动编辑下方字段</span>
+              <button type="button" class="text-[10px] text-slate-400 hover:text-red-400 underline" @click="clearPreset">清除选择</button>
+            </div>
+          </div>
+        </div>
+
         <div class="flex flex-col gap-1.5">
           <label class="text-[10px] font-semibold text-slate-400 uppercase">渠道名称</label>
           <input v-model="fName" type="text" placeholder="例：DeepSeek / 官方 API" class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400" />
@@ -319,7 +444,50 @@ watch(() => props.cliId, async (newId, oldId) => {
         </div>
         <div class="flex flex-col gap-1.5">
           <label class="text-[10px] font-semibold text-slate-400 uppercase">目标模型</label>
-          <input v-model="fModel" type="text" placeholder="gpt-4o / deepseek-chat" class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400" />
+          <input
+            v-model="fModel"
+            type="text"
+            placeholder="gpt-4o / deepseek-chat"
+            list="provider-modal-model-suggestions"
+            class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
+          />
+          <datalist v-if="activePreset && activePreset.models.length > 0" id="provider-modal-model-suggestions">
+            <option v-for="m in activePreset.models" :key="m" :value="m" />
+          </datalist>
+        </div>
+
+        <!-- Reasoning 档位 -->
+        <div class="flex flex-col gap-1.5">
+          <div class="flex items-center justify-between">
+            <label class="text-[10px] font-semibold text-slate-400 uppercase">Reasoning 档位</label>
+            <span
+              v-if="fReasoningEffort !== 'auto' && !modelLooksReasoning"
+              class="text-[9px] text-amber-600 dark:text-amber-400"
+              title="当前模型未被识别为 reasoning 模型,1Shell 会跳过 thinking/reasoning_effort 注入"
+            >
+              ⚠ 当前模型可能不支持
+            </span>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <button
+              v-for="opt in REASONING_EFFORT_OPTIONS"
+              :key="opt.value"
+              type="button"
+              class="flex-1 h-8 rounded-md text-[11px] border transition-colors"
+              :class="fReasoningEffort === opt.value
+                ? 'bg-cyan-500 border-cyan-500 text-white font-semibold'
+                : 'bg-white dark:bg-[#0b1324] border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:border-cyan-400 hover:text-cyan-600'"
+              :title="opt.hint"
+              @click="fReasoningEffort = opt.value"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+          <div class="text-[10px] text-slate-400">
+            仅对支持思考的 reasoning 模型生效(如 gpt-5 / o3 / claude-opus-4 / deepseek-reasoner)。
+            <span v-if="isCodex">codex 通过 config.toml 配置;</span>
+            <span v-else>请求时由 1Shell proxy 注入。</span>
+          </div>
         </div>
 
         <!-- 启动命令提示（仅 CLI 沙箱模式） -->
