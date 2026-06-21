@@ -18,6 +18,12 @@ const crypto = require('crypto');
 const net = require('net');
 const { Router } = require('express');
 const fetch = require('node-fetch');
+const {
+  isReasoningModel,
+  injectAnthropicThinking,
+  injectOpenAIReasoningEffort,
+} = require('../agents/reasoning');
+const { getPreset } = require('../agents/provider-presets');
 const log = require('../../lib/logger');
 const { TRUSTED_PROXY_IPS } = require('../config/env');
 
@@ -621,6 +627,24 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
     return proxyConfigStore.getActiveProvider(cliId);
   }
 
+  // ─── Reasoning 注入(v3 plan §4.2 轨 2)─────────────────────────────
+  //   provider.reasoningEffort 非 'auto' 且当前 model 是 reasoning model 时,
+  //   按上游协议向请求体注入 thinking / reasoning_effort。
+  //   非 reasoning model 跳过,避免给不支持的模型送无效字段。
+  function maybeInjectReasoning(body, provider, targetModel, upstreamProtocol) {
+    const effort = provider?.reasoningEffort;
+    if (!effort || effort === 'auto') return;
+    const extraPrefixes = provider?.presetId
+      ? (getPreset(provider.presetId)?.reasoningModels || [])
+      : [];
+    if (!isReasoningModel(targetModel, upstreamProtocol, extraPrefixes)) return;
+    if (upstreamProtocol === 'anthropic') {
+      injectAnthropicThinking(body, effort);
+    } else if (upstreamProtocol === 'openai') {
+      injectOpenAIReasoningEffort(body, effort);
+    }
+  }
+
   function requireProvider(cliId, cliLabel, res) {
     const p = getActive(cliId);
     if (!p || !p.apiBase || !p.apiKey) {
@@ -649,6 +673,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
 
     if (upstream === 'anthropic') {
       // 透传到 Anthropic API
+      maybeInjectReasoning(body, provider, body.model || provider.model || '', 'anthropic');
       try {
         const upResp = await callAnthropicUpstream(provider.apiBase, provider.apiKey, body, undefined, requestAbort.signal);
         if (isStream) {
@@ -679,6 +704,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
         openaiBody.tools = openaiTools;
         openaiBody.tool_choice = 'auto';
       }
+      maybeInjectReasoning(openaiBody, provider, targetModel, 'openai');
       try {
         const upResp = await callOpenAIUpstream(provider.apiBase, provider.apiKey, openaiBody, requestAbort.signal);
         if (!upResp.ok) {
@@ -724,6 +750,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
     const requestAbort = createRequestAbort(req, res);
 
     if (upstream === 'anthropic') {
+      maybeInjectReasoning(body, active, body.model || active.model || '', 'anthropic');
       try {
         // 若请求体包含 mcp_servers，自动附带 mcp-client beta header
         const extra = {};
@@ -758,6 +785,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
         openaiBody.tools = openaiTools;
         openaiBody.tool_choice = 'auto';
       }
+      maybeInjectReasoning(openaiBody, active, targetModel, 'openai');
       try {
         const upResp = await callOpenAIUpstream(active.apiBase, active.apiKey, openaiBody, requestAbort.signal);
         if (!upResp.ok) {
@@ -804,6 +832,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
     if (upstream === 'openai') {
       // 透传
       if (provider.model) body.model = provider.model;
+      maybeInjectReasoning(body, provider, body.model || '', 'openai');
       try {
         const upResp = await callOpenAIUpstream(provider.apiBase, provider.apiKey, { ...body, stream: isStream }, requestAbort.signal);
         if (!upResp.ok) {
@@ -837,6 +866,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       if (body.temperature != null) anthropicBody.temperature = body.temperature;
       if (body.top_p != null) anthropicBody.top_p = body.top_p;
       if (anthropicTools && anthropicTools.length > 0) anthropicBody.tools = anthropicTools;
+      maybeInjectReasoning(anthropicBody, provider, anthropicBody.model, 'anthropic');
       try {
         const upResp = await callAnthropicUpstream(provider.apiBase, provider.apiKey, anthropicBody, undefined, requestAbort.signal);
         if (!upResp.ok) {
@@ -883,6 +913,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
     }
 
     if (provider.model) body.model = provider.model;
+    maybeInjectReasoning(body, provider, body.model || '', 'openai');
     try {
       const upResp = await callOpenAIResponsesUpstream(provider.apiBase, provider.apiKey, body, requestAbort.signal);
       if (!upResp.ok) {
@@ -1082,8 +1113,15 @@ function createProxyConfigStore(dataDir) {
       apiKeySet: Boolean(p.apiKey),
       model: p.model || '',
       upstreamProtocol: p.upstreamProtocol || 'openai',
+      reasoningEffort: p.reasoningEffort || 'auto',
+      presetId: p.presetId || '',
       enabled: p.enabled !== false,
     };
+  }
+
+  function normalizeReasoningEffort(value) {
+    const v = String(value || '').trim().toLowerCase();
+    return ['auto', 'low', 'medium', 'high'].includes(v) ? v : 'auto';
   }
 
   /** 列出某 CLI 的所有 Provider（脱敏） */
@@ -1116,6 +1154,8 @@ function createProxyConfigStore(dataDir) {
       apiKey: (data.apiKey || '').trim(),
       model: (data.model || '').trim(),
       upstreamProtocol: data.upstreamProtocol || 'openai',
+      reasoningEffort: normalizeReasoningEffort(data.reasoningEffort),
+      presetId: (data.presetId || '').trim(),
       enabled: true,
     };
     cli.providers.push(provider);
@@ -1135,6 +1175,8 @@ function createProxyConfigStore(dataDir) {
     if (typeof partial.apiKey === 'string') p.apiKey = partial.apiKey.trim();
     if (typeof partial.model === 'string') p.model = partial.model.trim();
     if (typeof partial.upstreamProtocol === 'string') p.upstreamProtocol = partial.upstreamProtocol;
+    if (typeof partial.reasoningEffort === 'string') p.reasoningEffort = normalizeReasoningEffort(partial.reasoningEffort);
+    if (typeof partial.presetId === 'string') p.presetId = partial.presetId.trim();
     if (typeof partial.enabled === 'boolean') { p.enabled = partial.enabled; }
     _writeAll(all);
     return true;

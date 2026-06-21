@@ -86,9 +86,11 @@ assert.ok(isReasoningModel('claude-3-7-sonnet-20250219', 'anthropic'), 'claude-3
 assert.ok(isReasoningModel('Claude-Sonnet-4-6', 'anthropic'), '大小写不敏感');
 assert.ok(!isReasoningModel('gpt-4o', 'openai'), 'gpt-4o 不是 reasoning');
 assert.ok(!isReasoningModel('claude-haiku-4-5', 'anthropic'), 'claude-haiku 不是 reasoning');
-// extraPrefixes 补判(deepseek-reasoner 走 openai 协议)
-assert.ok(isReasoningModel('deepseek-reasoner', 'openai', ['deepseek-reasoner']), 'extraPrefixes 应生效');
-assert.ok(!isReasoningModel('deepseek-reasoner', 'openai'), '不传 extraPrefixes 不应命中');
+// deepseek-reasoner 已在内置白名单(A2 扩展)
+assert.ok(isReasoningModel('deepseek-reasoner', 'openai'), 'deepseek-reasoner 应被内置识别');
+// extraPrefixes 对外部新增的 reasoning model 生效(模拟 preset 自带的额外白名单)
+assert.ok(isReasoningModel('custom-reasoning-v1', 'openai', ['custom-reasoning']), 'extraPrefixes 应生效');
+assert.ok(!isReasoningModel('custom-reasoning-v1', 'openai'), '不传 extraPrefixes 时未声明的不应命中');
 
 // injectAnthropicThinking
 const b1 = { model: 'claude-opus-4-8', messages: [] };

@@ -32,10 +32,16 @@ const OPENAI_EFFORT_VALUES = {
 // 命中前缀的 model 才注入 reasoning;其它跳过(避免给非 reasoning 模型加无效字段)
 const REASONING_MODEL_PREFIXES = {
   openai: [
+    // OpenAI 官方
     'gpt-5',
     'o1',
     'o3',
     'o4-mini',
+    // 用 openai 协议的国内/开源 reasoning 模型
+    'deepseek-reasoner',
+    'qwq',
+    'glm-z1',
+    'glm-zero',
   ],
   anthropic: [
     'claude-3-7-sonnet',
@@ -44,8 +50,7 @@ const REASONING_MODEL_PREFIXES = {
     'claude-sonnet-4',
     'claude-fable-5',
   ],
-  // deepseek 用 openai 协议但有自己的 reasoner 系列,放 openai 组
-  // (调用方按 provider preset 的 reasoningModels 字段补判,见 isReasoningModel)
+  // 调用方可额外传 extraPrefixes(取自 provider preset 的 reasoningModels)
 };
 
 function isValidEffort(effort) {
