@@ -22,9 +22,12 @@ const { getAllMcpPresets, getMcpPreset } = require('../agents/mcp-presets');
  * GET  /api/agent/launch-command/:cliId           获取启动命令
  * GET  /api/agent/providers/:cliId                列出某 CLI 的所有 Provider
  * POST /api/agent/providers/:cliId                添加 Provider
+ * POST /api/agent/providers/:cliId/:pid/copy      复制 Provider
+ * POST /api/agent/providers/:cliId/:pid/test      测试 Provider
  * PUT  /api/agent/providers/:cliId/:pid            更新 Provider
  * DELETE /api/agent/providers/:cliId/:pid          删除 Provider
  * PUT  /api/agent/providers/:cliId/:pid/activate    设为活跃
+ * PUT  /api/agent/routes/:cliId                   设置入口路由（Provider + Model）
  */
 function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore } = {}) {
   const router = Router();
@@ -153,6 +156,102 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
     return true;
   }
 
+  function validateProviderUpstream(cliId, upstream, res) {
+    if (!upstream) return true;
+    const cli = resolveManifest(cliId);
+    const allowed = cli?.supportedUpstream || ['openai'];
+    if (allowed.includes(upstream)) return true;
+    const label = cli?.name || cliId;
+    res.status(400).json({ ok: false, error: `${label} 不支持 ${upstream} 上游协议，可选: ${allowed.join(', ')}` });
+    return false;
+  }
+
+  function normalizeApiV1Base(apiBase) {
+    const raw = String(apiBase || '').trim().replace(/\/+$/, '');
+    if (!raw) throw new Error('apiBase 不能为空');
+    // eslint-disable-next-line no-new
+    new URL(raw);
+    return /\/v1$/i.test(raw) ? raw : `${raw}/v1`;
+  }
+
+  function truncateText(text, max = 500) {
+    const value = String(text || '').replace(/\s+/g, ' ').trim();
+    return value.length > max ? `${value.slice(0, max)}...` : value;
+  }
+
+  async function readUpstreamError(resp) {
+    const text = await resp.text().catch(() => '');
+    if (!text) return resp.statusText || '上游未返回错误详情';
+    try {
+      const json = JSON.parse(text);
+      return truncateText(json?.error?.message || json?.message || json?.error || text);
+    } catch {
+      return truncateText(text);
+    }
+  }
+
+  async function testProviderConnection(cliId, provider) {
+    const upstream = provider?.upstreamProtocol || 'openai';
+    const model = String(provider?.model || '').trim();
+    if (!provider?.apiBase) throw new Error('apiBase 不能为空');
+    if (!provider?.apiKey) throw new Error('apiKey 不能为空');
+    if (!model) throw new Error('模型不能为空');
+
+    const base = normalizeApiV1Base(provider.apiBase);
+    const signal = AbortSignal.timeout(10000);
+    let url;
+    let body;
+    let headers;
+    let probe;
+
+    if (upstream === 'anthropic') {
+      probe = 'anthropic.messages';
+      url = `${base}/messages`;
+      headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': provider.apiKey,
+        'anthropic-version': '2023-06-01',
+      };
+      body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
+    } else {
+      headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.apiKey}`,
+      };
+      if (cliId === 'codex') {
+        probe = 'openai.responses';
+        url = `${base}/responses`;
+        body = { model, input: 'ping', max_output_tokens: 1, stream: false };
+      } else {
+        probe = 'openai.chat';
+        url = `${base}/chat/completions`;
+        body = { model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false };
+      }
+    }
+
+    const startedAt = Date.now();
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    const ms = Date.now() - startedAt;
+    if (!resp.ok) {
+      return {
+        ok: false,
+        status: resp.status,
+        ms,
+        probe,
+        model,
+        upstreamProtocol: upstream,
+        error: `上游返回 ${resp.status}: ${await readUpstreamError(resp)}`,
+      };
+    }
+    try { await resp.body?.cancel?.(); } catch { /* ignore */ }
+    return { ok: true, status: resp.status, ms, probe, model, upstreamProtocol: upstream };
+  }
+
   router.get('/agent/diagnostics/:cliId', (req, res) => {
     if (!requireSandbox(req, res)) return;
     const { cliId } = req.params;
@@ -275,13 +374,8 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
     if (!body.apiBase || !body.apiKey) {
       return res.status(400).json({ ok: false, error: 'apiBase 和 apiKey 不能为空' });
     }
-    const cli = resolveManifest(req.params.cliId);
-    const allowed = cli?.supportedUpstream || ['openai'];
     const upstream = body.upstreamProtocol || 'openai';
-    if (!allowed.includes(upstream)) {
-      const label = cli?.name || req.params.cliId;
-      return res.status(400).json({ ok: false, error: `${label} 不支持 ${upstream} 上游协议，可选: ${allowed.join(', ')}` });
-    }
+    if (!validateProviderUpstream(req.params.cliId, upstream, res)) return;
     try {
       const id = proxyConfigStore.addProvider(req.params.cliId, body);
       return res.json({ ok: true, id });
@@ -290,8 +384,38 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
     }
   });
 
+  router.post('/agent/providers/:cliId/:pid/copy', (req, res) => {
+    if (!validateCli(req.params.cliId, res)) return;
+    try {
+      const id = proxyConfigStore.copyProvider(req.params.cliId, req.params.pid);
+      if (!id) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+      return res.json({ ok: true, id });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.post('/agent/providers/:cliId/:pid/test', async (req, res) => {
+    if (!validateCli(req.params.cliId, res)) return;
+    const modelId = typeof req.body?.modelId === 'string' ? req.body.modelId : null;
+    const provider = proxyConfigStore.getProvider(req.params.cliId, req.params.pid, modelId);
+    if (!provider) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+    if (!validateProviderUpstream(req.params.cliId, provider.upstreamProtocol, res)) return;
+    try {
+      const result = await testProviderConnection(req.params.cliId, provider);
+      return res.json(result);
+    } catch (err) {
+      const isTimeout = err?.name === 'AbortError' || /aborted|timeout/i.test(err?.message || '');
+      return res.json({
+        ok: false,
+        error: isTimeout ? '测试超时：10 秒内没有收到上游响应' : `测试失败: ${err.message}`,
+      });
+    }
+  });
+
   router.put('/agent/providers/:cliId/:pid', (req, res) => {
     if (!validateCli(req.params.cliId, res)) return;
+    if (!validateProviderUpstream(req.params.cliId, req.body?.upstreamProtocol, res)) return;
     try {
       const ok = proxyConfigStore.updateProvider(req.params.cliId, req.params.pid, req.body || {});
       if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
@@ -310,9 +434,23 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
 
   router.put('/agent/providers/:cliId/:pid/activate', (req, res) => {
     if (!validateCli(req.params.cliId, res)) return;
-    const ok = proxyConfigStore.setActive(req.params.cliId, req.params.pid);
+    const modelId = req.body?.modelId || req.body?.activeModelId || null;
+    const ok = proxyConfigStore.setActive(req.params.cliId, req.params.pid, modelId);
     if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
     return res.json({ ok: true });
+  });
+
+  router.get('/agent/routes/:cliId', (req, res) => {
+    if (!validateCli(req.params.cliId, res)) return;
+    const result = proxyConfigStore.listProviders(req.params.cliId);
+    return res.json({ ok: true, activeRoute: result.activeRoute || null, activeProviderId: result.activeProviderId || null });
+  });
+
+  router.put('/agent/routes/:cliId', (req, res) => {
+    if (!validateCli(req.params.cliId, res)) return;
+    const route = proxyConfigStore.setRoute(req.params.cliId, req.body || {});
+    if (!route) return res.status(404).json({ ok: false, error: 'Route 指向的 Provider 不存在' });
+    return res.json({ ok: true, activeRoute: route });
   });
 
   // ─── Provider Preset 库(只读)──────────────────────────────────────────

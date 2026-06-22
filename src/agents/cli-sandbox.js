@@ -480,6 +480,8 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
   const LAUNCH_ARGS_BUILDERS = {
     'claude-mcp-args': (cliId, manifest, ctx) => {
       const extra = ['--strict-mcp-config', '--mcp-config', getClaudeMcpConfigPath()];
+      const model = String(ctx.active?.model || '').trim();
+      if (model) extra.unshift('--model', model);
       const activationPrompt = getClaudeCodeActivationPrompt();
       if (activationPrompt) extra.push('--append-system-prompt', activationPrompt);
       return extra;
@@ -499,7 +501,10 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     if (builderId) {
       const builder = LAUNCH_ARGS_BUILDERS[builderId];
       if (builder) {
-        args.push(...builder(cliId, manifest, { cwd }));
+        args.push(...builder(cliId, manifest, {
+          cwd,
+          active: getActiveProviderConfig(cliId),
+        }));
       } else {
         logger?.warn?.(`[cli-sandbox] 未知 launchArgsBuilder: ${builderId} (cliId=${cliId})`);
       }
@@ -743,8 +748,13 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
         id: active.id,
         name: active.name,
         model: active.model,
+        models: Array.isArray(active.models) ? active.models.filter((model) => model?.enabled !== false) : [],
+        activeModelId: active.activeModelId || null,
+        activeRoute: active.activeRoute || null,
         upstreamProtocol: active.upstreamProtocol,
         apiKeySet: Boolean(active.apiKey || active.apiKeySet),
+        contextTokenLimit: active.contextTokenLimit || null,
+        maxOutputTokens: active.maxOutputTokens || null,
       } : null,
     };
   }
@@ -842,6 +852,7 @@ function createCliSandbox({ dataDir, bridgeToken, port, proxyConfigStore, claude
     ensureSandbox,
     getSandboxDir,
     getSandboxStatus,
+    getProviderSummary,
     getScanInfo,
     getToolDiagnostics,
     installCli,
@@ -859,30 +870,64 @@ function detectBinary(manifest, isWindows, overridePath = '', extraCandidates = 
     : [...new Set([...(extraCandidates || []), ...manifestCandidates])].filter(Boolean);
   const extraCandidateSet = new Set(extraCandidates || []);
   const attempted = [];
+  const skipped = [];
   for (const candidate of candidates) {
-    const detected = resolveBinaryCandidate(candidate, isWindows);
     attempted.push(candidate);
-    if (!detected.installed) continue;
-    const version = readBinaryVersion(detected.path || candidate, manifest.versionArgs || ['--version']);
-    return { ...detected, version, override: Boolean(overridePath), managed: !overridePath && extraCandidateSet.has(candidate), attempted };
+    const detectedCandidates = resolveBinaryCandidates(candidate, isWindows);
+    if (!detectedCandidates.length) continue;
+    for (const detected of detectedCandidates) {
+      const skipReason = getBinaryProbeSkipReason(manifest, detected, isWindows);
+      if (skipReason) {
+        skipped.push({ candidate, path: detected.path || candidate, reason: skipReason });
+        continue;
+      }
+      const version = readBinaryVersion(detected.path || candidate, manifest.versionArgs || ['--version']);
+      return { ...detected, version, override: Boolean(overridePath), managed: !overridePath && extraCandidateSet.has(candidate), attempted, skipped };
+    }
   }
-  return { installed: false, attempted, override: Boolean(overridePath), error: overridePath ? '手动路径不可用或不存在' : 'PATH 和 1Shell 托管目录中未找到可执行文件' };
+  const skippedOpenCodeDesktop = skipped.find((item) => item.reason);
+  return {
+    installed: false,
+    attempted,
+    skipped,
+    override: Boolean(overridePath),
+    error: skippedOpenCodeDesktop?.reason || (overridePath ? '手动路径不可用或不存在' : 'PATH 和 1Shell 托管目录中未找到可执行文件'),
+  };
 }
 
 function resolveBinaryCandidate(candidate, isWindows) {
-  if (!candidate) return { installed: false };
+  return resolveBinaryCandidates(candidate, isWindows)[0] || { installed: false };
+}
+
+function resolveBinaryCandidates(candidate, isWindows) {
+  if (!candidate) return [];
   const clean = normalizeManualBinaryPath(candidate);
   if (path.isAbsolute(clean) || clean.includes('/') || clean.includes('\\')) {
     const resolved = resolveExecutablePath(clean, isWindows);
-    return resolved ? { installed: true, path: resolved, source: 'path' } : { installed: false };
+    return resolved ? [{ installed: true, path: resolved, source: 'path' }] : [];
   }
   try {
     const command = isWindows ? 'where.exe' : 'which';
     const result = execFileSync(command, [clean], { timeout: 3000, encoding: 'utf8', windowsHide: true }).trim();
-    const first = result.split(/\r?\n/).map(line => line.trim()).filter(Boolean)[0];
-    if (first) return { installed: true, path: first, source: 'path' };
+    return result.split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map((line) => ({ installed: true, path: line, source: 'path' }));
   } catch { /* not found */ }
-  return { installed: false };
+  return [];
+}
+
+function getBinaryProbeSkipReason(manifest, detected, isWindows) {
+  if (!isWindows || manifest?.id !== 'opencode') return '';
+  const binaryPath = String(detected?.path || '');
+  if (!binaryPath) return '';
+  const basename = path.basename(binaryPath).toLowerCase();
+  const parent = path.basename(path.dirname(binaryPath)).toLowerCase();
+  const ext = path.extname(binaryPath).toLowerCase();
+  if (ext === '.exe' && basename === 'opencode.exe' && parent === 'opencode') {
+    return '检测到 OpenCode 桌面版启动器，已跳过；请安装 npm CLI(opencode-ai)或手动选择 opencode.cmd/opencode.ps1';
+  }
+  return '';
 }
 
 function resolveExecutablePath(filePath, isWindows) {
@@ -930,4 +975,11 @@ function buildInstallErrorMessage(err, stdout, stderr) {
   return detail || err.message || '安装失败';
 }
 
-module.exports = { createCliSandbox };
+module.exports = {
+  createCliSandbox,
+  __test: {
+    detectBinary,
+    getBinaryProbeSkipReason,
+    resolveBinaryCandidates,
+  },
+};

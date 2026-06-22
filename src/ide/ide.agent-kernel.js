@@ -34,6 +34,7 @@ function createIdeAgentPolicy({ tools = [], entry = 'core', approvalMode = null,
   const normalizedEntry = String(entry || 'core').trim().toLowerCase().replace(/[-\s]+/g, '_') || 'core';
   const normalizedApprovalMode = normalizeIdeApprovalMode(approvalMode, { entry: normalizedEntry });
   const taskRepairAuthorized = isTaskRepairAuthorized(taskRepair);
+  const hostScope = hostScopeForRemotePolicy(remotePolicy);
   // /task 创作模式只做只读探索 + 推演，不执行真正的变更：去掉 exec_command，
   // 变更/高危工具与非只读命令由 Harness capability 直接拒绝（A 边界）。
   // task_run 默认只执行任务；只有用户在失败后明确授权修复本任务时，才临时授予
@@ -65,6 +66,7 @@ function createIdeAgentPolicy({ tools = [], entry = 'core', approvalMode = null,
     readOnly: false,
     entry: normalizedEntry,
     taskRepairAuthorized,
+    hostScope,
     remotePolicy: remotePolicy ? summarizeRemotePolicy(remotePolicy) : undefined,
     goalProfile: goalProfile || undefined,
     legacyFlagsIgnored: ['safeMode', 'unlimitedTurns'],
@@ -139,6 +141,12 @@ function uniqueStrings(values) {
   return Array.from(new Set((Array.isArray(values) ? values : [])
     .map((value) => String(value || '').trim())
     .filter(Boolean)));
+}
+
+function hostScopeForRemotePolicy(policy = {}) {
+  const allowedHosts = uniqueStrings(policy?.allowedHosts);
+  if (allowedHosts.length === 0 || allowedHosts.includes('*')) return undefined;
+  return allowedHosts;
 }
 
 function summarizeRemotePolicy(policy = {}) {

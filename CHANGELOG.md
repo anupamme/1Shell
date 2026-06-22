@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.3.0 - 2026-06-22
+
+4.3.0 把第三方 AI CLI 从一个松散的配置入口，收敛成由 1Shell 托管的本地运行环境。Claude Code、Codex、OpenCode 仍然保持各自官方 Agent 的存在形式；1Shell 负责统一配置、网关转发、MCP 注入、CLI 运行目录隔离，以及 1Shell AI 的 VPS 工作区边界。
+
+- API/模型配置改为按渠道独立管理，支持 1Shell AI、Claude Code、Codex、OpenCode 分别配置。
+- 新增模型配置项：模型映射、思考程度、上下文长度、最大输出、测试、复制。
+- Claude Code 网关按已配置模型暴露 `/v1/models`，`/model` 可以切换到用户映射的模型。
+- Codex/OpenCode 保持在配置托管和 1Shell MCP 注入层面，不把它们伪装成通用模型网关。
+- 第三方 CLI 支持由 1Shell 注入 MCP 与运行配置，避免每台 VPS 都单独安装和维护 CLI。
+- 1Shell AI 新增 VPS 工作区选择，新建对话时可以选择全局、单台 VPS 或多台 VPS。
+- 左侧历史记录按工作区分组，支持对话复制、重命名、删除，并保留消息、模型标签和主机范围。
+- 优化 Agent/AI 配置界面，弱化多余渠道列表，增强右侧操作按钮与配置细节展示。
+
+### Verification
+
+- `npm test`
+- `npm --prefix frontend run build`
+- `node scripts/repack-release-assets.js`
+- 基于已验证的 4.2.0 offline release baseline 重新打包 Windows 与 Linux 更新包。
+
+### Release assets
+
+- Windows x64 updater package: `release/repacked/1shell-4.3.0-windows-x64.zip`
+  - SHA256: `5c834a55ce7c25915eb13a5185f2bc33ccd6f25eb986498ec84252624b5e46d0`
+- Linux x64 updater package: `release/repacked/1shell-4.3.0-linux-x64.tar.gz`
+  - SHA256: `575f198aa9b2bb4eed3bcf4b59a72c2d0863897c6b52f09bf9265a55ee7b7eb8`
+
 ## 4.2.4 - 2026-06-19
 
 4.2.4 focuses on frontend correctness and release polish for the 4.2 patch line. It keeps the fixes in UI, rendering, and runtime plumbing rather than adding more prompt rules.

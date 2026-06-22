@@ -1339,6 +1339,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
         context: {
           ...redactAgentTraceValue(context),
           hostId: session?.hostId || context?.hosts?.[0]?.id || 'local',
+          workspaceHostIds: Array.isArray(session?.workspaceHostIds) ? session.workspaceHostIds : [],
           goalProfile,
         },
         tools: tools.map((tool) => ({ name: tool.name, type: 'ide' })),
@@ -1949,12 +1950,14 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   function normalizeToolPolicy(policy = {}) {
     const gatewayMode = String(policy.gatewayMode || '').trim();
+    const source = String(policy.source || policy.policySource || '').trim();
     return {
       allowedTools: cleanPolicyList(policy.allowedTools),
       allowedHosts: cleanPolicyList(policy.allowedHosts),
       allowedScripts: cleanPolicyList(policy.allowedScripts),
       allowedPaths: cleanPolicyList(policy.allowedPaths),
       gatewayMode: ['answer', 'plan', 'execute'].includes(gatewayMode) ? gatewayMode : 'answer',
+      source: source.slice(0, 80),
     };
   }
 
@@ -1982,8 +1985,60 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     });
   }
 
+  const HOST_SCOPED_TOOL_FIELDS = Object.freeze({
+    execute_command: ['hostId'],
+    run_script: ['hostId'],
+    list_remote_dir: ['hostId'],
+    read_remote_file: ['hostId'],
+    write_remote_file: ['hostId'],
+    create_directory: ['hostId'],
+    delete_path: ['hostId'],
+    rename_path: ['hostId'],
+    upload_file: ['hostId'],
+    download_file: ['hostId'],
+    get_probe: ['hostId'],
+    get_probe_samples: ['hostId'],
+    get_probe_timeseries: ['hostId'],
+    get_probe_traffic: ['hostId'],
+    install_probe_agent: ['hostId'],
+    restart_probe_agent: ['hostId'],
+    uninstall_probe_agent: ['hostId'],
+    probe_diag_ping: ['hostId'],
+    probe_diag_http: ['hostId'],
+    probe_diag_dns: ['hostId'],
+  });
+
+  function toolPolicyLabel(policy = {}) {
+    return policy.source === 'agent_workspace' ? 'Agent 工作区' : 'Remote MCP Token';
+  }
+
   function deniedByPolicy(message) {
     return { content: `[ERROR] ${message}`, is_error: true };
+  }
+
+  function scopedHostIdForSession(session = {}) {
+    const allowedHosts = session?.toolPolicy?.allowedHosts || [];
+    const scopedHosts = Array.isArray(allowedHosts)
+      ? allowedHosts.map((item) => String(item || '').trim()).filter((item) => item && item !== '*')
+      : [];
+    if (scopedHosts.length === 1) return scopedHosts[0];
+    if (Array.isArray(allowedHosts) && allowedHosts.length > 0) return '';
+    const sessionHostId = String(session?.hostId || '').trim();
+    return sessionHostId && sessionHostId !== 'all' ? sessionHostId : '';
+  }
+
+  function applySessionHostScopeToInput(toolName, args = {}, session = {}) {
+    const fields = HOST_SCOPED_TOOL_FIELDS[String(toolName || '').trim()] || [];
+    if (fields.length === 0 || !args || typeof args !== 'object' || Array.isArray(args)) return args || {};
+    const defaultHostId = scopedHostIdForSession(session);
+    if (!defaultHostId) return args;
+    let next = args;
+    for (const field of fields) {
+      if (String(next[field] || '').trim()) continue;
+      if (next === args) next = { ...args };
+      next[field] = defaultHostId;
+    }
+    return next;
   }
 
   function createIdeRuntimeDispatchOptions({ socket, sessionId, runId, session, mcpToolMap, emitLifecycle = true, recordPhase = true, recordEffects = true } = {}) {
@@ -2021,10 +2076,11 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
         { ...approvalContext, toolUseId: action.id },
       ) : undefined,
       executeTool: async ({ toolName, args, toolCall, context: toolContext }) => {
+        const scopedArgs = applySessionHostScopeToInput(toolName, args || {}, session);
         const tc = {
           id: toolCall?.providerToolUseId || toolCall?.id || action.id || `${toolName}-${Date.now()}`,
           name: toolName,
-          input: args || {},
+          input: scopedArgs,
         };
         const toolAc = new AbortController();
         const unregisterToolCancel = registerCancelHandler(session, () => toolAc.abort());
@@ -2065,7 +2121,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
           let rewindUndoRecord = null;
           if (mcpInfo && localMcpService) {
             try {
-              result = await localMcpService.callTool(mcpInfo.mcpId, mcpInfo.mcpToolName, args || {}, {
+              result = await localMcpService.callTool(mcpInfo.mcpId, mcpInfo.mcpToolName, scopedArgs, {
                 signal: toolAc.signal,
                 killOnAbort: true,
               });
@@ -2079,7 +2135,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
               sessionId,
               toolUseId: tc.id,
             });
-            result = await ideTools.handle(toolName, args || {}, {
+            result = await ideTools.handle(toolName, scopedArgs, {
               socket,
               sessionId,
               runId,
@@ -2643,7 +2699,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     };
     const directTool = requiredDirectToolByInternalTool[tc.name];
     if (directTool && policy.allowedTools.length > 0 && !policy.allowedTools.includes('*') && !policy.allowedTools.includes(directTool)) {
-      return deniedByPolicy(`Remote MCP Token 不允许 1Shell AI 使用能力: ${directTool}`);
+      return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许 1Shell AI 使用能力: ${directTool}`);
     }
     const writeTools = new Set([
       'execute_command',
@@ -2658,39 +2714,17 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     if (tc.name === 'list_hosts' && policy.allowedHosts.length > 0 && !policy.allowedHosts.includes('*')) {
       return filteredHostsForPolicy(policy);
     }
-    const hostFieldsByTool = {
-      execute_command: ['hostId'],
-      run_script: ['hostId'],
-      list_remote_dir: ['hostId'],
-      read_remote_file: ['hostId'],
-      write_remote_file: ['hostId'],
-      create_directory: ['hostId'],
-      delete_path: ['hostId'],
-      rename_path: ['hostId'],
-      upload_file: ['hostId'],
-      download_file: ['hostId'],
-      get_probe: ['hostId'],
-      get_probe_samples: ['hostId'],
-      get_probe_timeseries: ['hostId'],
-      get_probe_traffic: ['hostId'],
-      install_probe_agent: ['hostId'],
-      restart_probe_agent: ['hostId'],
-      uninstall_probe_agent: ['hostId'],
-      probe_diag_ping: ['hostId'],
-      probe_diag_http: ['hostId'],
-      probe_diag_dns: ['hostId'],
-    };
-    for (const field of hostFieldsByTool[tc.name] || []) {
+    for (const field of HOST_SCOPED_TOOL_FIELDS[tc.name] || []) {
       const value = String(input[field] || '').trim();
       if (!value) continue;
       if (value === 'all' && policy.allowedHosts.length > 0 && !policy.allowedHosts.includes('*')) {
-        return deniedByPolicy('Remote MCP Token 不允许访问全部主机');
+        return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许访问全部主机`);
       }
-      if (!allowsValue(value, policy.allowedHosts)) return deniedByPolicy(`Remote MCP Token 不允许访问主机: ${value}`);
+      if (!allowsValue(value, policy.allowedHosts)) return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许访问主机: ${value}`);
     }
     if (tc.name === 'run_script') {
       const scriptId = String(input.scriptId || '').trim();
-      if (scriptId && !allowsValue(scriptId, policy.allowedScripts)) return deniedByPolicy(`Remote MCP Token 不允许运行脚本: ${scriptId}`);
+      if (scriptId && !allowsValue(scriptId, policy.allowedScripts)) return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许运行脚本: ${scriptId}`);
     }
     const pathFieldsByTool = {
       list_remote_dir: ['path'],
@@ -2704,7 +2738,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     };
     for (const field of pathFieldsByTool[tc.name] || []) {
       const value = String(input[field] || '').trim();
-      if (value && !allowsPath(value, policy.allowedPaths)) return deniedByPolicy(`Remote MCP Token 不允许访问路径: ${value}`);
+      if (value && !allowsPath(value, policy.allowedPaths)) return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许访问路径: ${value}`);
     }
     return null;
   }
@@ -2872,14 +2906,44 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     session.approvalMode = nextApprovalMode;
   }
 
+  function hasOwnObjectProperty(value, key) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, key));
+  }
+
+  function cleanWorkspaceHostIds(value) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value
+      .map((item) => String(item || '').trim())
+      .filter((item) => item && item !== 'all' && item !== '*'))];
+  }
+
+  function workspaceHostIdsFromContext(context = {}) {
+    if (hasOwnObjectProperty(context, 'workspaceHostIds')) return cleanWorkspaceHostIds(context.workspaceHostIds);
+    if (Array.isArray(context?.hosts)) return cleanWorkspaceHostIds(context.hosts.map((host) => host?.id));
+    return [];
+  }
+
+  function hostIdForWorkspace(workspaceHostIds = []) {
+    return workspaceHostIds.length === 1 ? workspaceHostIds[0] : 'all';
+  }
+
+  function hostIdFromContext(context = {}) {
+    if (hasOwnObjectProperty(context, 'workspaceHostIds') || Array.isArray(context?.hosts)) {
+      return hostIdForWorkspace(workspaceHostIdsFromContext(context));
+    }
+    return String(context?.hostScope || '').trim() === 'all' ? 'all' : '';
+  }
+
   function getOrCreateSession(sessionId, context, entry, approvalMode = null) {
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
       session.updatedAt = new Date().toISOString();
       applyPromptEntry(session, entry, approvalMode);
       session.taskRepair = normalizeTaskRepairScope(context, session.entry);
-      if (context?.toolPolicy) session.toolPolicy = normalizeToolPolicy(context.toolPolicy);
-      if (context?.hosts?.[0]?.id) session.hostId = context.hosts[0].id;
+      if (hasOwnObjectProperty(context, 'toolPolicy')) session.toolPolicy = context.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null;
+      if (hasOwnObjectProperty(context, 'workspaceHostIds') || Array.isArray(context?.hosts)) session.workspaceHostIds = workspaceHostIdsFromContext(context);
+      const contextHostId = hostIdFromContext(context);
+      if (contextHostId) session.hostId = contextHostId;
       ensureRewindState(session);
       return session;
     }
@@ -2918,7 +2982,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       approvalMode: promptApprovalMode,
       system: promptForEntry(promptEntry),
       contextBlock,
-      hostId: context?.hosts?.[0]?.id || 'local',
+      hostId: hostIdFromContext(context) || 'local',
+      workspaceHostIds: workspaceHostIdsFromContext(context),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       abortController: null,
@@ -2934,7 +2999,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       legacySafeMode: null,
       legacyUnlimitedTurns: null,
       claudeCodeEnabled: false,
-      toolPolicy: context?.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null,
+      toolPolicy: hasOwnObjectProperty(context, 'toolPolicy') && context.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null,
       taskRepair: normalizeTaskRepairScope(context, promptEntry),
       agentPolicy: null,
       agentGoalProfile: null,
@@ -3334,6 +3399,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
         title: session.firstUserMessage ? session.firstUserMessage.slice(0, 60) : deriveSessionTitle(messages),
         entry: session.entry || 'core',
         hostId: session.hostId || '',
+        workspaceHostIds: cleanWorkspaceHostIds(session.workspaceHostIds),
         modelLabel: modelLabel || '',
         messages,
         preview: deriveSessionPreview(messages),
@@ -3402,6 +3468,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       title: record.title || '',
       entry: record.entry || 'core',
       hostId: record.hostId || '',
+      workspaceHostIds: cleanWorkspaceHostIds(record.workspaceHostIds),
       modelLabel: record.modelLabel || '',
       messageCount: record.messageCount || 0,
       preview: record.preview || '',
@@ -3420,6 +3487,9 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       title: existing?.title || (session.firstUserMessage ? session.firstUserMessage.slice(0, 60) : deriveSessionTitle(messages)),
       entry: session.entry || existing?.entry || 'core',
       hostId: session.hostId || existing?.hostId || '',
+      workspaceHostIds: Array.isArray(session.workspaceHostIds)
+        ? cleanWorkspaceHostIds(session.workspaceHostIds)
+        : cleanWorkspaceHostIds(existing?.workspaceHostIds),
       modelLabel: existing?.modelLabel || '',
       messageCount: messages.length || existing?.messageCount || 0,
       preview: deriveSessionPreview(messages) || existing?.preview || '',
@@ -3474,6 +3544,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       title: record.title,
       entry: record.entry,
       hostId: record.hostId,
+      workspaceHostIds: cleanWorkspaceHostIds(record.workspaceHostIds),
       modelLabel: record.modelLabel,
       messageCount: record.messageCount,
       createdAt: record.createdAt,
@@ -3484,6 +3555,41 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   function renameSessionRecord(id, title) {
     return ideSessionRepository?.renameSession ? ideSessionRepository.renameSession(id, title) : false;
+  }
+
+  function copySessionRecord(id) {
+    if (!ideSessionRepository?.upsertSession) return null;
+    const live = sessions.get(id);
+    if (live?.currentRunId && !live.cancelled) return null;
+    const record = ideSessionRepository?.getSession?.(id);
+    const source = live && Array.isArray(live.messages) && live.messages.length
+      ? {
+          ...record,
+          id,
+          title: record?.title || live.firstUserMessage?.slice(0, 60) || deriveSessionTitle(live.messages),
+          entry: live.entry || record?.entry || 'core',
+          hostId: live.hostId || record?.hostId || '',
+          workspaceHostIds: cleanWorkspaceHostIds(live.workspaceHostIds || record?.workspaceHostIds),
+          modelLabel: record?.modelLabel || '',
+          messages: live.messages,
+          preview: deriveSessionPreview(live.messages) || record?.preview || '',
+        }
+      : record;
+    if (!source?.id) return null;
+    const newId = `agent-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    const messages = Array.isArray(source.messages) ? JSON.parse(JSON.stringify(source.messages)) : [];
+    const copied = ideSessionRepository.upsertSession({
+      id: newId,
+      title: `${String(source.title || '新对话').slice(0, 180)}-copy`,
+      entry: source.entry || 'core',
+      hostId: source.hostId || '',
+      workspaceHostIds: cleanWorkspaceHostIds(source.workspaceHostIds || (source.hostId ? [source.hostId] : [])),
+      modelLabel: source.modelLabel || '',
+      messageCount: messages.length,
+      messages,
+      preview: source.preview || deriveSessionPreview(messages),
+    });
+    return copied ? sessionRecordToMeta(copied) : null;
   }
 
   function removeSessionRecord(id) {
@@ -3887,7 +3993,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return { ok: true, running: !!session.currentRunId && !session.cancelled, runId: session.currentRunId };
   }
 
-  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, removeSessionRecord };
+  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord };
 }
 
 module.exports = { createIdeService };

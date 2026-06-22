@@ -7,7 +7,7 @@ if exist "%~dp0runtime\node\node.exe" set "NODE_EXE=%~dp0runtime\node\node.exe"
 
 echo.
 echo  +================================================+
-echo  ^|         1Shell v4.2.4                          ^|
+echo  ^|         1Shell v4.3.0                          ^|
 echo  ^|     One Shell to rule them all.                ^|
 echo  +================================================+
 echo.

@@ -48,18 +48,30 @@ function createAgentProviders({ cliSandbox } = {}) {
       let activeProviderName = '';
       let upstreamProtocol = '';
       let model = '';
+      let activeProviderId = '';
+      let activeModelId = null;
+      let models = [];
       if (cliSandbox) {
-        const status = cliSandbox.getSandboxStatus(p.id);
-        configured = status.sandboxed;
+        const summary = cliSandbox.getProviderSummary?.(p.id) || {};
+        configured = Boolean(summary.providerReady);
+        activeProviderId = summary.activeProvider?.id || '';
+        activeProviderName = summary.activeProvider?.name || '';
+        upstreamProtocol = summary.activeProvider?.upstreamProtocol || '';
+        model = summary.activeProvider?.model || '';
+        activeModelId = summary.activeProvider?.activeModelId || summary.activeProvider?.activeRoute?.modelId || null;
+        models = Array.isArray(summary.activeProvider?.models) ? summary.activeProvider.models : [];
       }
       return {
         id: p.id,
         label: p.label,
         isDefault: p.id === AGENT_DEFAULT_PROVIDER,
         configured,
+        activeProviderId,
         activeProviderName,
+        activeModelId,
         upstreamProtocol,
         model,
+        models,
       };
     });
   }

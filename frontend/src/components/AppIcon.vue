@@ -108,6 +108,12 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M5.5 5.5a9 9 0 0 0 0 13M18.5 5.5a9 9 0 0 1 0 13" />
     </template>
 
+    <!-- 复制 -->
+    <template v-else-if="name === 'copy'">
+      <rect x="8" y="8" width="11" height="11" rx="2" />
+      <rect x="5" y="5" width="11" height="11" rx="2" />
+    </template>
+
     <!-- 审计：清单 -->
     <template v-else-if="name === 'clipboard'">
       <rect x="5" y="4" width="14" height="17" rx="2" />
@@ -133,6 +139,32 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <circle cx="17.5" cy="6.5" r="3" fill="currentColor" stroke="none" opacity="0.18" />
       <circle cx="17.5" cy="6.5" r="3" />
       <path d="M17.5 5v1.5l1 .8" />
+    </template>
+
+    <!-- 消息 -->
+    <template v-else-if="name === 'message-circle'">
+      <path d="M21 11.5a8.5 8.5 0 0 1-12.8 7.4L3 20l1.3-4.7A8.5 8.5 0 1 1 21 11.5z" />
+      <path d="M8 11h8M8 14h5" />
+    </template>
+
+    <!-- 侧栏 -->
+    <template v-else-if="name === 'panel-left'">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+      <path d="M6 8h.01M6 12h.01M6 16h.01" />
+    </template>
+
+    <!-- 工具箱 -->
+    <template v-else-if="name === 'toolbox'">
+      <path d="M9 6V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1" />
+      <rect x="4" y="6" width="16" height="13" rx="2" />
+      <path d="M4 11h16M10 11v2h4v-2" />
+    </template>
+
+    <!-- 时钟 -->
+    <template v-else-if="name === 'clock'">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
     </template>
 
     <!-- 统计：柱图 -->
@@ -273,6 +305,21 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
     <template v-else-if="name === 'file'">
       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z" />
       <path d="M14 3v5h5" />
+    </template>
+
+    <!-- 新建文件 -->
+    <template v-else-if="name === 'file-plus'">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z" />
+      <path d="M14 3v5h5" />
+      <path d="M12 12v5M9.5 14.5h5" />
+    </template>
+
+    <!-- 删除 -->
+    <template v-else-if="name === 'trash'">
+      <path d="M4 7h16" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M6 7l1 14h10l1-14" />
+      <path d="M9 7V4h6v3" />
     </template>
 
     <!-- 上箭头 -->

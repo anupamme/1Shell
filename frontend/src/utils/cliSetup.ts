@@ -58,6 +58,21 @@ export interface CliReadiness {
 
 export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high';
 
+export interface ProviderModelInfo {
+  id: string;
+  apiModel: string;
+  displayName?: string;
+  enabled?: boolean;
+  reasoningEffort?: ReasoningEffort;
+  contextTokenLimit?: number | null;
+  maxOutputTokens?: number | null;
+}
+
+export interface ProviderRouteInfo {
+  providerId?: string | null;
+  modelId?: string | null;
+}
+
 export interface ProviderInfo {
   id: string;
   name?: string;
@@ -67,6 +82,13 @@ export interface ProviderInfo {
   apiKeySet: boolean;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  contextTokenLimit?: number | null;
+  maxOutputTokens?: number | null;
+  activeModelId?: string | null;
+  routeModelId?: string | null;
+  activeRoute?: ProviderRouteInfo | null;
+  scope?: 'global' | 'local';
+  models?: ProviderModelInfo[];
   presetId?: string;
   enabled?: boolean;
 }
@@ -145,6 +167,7 @@ export interface ProvidersResponse {
   ok: boolean;
   providers: ProviderInfo[];
   activeProviderId?: string;
+  activeRoute?: ProviderRouteInfo | null;
 }
 
 export interface LaunchCommandResponse {

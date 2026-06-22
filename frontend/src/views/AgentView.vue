@@ -25,6 +25,16 @@ import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlash
 import type { HostInfo, HostsListResponse } from '@/utils/scripts';
 
 // ── provider model ──
+interface AgentProviderModel {
+  id: string;
+  apiModel: string;
+  displayName?: string;
+  enabled?: boolean;
+  reasoningEffort?: string;
+  contextTokenLimit?: number | null;
+  maxOutputTokens?: number | null;
+}
+
 interface AgentProvider {
   id: string;
   name: string;
@@ -32,7 +42,29 @@ interface AgentProvider {
   apiKeySet: boolean;
   model: string;
   upstreamProtocol: string;
+  reasoningEffort?: string;
+  contextTokenLimit?: number | null;
+  maxOutputTokens?: number | null;
+  activeModelId?: string | null;
+  routeModelId?: string | null;
+  models?: AgentProviderModel[];
   enabled?: boolean;
+}
+
+interface AgentProviderRoute {
+  providerId?: string | null;
+  modelId?: string | null;
+}
+
+interface AgentModelOption {
+  key: string;
+  providerId: string;
+  modelId: string | null;
+  providerName: string;
+  label: string;
+  apiModel: string;
+  contextTokenLimit?: number | null;
+  maxOutputTokens?: number | null;
 }
 
 // ── type guards unused in template — discriminator checked directly for TS narrowing ──
@@ -96,8 +128,10 @@ const scrollEl = ref<HTMLElement | null>(null);
 const hosts = ref<HostInfo[]>([]);
 const providers = ref<AgentProvider[]>([]);
 const activeProviderId = ref<string | null>(null);
+const activeModelId = ref<string | null>(null);
 const agentGoal = ref(emptyAgentGoalState());
 const selectedHostId = ref('');
+const selectedWorkspaceHostIds = ref<string[]>([]);
 const modelPreference = ref('默认模型');
 const approvalMode = ref<IdeApprovalMode>('manual');
 const composerInput = ref('');
@@ -106,6 +140,8 @@ const composerInputEl = ref<HTMLTextAreaElement | null>(null);
 const showHostDropdown = ref(false);
 const showModeDropdown = ref(false);
 const showModelDropdown = ref(false);
+const newSessionModalOpen = ref(false);
+const newSessionHostDraft = ref<string[]>([]);
 const expandingToolId = ref<string | null>(null);
 const initialMobileRailLayout = typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches;
 const railCollapsed = ref(initialMobileRailLayout);
@@ -174,6 +210,7 @@ const taskGoalEl = ref<HTMLTextAreaElement | null>(null);
 interface AgentRuntime {
   ide: IdeChatApi;
   hostId: Ref<string>;
+  workspaceHostIds: Ref<string[]>;
   taskMode: Ref<boolean>;
   createdAt: string;
   touchedAt: Ref<string>;
@@ -182,6 +219,7 @@ interface AgentRuntime {
 
 interface CreateAgentRuntimeOptions {
   hostId?: string;
+  workspaceHostIds?: string[];
   taskMode?: boolean;
   session?: IdeLoadableAgentSession;
 }
@@ -231,6 +269,58 @@ const taskMode = computed({
 });
 
 const enabledProviders = computed(() => providers.value.filter(p => p.enabled !== false));
+function modelKey(providerId: string | null | undefined, modelId: string | null | undefined): string {
+  return providerId ? `${providerId}::${modelId || ''}` : '';
+}
+
+function providerModelProfiles(provider: AgentProvider): AgentProviderModel[] {
+  const models = (provider.models || []).filter((model) => model.enabled !== false);
+  if (models.length > 0) return models;
+  return [{
+    id: provider.routeModelId || provider.activeModelId || 'default',
+    apiModel: provider.model || '',
+    displayName: provider.model || '',
+    enabled: true,
+    reasoningEffort: provider.reasoningEffort,
+    contextTokenLimit: provider.contextTokenLimit,
+    maxOutputTokens: provider.maxOutputTokens,
+  }];
+}
+
+const enabledModelOptions = computed<AgentModelOption[]>(() => enabledProviders.value.flatMap((provider) => (
+  providerModelProfiles(provider).map((model) => ({
+    key: modelKey(provider.id, model.id),
+    providerId: provider.id,
+    modelId: model.id || null,
+    providerName: provider.name || '未命名渠道',
+    label: model.displayName || model.apiModel || provider.model || '未指定模型',
+    apiModel: model.apiModel || provider.model || '',
+    contextTokenLimit: model.contextTokenLimit ?? provider.contextTokenLimit ?? null,
+    maxOutputTokens: model.maxOutputTokens ?? provider.maxOutputTokens ?? null,
+  }))
+)));
+const activeModelKey = computed(() => modelKey(activeProviderId.value, activeModelId.value));
+
+function findModelOption(providerId: string | null, modelId: string | null = null): AgentModelOption | null {
+  if (!providerId) return null;
+  return enabledModelOptions.value.find((option) => option.providerId === providerId && option.modelId === modelId)
+    || enabledModelOptions.value.find((option) => option.providerId === providerId)
+    || null;
+}
+
+function fmtTokenLimit(value?: number | null): string {
+  if (!value) return '';
+  return value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
+}
+
+function modelOptionMeta(option: AgentModelOption): string {
+  const parts = [option.providerName];
+  if (option.apiModel && option.apiModel !== option.label) parts.push(option.apiModel);
+  if (option.contextTokenLimit) parts.push(`ctx ${fmtTokenLimit(option.contextTokenLimit)}`);
+  if (option.maxOutputTokens) parts.push(`out ${fmtTokenLimit(option.maxOutputTokens)}`);
+  return parts.join(' · ');
+}
+
 const isGoalComposerMode = computed(() => composerMode.value === 'goal');
 const composerPlaceholder = computed(() => {
   return isGoalComposerMode.value
@@ -244,7 +334,7 @@ const slashCmds = computed<AgentSlashCommand[]>(() => {
   return filterAgentSlashCommands(composerInput.value, SLASH_COMMANDS);
 });
 
-const showSlashMenu = computed(() => !rewindModalOpen.value && !showModelDropdown.value && !showModeDropdown.value && (slashCmds.value.length > 0 || slashSubView.value !== null));
+const showSlashMenu = computed(() => !newSessionModalOpen.value && !rewindModalOpen.value && !showModelDropdown.value && !showModeDropdown.value && (slashCmds.value.length > 0 || slashSubView.value !== null));
 
 function openSlashModel(): void {
   void loadProviders();
@@ -317,15 +407,26 @@ function selectSlashCmd(cmd: AgentSlashCommand): void {
   composerInput.value = cmd.cmd + ' ';
 }
 
-async function selectModelFromSlash(providerId: string | null, clearComposer = true): Promise<void> {
-  const newModel = providerId
-    ? providers.value.find(p => p.id === providerId)?.model || '默认模型'
-    : '默认模型';
+async function selectModelFromSlash(providerId: string | null, modelId: string | null = null, clearComposer = true): Promise<void> {
+  const option = findModelOption(providerId, modelId);
+  const newModel = option?.label || '默认模型';
   modelPreference.value = newModel;
-  if (providerId && providerId !== activeProviderId.value) {
+  if (providerId && (providerId !== activeProviderId.value || (option?.modelId || null) !== activeModelId.value)) {
     try {
-      await requestJson(`/api/agent/providers/skills/${providerId}/activate`, { method: 'PUT' } as any);
+      await requestJson(`/api/agent/providers/skills/${providerId}/activate`, {
+        method: 'PUT',
+        body: JSON.stringify(option?.modelId ? { modelId: option.modelId } : {}),
+      } as any);
       activeProviderId.value = providerId;
+      activeModelId.value = option?.modelId || null;
+      const provider = providers.value.find(p => p.id === providerId);
+      if (provider && option) {
+        provider.routeModelId = option.modelId;
+        provider.activeModelId = option.modelId;
+        provider.model = option.apiModel;
+        provider.contextTokenLimit = option.contextTokenLimit ?? null;
+        provider.maxOutputTokens = option.maxOutputTokens ?? null;
+      }
       notify.info(`模型已切换为 ${newModel}`);
     } catch { /* ignore */ }
   }
@@ -342,8 +443,8 @@ function toggleModelDropdown(): void {
   slashSubView.value = null;
 }
 
-async function selectComposerModel(providerId: string | null): Promise<void> {
-  await selectModelFromSlash(providerId, false);
+async function selectComposerModel(providerId: string | null, modelId: string | null = null): Promise<void> {
+  await selectModelFromSlash(providerId, modelId, false);
   showModelDropdown.value = false;
 }
 
@@ -352,8 +453,67 @@ function hostForId(id: string): HostInfo | null {
   return hosts.value.find((host) => host.id === id) || null;
 }
 
+function normalizeWorkspaceHostIds(ids: unknown): string[] {
+  if (!Array.isArray(ids)) return [];
+  return Array.from(new Set(ids
+    .map((id) => String(id || '').trim())
+    .filter((id) => id && id !== 'all' && id !== '*')));
+}
+
+function workspaceHostIdsFromInput(value?: string | string[]): string[] {
+  return Array.isArray(value) ? normalizeWorkspaceHostIds(value) : normalizeWorkspaceHostIds(value ? [value] : []);
+}
+
+function workspacePrimaryHostId(ids: string[]): string {
+  return ids.length === 1 ? ids[0] : '';
+}
+
+function workspaceEquals(a: string[], b: string[]): boolean {
+  const left = normalizeWorkspaceHostIds(a).slice().sort();
+  const right = normalizeWorkspaceHostIds(b).slice().sort();
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+function workspaceHosts(ids: string[]): HostInfo[] {
+  const allowed = new Set(normalizeWorkspaceHostIds(ids));
+  return hosts.value.filter((host) => allowed.has(host.id));
+}
+
+function workspaceLabel(ids: string[]): string {
+  const normalized = normalizeWorkspaceHostIds(ids);
+  if (!normalized.length) return '全局';
+  const names = normalized.map((id) => hostForId(id)?.name || (id === LOCAL_HOST_ID ? '本机' : id));
+  if (names.length <= 2) return names.join('、');
+  return `${names.slice(0, 2).join('、')} +${names.length - 2}`;
+}
+
+function workspaceContextHosts(ids: string[]): Array<{ id: string; name?: string; host?: string }> | undefined {
+  const items = workspaceHosts(ids).map((host) => ({ id: host.id, name: host.name, host: host.host }));
+  return items.length ? items : undefined;
+}
+
+function toolPolicyForWorkspace(hostIds: string[]): Record<string, unknown> {
+  const ids = normalizeWorkspaceHostIds(hostIds);
+  if (!ids.length) {
+    return {
+      source: 'agent_workspace',
+      gatewayMode: 'execute',
+      allowedHosts: ['*'],
+    };
+  }
+  return {
+    source: 'agent_workspace',
+    gatewayMode: 'execute',
+    allowedHosts: ids,
+  };
+}
+
 function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRuntime {
-  const runtimeHostId = ref(options.hostId || '');
+  const initialWorkspaceHostIds = normalizeWorkspaceHostIds(
+    options.workspaceHostIds !== undefined ? options.workspaceHostIds : (options.hostId ? [options.hostId] : []),
+  );
+  const runtimeWorkspaceHostIds = ref<string[]>(initialWorkspaceHostIds);
+  const runtimeHostId = ref(workspacePrimaryHostId(initialWorkspaceHostIds));
   const runtimeTaskMode = ref(Boolean(options.taskMode));
   const touchedAt = ref(new Date().toISOString());
 
@@ -361,17 +521,18 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
     sessionPrefix: 'agent',
     approvalMode: () => approvalMode.value,
     context: () => {
-      const hostId = runtimeHostId.value;
-      const host = hostForId(hostId);
+      const workspaceIds = normalizeWorkspaceHostIds(runtimeWorkspaceHostIds.value);
       return {
         surface: 'agent',
         module: 'Agent',
         moduleHint: '当前在 1Shell Agent 专用前端。',
         agentGoal: agentGoalObjective(agentGoal.value) || undefined,
         threadGoal: serializeAgentGoal(agentGoal.value),
-        hostScope: hostId || 'all',
+        hostScope: workspaceIds.length ? workspaceIds.join(',') : 'all',
+        workspaceHostIds: workspaceIds,
+        toolPolicy: toolPolicyForWorkspace(workspaceIds),
         modelPreference: modelPreference.value !== '默认模型' ? modelPreference.value : undefined,
-        hosts: host ? [{ id: host.id, name: host.name, host: host.host }] : undefined,
+        hosts: workspaceContextHosts(workspaceIds),
       };
     },
     messagePayload: () => ({
@@ -381,6 +542,7 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
       goalStatus: serializeAgentGoal(agentGoal.value)?.status,
       threadGoal: serializeAgentGoal(agentGoal.value),
       hostId: runtimeHostId.value || undefined,
+      workspaceHostIds: normalizeWorkspaceHostIds(runtimeWorkspaceHostIds.value),
       modelPreference: modelPreference.value !== '默认模型' ? modelPreference.value : undefined,
       attachments: attachmentPayload(),
     }),
@@ -394,6 +556,7 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
   const runtime: AgentRuntime = {
     ide: ideApi,
     hostId: runtimeHostId,
+    workspaceHostIds: runtimeWorkspaceHostIds,
     taskMode: runtimeTaskMode,
     createdAt: touchedAt.value,
     touchedAt,
@@ -419,6 +582,7 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
 function activateRuntime(runtime: AgentRuntime): void {
   activeRuntimeId.value = runtime.ide.currentSessionId.value;
   selectedHostId.value = runtime.hostId.value || '';
+  selectedWorkspaceHostIds.value = normalizeWorkspaceHostIds(runtime.workspaceHostIds.value);
   fileFocus.value = null;
   lastToolFocusKey = '';
   follow = true;
@@ -452,6 +616,7 @@ interface SessionMeta {
   title: string;
   entry: string;
   hostId: string;
+  workspaceHostIds?: string[];
   modelLabel: string;
   messageCount: number;
   preview: string;
@@ -476,6 +641,7 @@ const railSessions = computed<SessionMeta[]>(() => {
       title: existing?.title || liveSessionTitle(runtime),
       entry: runtime.taskMode.value ? 'task' : (existing?.entry || 'core'),
       hostId: runtime.hostId.value || existing?.hostId || '',
+      workspaceHostIds: normalizeWorkspaceHostIds(runtime.workspaceHostIds.value),
       modelLabel: existing?.modelLabel || modelText.value,
       messageCount: timeline.length || existing?.messageCount || 0,
       preview: liveSessionPreview(runtime) || existing?.preview || '',
@@ -545,7 +711,7 @@ async function onSelectSession(id: string): Promise<boolean> {
     return true;
   }
   try {
-    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${id}`);
+    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; workspaceHostIds?: string[]; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${id}`);
     if (!resp.ok || !resp.session) return false;
     fileFocus.value = null;
     lastToolFocusKey = '';
@@ -553,6 +719,7 @@ async function onSelectSession(id: string): Promise<boolean> {
     attachmentError.value = '';
     const runtime = createAgentRuntime({
       hostId: resp.session.hostId || '',
+      workspaceHostIds: normalizeWorkspaceHostIds(resp.session.workspaceHostIds || (resp.session.hostId ? [resp.session.hostId] : [])),
       taskMode: resp.session.entry === 'task',
       session: {
         id: resp.session.id,
@@ -568,15 +735,18 @@ async function onSelectSession(id: string): Promise<boolean> {
   } catch { return false; }
 }
 
-function onNewSession(hostId = selectedHostId.value): void {
+function onNewSession(workspaceInput: string | string[] = selectedWorkspaceHostIds.value): void {
   const runtime = activeRuntime.value;
-  const normalizedHostId = hostId || '';
+  const workspaceIds = workspaceHostIdsFromInput(workspaceInput);
+  const normalizedHostId = workspacePrimaryHostId(workspaceIds);
   if (runtime && !runtime.ide.isRunning.value && runtime.ide.timeline.value.length === 0) {
     runtime.hostId.value = normalizedHostId;
+    runtime.workspaceHostIds.value = workspaceIds;
     runtime.taskMode.value = false;
     selectedHostId.value = normalizedHostId;
+    selectedWorkspaceHostIds.value = workspaceIds;
   } else {
-    createAgentRuntime({ hostId: normalizedHostId });
+    createAgentRuntime({ hostId: normalizedHostId, workspaceHostIds: workspaceIds });
   }
   fileFocus.value = null;
   lastToolFocusKey = '';
@@ -590,6 +760,27 @@ async function onRenameSession(id: string, title: string): Promise<void> {
   try {
     await requestJson(`/api/agent/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) });
   } catch { void loadSessions(); }
+}
+
+async function onCopySession(id: string): Promise<void> {
+  const runtime = findRuntimeBySessionId(id);
+  if (runtime?.ide.isRunning.value) {
+    notify.info('这条 Agent 对话仍在运行，请结束后再复制。');
+    return;
+  }
+  try {
+    const resp = await requestJson<{ ok: boolean; session: SessionMeta }>(`/api/agent/sessions/${encodeURIComponent(id)}/copy`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    if (!resp.ok || !resp.session?.id) throw new Error('复制失败');
+    sessions.value = [resp.session, ...sessions.value.filter((s) => s.id !== resp.session.id)];
+    notify.success('对话已复制');
+    await onSelectSession(resp.session.id);
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : String(err), 5000);
+    void loadSessions();
+  }
 }
 
 async function onDeleteSession(id: string): Promise<void> {
@@ -611,7 +802,7 @@ async function onDeleteSession(id: string): Promise<void> {
     runtimes.value = runtimes.value.filter((item) => item !== runtime);
   }
   if (wasActive) {
-    if (!runtimes.value.length) createAgentRuntime({ hostId: selectedHostId.value });
+    if (!runtimes.value.length) createAgentRuntime({ workspaceHostIds: selectedWorkspaceHostIds.value });
     else activateRuntime(runtimes.value[0]);
   }
   fileFocus.value = null;
@@ -620,19 +811,15 @@ async function onDeleteSession(id: string): Promise<void> {
   attachmentError.value = '';
 }
 
-const selectedHost = computed(() => hosts.value.find(h => h.id === selectedHostId.value) || null);
 const goalText = computed(() => formatAgentGoalLabel(agentGoal.value));
-const hostText = computed(() => {
-  if (selectedHostId.value === LOCAL_HOST_ID) return '本机';
-  return selectedHost.value?.name || selectedHostId.value || '所有主机';
-});
+const hostText = computed(() => workspaceLabel(selectedWorkspaceHostIds.value));
 const modelText = computed(() => {
-  const active = providers.value.find(p => p.id === activeProviderId.value);
-  return active?.model || modelPreference.value;
+  const active = findModelOption(activeProviderId.value, activeModelId.value);
+  return active?.label || modelPreference.value;
 });
 const modelChannel = computed(() => {
-  const active = providers.value.find(p => p.id === activeProviderId.value);
-  return active?.name || '';
+  const active = findModelOption(activeProviderId.value, activeModelId.value);
+  return active?.providerName || '';
 });
 const modeBadge = computed(() => {
   switch (approvalMode.value) {
@@ -681,9 +868,35 @@ async function onRailSelectSession(id: string): Promise<void> {
   if (ok) closeRailOnMobile();
 }
 
-function onRailNewSession(hostId = selectedHostId.value): void {
-  onNewSession(hostId);
+function openNewSessionModal(): void {
+  newSessionHostDraft.value = [];
+  newSessionModalOpen.value = true;
+  showHostDropdown.value = false;
+  showModeDropdown.value = false;
+  showModelDropdown.value = false;
+}
+
+function closeNewSessionModal(): void {
+  newSessionModalOpen.value = false;
+}
+
+function toggleNewSessionHost(id: string): void {
+  const hostId = String(id || '').trim();
+  if (!hostId) return;
+  const set = new Set(newSessionHostDraft.value);
+  if (set.has(hostId)) set.delete(hostId);
+  else set.add(hostId);
+  newSessionHostDraft.value = Array.from(set);
+}
+
+function confirmNewSession(): void {
+  onNewSession(newSessionHostDraft.value);
+  closeNewSessionModal();
   closeRailOnMobile();
+}
+
+function onRailNewSession(): void {
+  openNewSessionModal();
 }
 
 const FILE_TOOL_ACTIONS: Record<string, string> = {
@@ -875,12 +1088,15 @@ async function loadHosts(): Promise<void> {
 
 async function loadProviders(): Promise<void> {
   try {
-    const resp = await requestJson<{ ok: boolean; providers: AgentProvider[]; activeProviderId: string | null }>('/api/agent/providers/skills');
+    const resp = await requestJson<{ ok: boolean; providers: AgentProvider[]; activeProviderId: string | null; activeRoute?: AgentProviderRoute | null }>('/api/agent/providers/skills');
     if (resp.ok) {
       providers.value = resp.providers || [];
-      activeProviderId.value = resp.activeProviderId;
+      activeProviderId.value = resp.activeRoute?.providerId || resp.activeProviderId;
       const active = providers.value.find(p => p.id === activeProviderId.value);
-      if (active) modelPreference.value = active.model;
+      activeModelId.value = resp.activeRoute?.modelId || active?.routeModelId || active?.activeModelId || null;
+      const option = findModelOption(activeProviderId.value, activeModelId.value);
+      if (option) modelPreference.value = option.label;
+      else if (active) modelPreference.value = active.model;
     }
   } catch { /* ignore */ }
 }
@@ -1137,35 +1353,47 @@ function applyAgentGoalCommand(command: AgentGoalCommand): void {
   ide.pushSystemEvent(result.title, result.text, result.tone);
 }
 function pickHost(id: string): void {
-  const normalizedHostId = id || '';
+  const workspaceIds = workspaceHostIdsFromInput(id);
+  const normalizedHostId = workspacePrimaryHostId(workspaceIds);
   const runtime = activeRuntime.value;
-  if (runtime?.ide.isRunning.value && runtime.hostId.value !== normalizedHostId) {
+  if (runtime?.ide.isRunning.value && !workspaceEquals(runtime.workspaceHostIds.value, workspaceIds)) {
     selectedHostId.value = normalizedHostId;
+    selectedWorkspaceHostIds.value = workspaceIds;
     railTab.value = 'chat';
-    onNewSession(normalizedHostId);
+    onNewSession(workspaceIds);
     showHostDropdown.value = false;
     notify.info('已按主机打开新的 Agent 对话，原对话继续运行。');
     return;
   }
   selectedHostId.value = normalizedHostId;
-  if (runtime) runtime.hostId.value = normalizedHostId;
+  selectedWorkspaceHostIds.value = workspaceIds;
+  if (runtime) {
+    runtime.hostId.value = normalizedHostId;
+    runtime.workspaceHostIds.value = workspaceIds;
+  }
   fileFocus.value = null;
   lastToolFocusKey = '';
   showHostDropdown.value = false;
   sendSlash(`/host ${id || 'all'}`);
 }
 function onRailSelectHost(id: string): void {
-  const normalizedHostId = id || '';
+  const workspaceIds = workspaceHostIdsFromInput(id);
+  const normalizedHostId = workspacePrimaryHostId(workspaceIds);
   const runtime = activeRuntime.value;
-  if (runtime?.ide.isRunning.value && runtime.hostId.value !== normalizedHostId) {
+  if (runtime?.ide.isRunning.value && !workspaceEquals(runtime.workspaceHostIds.value, workspaceIds)) {
     selectedHostId.value = normalizedHostId;
+    selectedWorkspaceHostIds.value = workspaceIds;
     railTab.value = 'chat';
-    onNewSession(normalizedHostId);
+    onNewSession(workspaceIds);
     notify.info('已按主机打开新的 Agent 对话，原对话继续运行。');
     return;
   }
   selectedHostId.value = normalizedHostId;
-  if (runtime) runtime.hostId.value = normalizedHostId;
+  selectedWorkspaceHostIds.value = workspaceIds;
+  if (runtime) {
+    runtime.hostId.value = normalizedHostId;
+    runtime.workspaceHostIds.value = workspaceIds;
+  }
   fileFocus.value = null;
   lastToolFocusKey = '';
   showHostDropdown.value = false;
@@ -1297,10 +1525,10 @@ function onKeydown(e: KeyboardEvent): void {
   }
   if (showSlashMenu.value) {
     if (slashSubView.value === 'model') {
-      if (e.key === 'ArrowDown') { e.preventDefault(); slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, enabledProviders.value.length); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, enabledModelOptions.value.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); slashSubHighlight.value = Math.max(slashSubHighlight.value - 1, 0); return; }
       if (e.key === 'Enter') { e.preventDefault(); const idx = slashSubHighlight.value;
-        if (idx === 0) { selectModelFromSlash(null); } else { const p = enabledProviders.value[idx - 1]; if (p) selectModelFromSlash(p.id); }
+        if (idx === 0) { selectModelFromSlash(null); } else { const option = enabledModelOptions.value[idx - 1]; if (option) selectModelFromSlash(option.providerId, option.modelId); }
         return; }
       if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); slashSubView.value = null; slashHighlight.value = 0; return; }
       return;
@@ -1327,7 +1555,7 @@ function approveAction(action: 'allow' | 'deny'): void {
 
 <template>
   <div
-    class="agent-view-shell flex h-full bg-white dark:bg-[#0b0f19] text-slate-800 dark:text-slate-200 transition-colors"
+    class="agent-view-shell flex h-full bg-[#f7f8fb] dark:bg-[#090d15] text-slate-800 dark:text-slate-200 transition-colors"
     :class="{ 'agent-view-shell--mobile-rail': mobileRailLayout, 'agent-view-shell--rail-open': !railCollapsed }"
   >
     <button
@@ -1350,12 +1578,13 @@ function approveAction(action: 'allow' | 'deny'): void {
       @select="onRailSelectSession"
       @new-session="onRailNewSession"
       @rename="onRenameSession"
+      @copy="onCopySession"
       @delete="onDeleteSession"
       @select-host="onRailSelectHost"
     />
     <div class="agent-view-main flex flex-col flex-1 min-w-0 h-full">
     <!-- ── status bar ── -->
-    <header class="agent-view-header shrink-0 flex items-center gap-3 px-5 h-11 border-b border-slate-200 dark:border-white/[0.05] bg-stone-50 dark:bg-[#0f1321] select-none">
+    <header class="agent-view-header shrink-0 flex items-center gap-3 px-6 h-12 border-b border-slate-200/80 dark:border-white/[0.06] bg-white/90 dark:bg-[#0d111b]/95 select-none">
       <button
         type="button"
         class="agent-view-rail-toggle"
@@ -1363,9 +1592,9 @@ function approveAction(action: 'allow' | 'deny'): void {
         :aria-pressed="!railCollapsed"
         @click="toggleRail"
       >
-        <AppIcon :name="railCollapsed ? 'library' : 'arrow-right'" :size="14" :class="railCollapsed ? '' : 'rotate-180'" />
+        <AppIcon :name="railCollapsed ? 'panel-left' : 'arrow-right'" :size="14" :class="railCollapsed ? '' : 'rotate-180'" />
       </button>
-      <span class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">Agent</span>
+      <span class="text-[11px] font-semibold tracking-widest text-slate-500 dark:text-slate-400 uppercase">Agent</span>
       <div class="flex items-center gap-2 text-xs">
         <span class="text-slate-400 dark:text-slate-500">目标</span>
         <button class="max-w-[180px] truncate text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer" @click="setGoal" :title="goalText">{{ goalText }}</button>
@@ -1380,8 +1609,8 @@ function approveAction(action: 'allow' | 'deny'): void {
       </div>
       <div class="ml-auto flex items-center gap-2">
         <span v-if="taskMode" class="text-[11px] font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-400/10 border border-amber-200 dark:border-amber-400/20 px-2 py-0.5 rounded-full">任务模式</span>
-        <span v-if="isBusy" class="text-[11px] text-emerald-600 dark:text-emerald-400/70 animate-pulse">运行中</span>
-        <button v-if="hasTimeline" class="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors cursor-pointer" @click="openRewindModal" title="回溯到某次输入">
+        <span v-if="isBusy" class="text-[11px] text-sky-600 dark:text-sky-400/80 animate-pulse">运行中</span>
+        <button v-if="hasTimeline" class="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 transition-colors cursor-pointer" @click="openRewindModal" title="回溯到某次输入">
           <AppIcon name="history" :size="13" />
           回溯
         </button>
@@ -1395,65 +1624,65 @@ function approveAction(action: 'allow' | 'deny'): void {
       <div ref="scrollEl" class="flex-1 overflow-y-auto overflow-x-hidden" @scroll="onScroll">
         <!-- empty state -->
         <div v-if="!hasTimeline" class="flex flex-col items-center justify-center min-h-full py-16 px-6 text-center">
-          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-100 dark:from-emerald-400/20 to-sky-100 dark:to-sky-400/20 border border-emerald-200 dark:border-emerald-400/15 flex items-center justify-center mb-6">
-            <AppIcon name="terminal" :size="32" class="text-emerald-500 dark:text-emerald-400" />
+          <div class="w-14 h-14 rounded-2xl bg-white dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.08] shadow-sm flex items-center justify-center mb-5">
+            <AppIcon name="message-circle" :size="27" class="text-slate-500 dark:text-slate-300" />
           </div>
-          <h2 class="text-xl font-semibold text-slate-800 dark:text-slate-200 mb-2">1Shell Agent</h2>
-          <p class="text-sm text-slate-500 dark:text-slate-500 mb-8 max-w-sm">输入运维目标或命令，Agent 将自主判断、调用工具、验证结果</p>
-          <div class="grid grid-cols-2 gap-3 w-full max-w-md">
-            <button class="flex items-center gap-3 px-4 py-3 text-left bg-stone-50 dark:bg-[#111627] border border-slate-200 dark:border-white/[0.05] rounded-xl hover:border-emerald-300 dark:hover:border-emerald-400/20 hover:bg-stone-100 dark:hover:bg-[#141b2d] transition-all duration-200 cursor-pointer group" @click="setGoal">
-              <span class="w-9 h-9 rounded-lg bg-emerald-50 dark:bg-emerald-400/10 flex items-center justify-center shrink-0 group-hover:bg-emerald-100 dark:group-hover:bg-emerald-400/20 transition-colors"><AppIcon name="target" :size="18" class="text-emerald-500 dark:text-emerald-400" /></span>
+          <h2 class="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-2">1Shell Agent</h2>
+          <p class="text-sm text-slate-500 dark:text-slate-500 mb-8 max-w-sm">输入目标、命令或上下文，Agent 会调用工具并把过程留在这里。</p>
+          <div class="grid grid-cols-2 gap-3 w-full max-w-[520px]">
+            <button class="flex items-center gap-3 px-4 py-3 text-left bg-white dark:bg-[#0f1624] border border-slate-200 dark:border-white/[0.07] rounded-xl hover:border-slate-300 dark:hover:border-white/[0.12] hover:shadow-sm transition-all duration-200 cursor-pointer group" @click="setGoal">
+              <span class="w-9 h-9 rounded-lg bg-slate-100 dark:bg-white/[0.05] flex items-center justify-center shrink-0 group-hover:bg-sky-50 dark:group-hover:bg-sky-500/10 transition-colors"><AppIcon name="target" :size="18" class="text-slate-600 dark:text-slate-300 group-hover:text-sky-600 dark:group-hover:text-sky-300" /></span>
               <span class="text-sm text-slate-600 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-slate-100 transition-colors">设置目标</span>
             </button>
-            <button class="flex items-center gap-3 px-4 py-3 text-left bg-stone-50 dark:bg-[#111627] border border-slate-200 dark:border-white/[0.05] rounded-xl hover:border-sky-300 dark:hover:border-sky-400/20 hover:bg-stone-100 dark:hover:bg-[#141b2d] transition-all duration-200 cursor-pointer group" @click="showHostDropdown = true">
-              <span class="w-9 h-9 rounded-lg bg-sky-50 dark:bg-sky-400/10 flex items-center justify-center shrink-0 group-hover:bg-sky-100 dark:group-hover:bg-sky-400/20 transition-colors"><AppIcon name="server" :size="18" class="text-sky-500 dark:text-sky-400" /></span>
+            <button class="flex items-center gap-3 px-4 py-3 text-left bg-white dark:bg-[#0f1624] border border-slate-200 dark:border-white/[0.07] rounded-xl hover:border-slate-300 dark:hover:border-white/[0.12] hover:shadow-sm transition-all duration-200 cursor-pointer group" @click="showHostDropdown = true">
+              <span class="w-9 h-9 rounded-lg bg-slate-100 dark:bg-white/[0.05] flex items-center justify-center shrink-0 group-hover:bg-sky-50 dark:group-hover:bg-sky-500/10 transition-colors"><AppIcon name="server" :size="18" class="text-slate-600 dark:text-slate-300 group-hover:text-sky-600 dark:group-hover:text-sky-300" /></span>
               <span class="text-sm text-slate-600 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-slate-100 transition-colors">选择主机</span>
             </button>
-            <button class="flex items-center gap-3 px-4 py-3 text-left bg-stone-50 dark:bg-[#111627] border border-slate-200 dark:border-white/[0.05] rounded-xl hover:border-violet-300 dark:hover:border-violet-400/20 hover:bg-stone-100 dark:hover:bg-[#141b2d] transition-all duration-200 cursor-pointer group" @click="toggleModelDropdown">
-              <span class="w-9 h-9 rounded-lg bg-violet-50 dark:bg-violet-400/10 flex items-center justify-center shrink-0 group-hover:bg-violet-100 dark:group-hover:bg-violet-400/20 transition-colors"><AppIcon name="spark" :size="18" class="text-violet-500 dark:text-violet-400" /></span>
+            <button class="flex items-center gap-3 px-4 py-3 text-left bg-white dark:bg-[#0f1624] border border-slate-200 dark:border-white/[0.07] rounded-xl hover:border-slate-300 dark:hover:border-white/[0.12] hover:shadow-sm transition-all duration-200 cursor-pointer group" @click="toggleModelDropdown">
+              <span class="w-9 h-9 rounded-lg bg-slate-100 dark:bg-white/[0.05] flex items-center justify-center shrink-0 group-hover:bg-sky-50 dark:group-hover:bg-sky-500/10 transition-colors"><AppIcon name="spark" :size="18" class="text-slate-600 dark:text-slate-300 group-hover:text-sky-600 dark:group-hover:text-sky-300" /></span>
               <span class="text-sm text-slate-600 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-slate-100 transition-colors">模型偏好</span>
             </button>
-            <button class="flex items-center gap-3 px-4 py-3 text-left bg-stone-50 dark:bg-[#111627] border border-slate-200 dark:border-white/[0.05] rounded-xl hover:border-amber-300 dark:hover:border-amber-400/20 hover:bg-stone-100 dark:hover:bg-[#141b2d] transition-all duration-200 cursor-pointer group" @click="showModeDropdown = true; showModelDropdown = false">
-              <span class="w-9 h-9 rounded-lg bg-amber-50 dark:bg-amber-400/10 flex items-center justify-center shrink-0 group-hover:bg-amber-100 dark:group-hover:bg-amber-400/20 transition-colors"><AppIcon name="shield" :size="18" class="text-amber-500 dark:text-amber-400" /></span>
+            <button class="flex items-center gap-3 px-4 py-3 text-left bg-white dark:bg-[#0f1624] border border-slate-200 dark:border-white/[0.07] rounded-xl hover:border-slate-300 dark:hover:border-white/[0.12] hover:shadow-sm transition-all duration-200 cursor-pointer group" @click="showModeDropdown = true; showModelDropdown = false">
+              <span class="w-9 h-9 rounded-lg bg-slate-100 dark:bg-white/[0.05] flex items-center justify-center shrink-0 group-hover:bg-sky-50 dark:group-hover:bg-sky-500/10 transition-colors"><AppIcon name="shield" :size="18" class="text-slate-600 dark:text-slate-300 group-hover:text-sky-600 dark:group-hover:text-sky-300" /></span>
               <span class="text-sm text-slate-600 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-slate-100 transition-colors">审批模式</span>
             </button>
           </div>
         </div>
 
         <!-- timeline items -->
-        <div v-else class="max-w-[860px] mx-auto px-5 py-6 space-y-5">
+        <div v-else class="max-w-[1020px] mx-auto px-6 py-7 space-y-5">
           <template v-for="(item, index) in ide.timeline.value" :key="item.id">
             <!-- user -->
             <div v-if="item.kind === 'user'" class="flex justify-end">
-              <div class="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-sky-50 dark:bg-[#1a2340] border border-sky-200 dark:border-white/[0.06] text-sm leading-relaxed text-slate-700 dark:text-slate-200">{{ (item as IdeChatMessage).text }}</div>
+              <div class="max-w-[76%] px-4 py-2.5 rounded-2xl rounded-br-md bg-slate-900 dark:bg-slate-100 border border-slate-900 dark:border-slate-100 text-sm leading-relaxed text-white dark:text-slate-900 shadow-sm">{{ (item as IdeChatMessage).text }}</div>
             </div>
 
             <!-- thinking -->
             <div v-else-if="item.kind === 'thinking'" class="flex items-start gap-3 px-1">
-              <span class="w-6 h-6 mt-0.5 rounded-md bg-violet-50 dark:bg-violet-400/10 border border-violet-200 dark:border-violet-400/15 flex items-center justify-center shrink-0"><AppIcon name="spark" :size="12" class="text-violet-500 dark:text-violet-400/80" /></span>
+              <span class="w-6 h-6 mt-0.5 rounded-full bg-white dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.07] flex items-center justify-center shrink-0"><AppIcon name="spark" :size="12" class="text-slate-400 dark:text-slate-500" /></span>
               <p class="text-[13px] text-slate-400 dark:text-slate-500 italic leading-relaxed">{{ (item as IdeThinkingTimelineItem).text }}</p>
             </div>
 
             <!-- system -->
-            <div v-else-if="item.kind === 'system'" class="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-stone-50 dark:bg-[#111627] border border-slate-200 dark:border-white/[0.04] text-xs">
-              <span class="shrink-0 w-5 h-5 rounded flex items-center justify-center" :class="(item as IdeSystemTimelineItem).tone === 'success' ? 'bg-emerald-50 dark:bg-emerald-400/10 text-emerald-600 dark:text-emerald-400' : (item as IdeSystemTimelineItem).tone === 'warning' ? 'bg-amber-50 dark:bg-amber-400/10 text-amber-600 dark:text-amber-400' : 'bg-sky-50 dark:bg-sky-400/10 text-sky-600 dark:text-sky-400'"><AppIcon :name="(item as IdeSystemTimelineItem).tone === 'success' ? 'check' : (item as IdeSystemTimelineItem).tone === 'warning' ? 'alert' : 'terminal'" :size="12" /></span>
+            <div v-else-if="item.kind === 'system'" class="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-white/80 dark:bg-white/[0.035] border border-slate-200/80 dark:border-white/[0.06] text-xs">
+              <span class="shrink-0 w-5 h-5 rounded-md flex items-center justify-center" :class="(item as IdeSystemTimelineItem).tone === 'success' ? 'bg-slate-100 dark:bg-white/[0.05] text-slate-600 dark:text-slate-300' : (item as IdeSystemTimelineItem).tone === 'warning' ? 'bg-amber-50 dark:bg-amber-400/10 text-amber-600 dark:text-amber-400' : 'bg-slate-100 dark:bg-white/[0.05] text-slate-500 dark:text-slate-400'"><AppIcon :name="(item as IdeSystemTimelineItem).tone === 'success' ? 'check' : (item as IdeSystemTimelineItem).tone === 'warning' ? 'alert' : 'terminal'" :size="12" /></span>
               <span class="text-slate-500 dark:text-slate-400"><strong class="text-slate-700 dark:text-slate-300">{{ (item as IdeSystemTimelineItem).title }}</strong> · {{ (item as IdeSystemTimelineItem).text }}</span>
             </div>
 
             <!-- tool -->
-            <div v-else-if="item.kind === 'tool'" class="rounded-xl bg-white dark:bg-[#11141f] border cursor-pointer transition-colors"
-              :class="[(item as IdeToolTimelineItem).isError ? 'border-red-200 dark:border-red-500/15 hover:border-red-300 dark:hover:border-red-500/25' : (item as IdeToolTimelineItem).status === 'running' || (item as IdeToolTimelineItem).status === 'preparing' ? 'border-sky-200 dark:border-sky-500/15 hover:border-sky-300 dark:hover:border-sky-500/25' : 'border-slate-200 dark:border-white/[0.05] hover:border-slate-300 dark:hover:border-white/[0.08]', expandingToolId === (item as IdeToolTimelineItem).toolUseId ? 'border-slate-300 dark:border-white/[0.1]' : '']"
+            <div v-else-if="item.kind === 'tool'" class="rounded-xl bg-white/90 dark:bg-[#0f1624] border cursor-pointer transition-all shadow-sm"
+              :class="[(item as IdeToolTimelineItem).isError ? 'border-red-200 dark:border-red-500/20 hover:border-red-300 dark:hover:border-red-500/30' : (item as IdeToolTimelineItem).status === 'running' || (item as IdeToolTimelineItem).status === 'preparing' ? 'border-sky-200/90 dark:border-sky-500/20 hover:border-sky-300 dark:hover:border-sky-500/30' : 'border-slate-200/90 dark:border-white/[0.07] hover:border-slate-300 dark:hover:border-white/[0.12]', expandingToolId === (item as IdeToolTimelineItem).toolUseId ? 'border-slate-300 dark:border-white/[0.14] shadow-md' : '']"
               @click="expandingToolId = expandingToolId === (item as IdeToolTimelineItem).toolUseId ? null : (item as IdeToolTimelineItem).toolUseId">
-              <div class="flex items-center gap-3 px-4 py-3">
-                <span class="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                  :class="[(item as IdeToolTimelineItem).isError ? 'bg-red-50 dark:bg-red-400/10 text-red-500 dark:text-red-400' : (item as IdeToolTimelineItem).status === 'done' ? 'bg-emerald-50 dark:bg-emerald-400/10 text-emerald-500 dark:text-emerald-400' : (item as IdeToolTimelineItem).status === 'running' ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-500 dark:text-sky-400' : 'bg-slate-100 dark:bg-slate-400/10 text-slate-500 dark:text-slate-400']">
-                  <AppIcon :name="toolIcon(item as IdeToolTimelineItem)" :size="16" />
+              <div class="flex items-center gap-3 px-4 py-3.5">
+                <span class="w-8 h-8 rounded-lg border flex items-center justify-center shrink-0"
+                  :class="[(item as IdeToolTimelineItem).isError ? 'bg-red-50 dark:bg-red-400/10 border-red-100 dark:border-red-400/20 text-red-500 dark:text-red-400' : (item as IdeToolTimelineItem).status === 'running' || (item as IdeToolTimelineItem).status === 'preparing' ? 'bg-sky-50 dark:bg-sky-400/10 border-sky-100 dark:border-sky-400/20 text-sky-600 dark:text-sky-300' : 'bg-slate-50 dark:bg-white/[0.04] border-slate-200/80 dark:border-white/[0.07] text-slate-500 dark:text-slate-400']">
+                  <AppIcon :name="toolIcon(item as IdeToolTimelineItem)" :size="15" />
                 </span>
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-2">
                     <span class="text-[13px] font-medium text-slate-700 dark:text-slate-200 truncate">{{ (item as IdeToolTimelineItem).name }}</span>
                     <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded-full border shrink-0"
-                      :class="[(item as IdeToolTimelineItem).isError ? 'text-red-600 dark:text-red-400 border-red-200 dark:border-red-400/15 bg-red-50 dark:bg-red-400/5' : (item as IdeToolTimelineItem).status === 'done' ? 'text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-400/15 bg-emerald-50 dark:bg-emerald-400/5' : (item as IdeToolTimelineItem).status === 'running' ? 'text-sky-600 dark:text-sky-400 border-sky-200 dark:border-sky-400/15 bg-sky-50 dark:bg-sky-400/5' : 'text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-400/15 bg-slate-50 dark:bg-slate-400/5']">
+                      :class="[(item as IdeToolTimelineItem).isError ? 'text-red-600 dark:text-red-400 border-red-200 dark:border-red-400/15 bg-red-50 dark:bg-red-400/5' : (item as IdeToolTimelineItem).status === 'done' ? 'text-slate-600 dark:text-slate-300 border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.04]' : (item as IdeToolTimelineItem).status === 'running' ? 'text-sky-600 dark:text-sky-400 border-sky-200 dark:border-sky-400/15 bg-sky-50 dark:bg-sky-400/5' : 'text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-400/15 bg-slate-50 dark:bg-slate-400/5']">
                       {{ toolLabel(item as IdeToolTimelineItem) }}
                     </span>
                   </div>
@@ -1469,32 +1698,32 @@ function approveAction(action: 'allow' | 'deny'): void {
               <div v-else-if="hasProbeListResult(item as IdeToolTimelineItem)" class="px-4 pb-4" @click.stop>
                 <ProbeListToolResult :result="(item as IdeToolTimelineItem).result" />
               </div>
-              <div v-if="expandingToolId === (item as IdeToolTimelineItem).toolUseId" class="px-4 pb-4 space-y-3 border-t border-slate-100 dark:border-white/[0.04] pt-3">
+              <div v-if="expandingToolId === (item as IdeToolTimelineItem).toolUseId" class="px-4 pb-4 space-y-3 border-t border-slate-100 dark:border-white/[0.05] pt-3">
                 <div v-if="(item as IdeToolTimelineItem).input !== undefined && (item as IdeToolTimelineItem).input !== null" class="space-y-1">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">参数</div>
-                  <pre class="text-xs text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[200px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).input) }}</pre>
+                  <pre class="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-[#090d15] border border-slate-200/70 dark:border-white/[0.05] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[200px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).input) }}</pre>
                 </div>
                 <div v-if="(item as IdeToolTimelineItem).logs.length" class="space-y-1">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">输出</div>
                   <pre v-for="(log, i) in (item as IdeToolTimelineItem).logs" :key="i" class="text-xs rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[260px] overflow-y-auto"
-                    :class="log.stream === 'stderr' ? 'text-red-600 dark:text-red-300/80 bg-red-50 dark:bg-red-950/20' : 'text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19]'">{{ log.text }}</pre>
+                    :class="log.stream === 'stderr' ? 'text-red-600 dark:text-red-300/80 bg-red-50 dark:bg-red-950/20 border border-red-100 dark:border-red-400/10' : 'text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-[#090d15] border border-slate-200/70 dark:border-white/[0.05]'">{{ log.text }}</pre>
                 </div>
                 <div v-if="!hasHostListResult(item as IdeToolTimelineItem) && !hasProbeListResult(item as IdeToolTimelineItem) && (item as IdeToolTimelineItem).result !== undefined && (item as IdeToolTimelineItem).result !== null" class="space-y-1">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">结果</div>
-                  <pre class="text-xs text-slate-600 dark:text-slate-300 bg-stone-50 dark:bg-[#0b0f19] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[240px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).result) }}</pre>
+                  <pre class="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-[#090d15] border border-slate-200/70 dark:border-white/[0.05] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[240px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).result) }}</pre>
                 </div>
               </div>
             </div>
 
             <!-- assistant -->
             <div v-else class="flex items-start gap-3">
-              <span class="w-7 h-7 mt-0.5 rounded-lg bg-emerald-50 dark:bg-emerald-400/10 border border-emerald-200 dark:border-emerald-400/15 flex items-center justify-center shrink-0"><AppIcon name="robot" :size="14" class="text-emerald-500 dark:text-emerald-400" /></span>
+              <span class="w-7 h-7 mt-0.5 rounded-full bg-white dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.08] shadow-sm flex items-center justify-center shrink-0"><AppIcon name="spark" :size="13" class="text-slate-500 dark:text-slate-300" /></span>
               <div class="min-w-0 flex-1">
                 <div v-if="assistantDisplayText(item as IdeChatMessage, index)" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 space-y-3 markdown-body agent-md" v-html="renderMarkdown(assistantDisplayText(item as IdeChatMessage, index), { tables: 'safe' })"></div>
                 <div v-else class="flex items-center gap-1.5 py-1">
-                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse"></span>
-                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse" style="animation-delay: 0.15s"></span>
-                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400/60 animate-pulse" style="animation-delay: 0.3s"></span>
+                  <span class="w-1.5 h-1.5 rounded-full bg-sky-400/60 animate-pulse"></span>
+                  <span class="w-1.5 h-1.5 rounded-full bg-sky-400/60 animate-pulse" style="animation-delay: 0.15s"></span>
+                  <span class="w-1.5 h-1.5 rounded-full bg-sky-400/60 animate-pulse" style="animation-delay: 0.3s"></span>
                 </div>
               </div>
             </div>
@@ -1525,16 +1754,16 @@ function approveAction(action: 'allow' | 'deny'): void {
         </div>
         <div class="shrink-0 flex gap-2 p-4 border-t border-slate-200 dark:border-white/[0.06]">
           <button class="flex-1 py-2 rounded-lg border border-red-200 dark:border-red-500/15 text-sm text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/5 transition-colors cursor-pointer" @click="approveAction('deny')">拒绝</button>
-          <button class="flex-1 py-2 rounded-lg bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/20 text-sm text-emerald-600 dark:text-emerald-400 font-medium hover:bg-emerald-100 dark:hover:bg-emerald-500/20 transition-colors cursor-pointer" @click="approveAction('allow')">允许</button>
+          <button class="flex-1 py-2 rounded-lg bg-slate-900 dark:bg-sky-500 border border-slate-900 dark:border-sky-400 text-sm text-white font-medium hover:bg-slate-800 dark:hover:bg-sky-400 transition-colors cursor-pointer" @click="approveAction('allow')">允许</button>
         </div>
       </div>
 
     </div>
 
     <!-- ── composer ── -->
-    <footer class="shrink-0 border-t border-slate-200 dark:border-white/[0.05] bg-stone-50 dark:bg-[#0f1321] relative">
+    <footer class="shrink-0 border-t border-slate-200/80 dark:border-white/[0.06] bg-white/90 dark:bg-[#0d111b]/95 relative">
       <!-- slash command menu -->
-      <div v-if="showSlashMenu" class="absolute bottom-full left-0 right-0 max-w-[860px] mx-auto px-5 pb-1 z-30">
+      <div v-if="showSlashMenu" class="absolute bottom-full left-0 right-0 max-w-[1020px] mx-auto px-6 pb-1 z-30">
         <div class="bg-white dark:bg-[#161b2a] border border-slate-200 dark:border-white/[0.08] rounded-xl shadow-2xl overflow-hidden">
 
           <!-- ── model sub-view ── -->
@@ -1544,27 +1773,27 @@ function approveAction(action: 'allow' | 'deny'): void {
               返回命令列表
             </button>
             <button class="w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer" :class="slashSubHighlight === 0 ? 'bg-sky-50 dark:bg-sky-500/10' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'" @click="selectModelFromSlash(null)">
-              <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="!activeProviderId ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
+              <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="!activeProviderId ? 'bg-sky-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
               <div class="min-w-0 flex-1">
                 <span class="text-xs font-medium" :class="slashSubHighlight === 0 ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">默认模型</span>
                 <span class="text-[10px] text-slate-400 dark:text-slate-600 ml-2">系统默认</span>
               </div>
             </button>
-            <div v-if="enabledProviders.length" class="h-px bg-slate-100 dark:bg-white/[0.06] mx-3"></div>
+            <div v-if="enabledModelOptions.length" class="h-px bg-slate-100 dark:bg-white/[0.06] mx-3"></div>
             <button
-              v-for="(p, i) in enabledProviders"
-              :key="p.id"
+              v-for="(option, i) in enabledModelOptions"
+              :key="option.key"
               class="w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer"
               :class="(slashSubHighlight - 1) === i ? 'bg-sky-50 dark:bg-sky-500/10' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
-              @click="selectModelFromSlash(p.id)"
+              @click="selectModelFromSlash(option.providerId, option.modelId)"
             >
-              <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="p.id === activeProviderId ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]' : 'bg-slate-300 dark:bg-slate-600'"></span>
+              <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="option.key === activeModelKey ? 'bg-sky-500 shadow-[0_0_6px_rgba(14,165,233,0.35)]' : 'bg-slate-300 dark:bg-slate-600'"></span>
               <div class="min-w-0 flex-1">
-                <span class="text-xs font-medium" :class="(slashSubHighlight - 1) === i ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">{{ p.model || '未指定模型' }}</span>
-                <span class="text-[10px] text-slate-400 dark:text-slate-600 ml-2">{{ p.name }}</span>
+                <span class="text-xs font-medium" :class="(slashSubHighlight - 1) === i ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">{{ option.label || '未指定模型' }}</span>
+                <span class="text-[10px] text-slate-400 dark:text-slate-600 ml-2">{{ modelOptionMeta(option) }}</span>
               </div>
             </button>
-            <div v-if="!enabledProviders.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
+            <div v-if="!enabledModelOptions.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
               暂无启用的渠道 · <RouterLink to="/panel/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
             </div>
           </template>
@@ -1633,7 +1862,7 @@ function approveAction(action: 'allow' | 'deny'): void {
         </div>
       </div>
 
-      <div class="max-w-[860px] mx-auto px-5 py-3">
+      <div class="max-w-[1020px] mx-auto px-6 py-3">
         <input
           ref="attachmentInput"
           type="file"
@@ -1665,21 +1894,21 @@ function approveAction(action: 'allow' | 'deny'): void {
           <span v-if="attachmentError" class="h-7 px-2 rounded-md border border-amber-200 dark:border-amber-400/20 bg-amber-50 dark:bg-amber-400/8 text-[11px] text-amber-700 dark:text-amber-300 flex items-center">{{ attachmentError }}</span>
         </div>
         <div
-          class="rounded-2xl border bg-white dark:bg-[#0b0f19] shadow-sm transition-colors p-2.5"
-          :class="isGoalComposerMode ? 'border-emerald-300 dark:border-emerald-400/35 focus-within:border-emerald-400 dark:focus-within:border-emerald-300/55' : 'border-slate-200 dark:border-white/[0.08] focus-within:border-emerald-300 dark:focus-within:border-emerald-400/30'"
+          class="rounded-xl border bg-white dark:bg-[#090d15] shadow-sm transition-colors p-2.5"
+          :class="isGoalComposerMode ? 'border-sky-300 dark:border-sky-400/35 focus-within:border-sky-400 dark:focus-within:border-sky-300/55' : 'border-slate-200 dark:border-white/[0.08] focus-within:border-sky-300 dark:focus-within:border-sky-400/30'"
         >
           <div
             v-if="isGoalComposerMode"
-            class="mb-1.5 min-h-9 px-2.5 py-1.5 rounded-xl border border-emerald-200 dark:border-emerald-400/20 bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300 flex items-center gap-2 text-xs"
+            class="mb-1.5 min-h-9 px-2.5 py-1.5 rounded-lg border border-sky-200 dark:border-sky-400/20 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300 flex items-center gap-2 text-xs"
           >
-            <span class="w-6 h-6 rounded-lg bg-emerald-100 dark:bg-emerald-400/15 flex items-center justify-center shrink-0">
+            <span class="w-6 h-6 rounded-lg bg-sky-100 dark:bg-sky-400/15 flex items-center justify-center shrink-0">
               <AppIcon name="target" :size="13" />
             </span>
             <strong class="font-semibold shrink-0">目标</strong>
-            <span class="min-w-0 truncate text-emerald-600 dark:text-emerald-300/80">下一条输入会保存为 Agent 工作目标</span>
+            <span class="min-w-0 truncate text-sky-600 dark:text-sky-300/80">下一条输入会保存为 Agent 工作目标</span>
             <button
               type="button"
-              class="ml-auto w-6 h-6 rounded-lg flex items-center justify-center hover:bg-emerald-100 dark:hover:bg-emerald-400/15 transition-colors cursor-pointer"
+              class="ml-auto w-6 h-6 rounded-lg flex items-center justify-center hover:bg-sky-100 dark:hover:bg-sky-400/15 transition-colors cursor-pointer"
               title="退出目标输入"
               @click="closeGoalComposer"
             >
@@ -1689,7 +1918,7 @@ function approveAction(action: 'allow' | 'deny'): void {
           <textarea
             ref="composerInputEl"
             v-model="composerInput"
-            class="w-full min-h-[54px] max-h-[180px] px-2 py-1.5 text-sm leading-6 text-slate-700 dark:text-slate-200 bg-transparent border-0 resize-none focus:outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
+            class="w-full min-h-[56px] max-h-[180px] px-2 py-1.5 text-sm leading-6 text-slate-700 dark:text-slate-200 bg-transparent border-0 resize-none focus:outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
             :placeholder="composerPlaceholder"
             rows="2"
             @keydown="onKeydown"
@@ -1698,7 +1927,7 @@ function approveAction(action: 'allow' | 'deny'): void {
           <div class="mt-1.5 flex items-center gap-2">
             <button
               type="button"
-              class="shrink-0 w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-400/10 flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+              class="shrink-0 w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-400/10 flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
               title="添加图片或文档"
               :disabled="isBusy || isGoalComposerMode"
               @click="attachmentInput?.click()"
@@ -1708,7 +1937,7 @@ function approveAction(action: 'allow' | 'deny'): void {
 
             <button
               type="button"
-              class="shrink-0 w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-400/10 flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+              class="shrink-0 w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-400/10 flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
               title="回溯到某次输入"
               :disabled="isBusy || !hasTimeline"
               @click="openRewindModal"
@@ -1719,7 +1948,7 @@ function approveAction(action: 'allow' | 'deny'): void {
             <button
               type="button"
               class="shrink-0 h-8 px-2.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              :class="isGoalComposerMode ? 'border-emerald-300 dark:border-emerald-400/30 bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+              :class="isGoalComposerMode ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
               :disabled="isBusy"
               :title="goalText"
               @click="setGoal"
@@ -1744,7 +1973,7 @@ function approveAction(action: 'allow' | 'deny'): void {
                   v-for="m in modes"
                   :key="m.key"
                   class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer"
-                  :class="approvalMode === m.key ? 'bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                  :class="approvalMode === m.key ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
                   @click="pickMode(m.key)"
                 >{{ m.label }}</button>
               </div>
@@ -1766,31 +1995,31 @@ function approveAction(action: 'allow' | 'deny'): void {
                 <button
                   type="button"
                   class="w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer"
-                  :class="!activeProviderId ? 'bg-emerald-50 dark:bg-emerald-400/10' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                  :class="!activeProviderId ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
                   @click="selectComposerModel(null)"
                 >
-                  <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="!activeProviderId ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
+                  <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="!activeProviderId ? 'bg-sky-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
                   <div class="min-w-0 flex-1">
-                    <div class="text-xs font-semibold" :class="!activeProviderId ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-200'">默认模型</div>
+                    <div class="text-xs font-semibold" :class="!activeProviderId ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">默认模型</div>
                     <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600">使用当前系统默认渠道</div>
                   </div>
                 </button>
-                <div v-if="enabledProviders.length" class="h-px bg-slate-100 dark:bg-white/[0.06] mx-3"></div>
+                <div v-if="enabledModelOptions.length" class="h-px bg-slate-100 dark:bg-white/[0.06] mx-3"></div>
                 <button
-                  v-for="p in enabledProviders"
-                  :key="p.id"
+                  v-for="option in enabledModelOptions"
+                  :key="option.key"
                   type="button"
                   class="w-full text-left px-3 py-2.5 flex items-center gap-3 transition-colors cursor-pointer"
-                  :class="p.id === activeProviderId ? 'bg-emerald-50 dark:bg-emerald-400/10' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
-                  @click="selectComposerModel(p.id)"
+                  :class="option.key === activeModelKey ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                  @click="selectComposerModel(option.providerId, option.modelId)"
                 >
-                  <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="p.id === activeProviderId ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]' : 'bg-slate-300 dark:bg-slate-600'"></span>
+                  <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="option.key === activeModelKey ? 'bg-sky-500 shadow-[0_0_6px_rgba(14,165,233,0.35)]' : 'bg-slate-300 dark:bg-slate-600'"></span>
                   <div class="min-w-0 flex-1">
-                    <div class="text-xs font-semibold truncate" :class="p.id === activeProviderId ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-200'">{{ p.model || '未指定模型' }}</div>
-                    <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600 truncate">{{ p.name }}</div>
+                    <div class="text-xs font-semibold truncate" :class="option.key === activeModelKey ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">{{ option.label || '未指定模型' }}</div>
+                    <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600 truncate">{{ modelOptionMeta(option) }}</div>
                   </div>
                 </button>
-                <div v-if="!enabledProviders.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
+                <div v-if="!enabledModelOptions.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
                   暂无启用的渠道 · <RouterLink to="/panel/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
                 </div>
               </div>
@@ -1798,7 +2027,7 @@ function approveAction(action: 'allow' | 'deny'): void {
 
             <button
               class="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer"
-              :class="canSubmitComposer ? 'bg-slate-900 dark:bg-emerald-500 text-white hover:bg-slate-800 dark:hover:bg-emerald-400 shadow-lg shadow-slate-900/10 dark:shadow-emerald-500/10' : 'bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-600 cursor-not-allowed'"
+              :class="canSubmitComposer ? 'bg-slate-900 dark:bg-sky-500 text-white hover:bg-slate-800 dark:hover:bg-sky-400 shadow-md shadow-slate-900/10 dark:shadow-sky-500/10' : 'bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-600 cursor-not-allowed'"
               :disabled="!canSubmitComposer"
               @click="send"
             >
@@ -1812,6 +2041,94 @@ function approveAction(action: 'allow' | 'deny'): void {
     <div v-if="showHostDropdown || showModeDropdown || showModelDropdown" class="fixed inset-0 z-20" @click="showHostDropdown = false; showModeDropdown = false; showModelDropdown = false"></div>
 
     <Teleport to="body">
+      <div
+        v-if="newSessionModalOpen"
+        class="fixed inset-0 z-[2200] flex items-center justify-center bg-slate-950/55 backdrop-blur-[2px] p-4"
+        @click.self="closeNewSessionModal"
+      >
+        <section
+          class="w-full max-w-[560px] max-h-[78vh] overflow-hidden rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#101624] shadow-2xl flex flex-col"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="new-session-modal-title"
+        >
+          <header class="shrink-0 flex items-start justify-between gap-4 px-5 py-4 border-b border-slate-200 dark:border-white/[0.06]">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="w-8 h-8 rounded-lg bg-sky-50 dark:bg-sky-400/10 text-sky-600 dark:text-sky-400 flex items-center justify-center">
+                  <AppIcon name="plus" :size="16" />
+                </span>
+                <h2 id="new-session-modal-title" class="text-base font-semibold text-slate-800 dark:text-slate-100">新建对话</h2>
+              </div>
+              <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">不选择 VPS 时建立全局对话。</p>
+            </div>
+            <button
+              type="button"
+              class="shrink-0 w-9 h-9 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.05] flex items-center justify-center transition-colors cursor-pointer"
+              title="关闭"
+              @click="closeNewSessionModal"
+            >
+              <AppIcon name="close" :size="16" />
+            </button>
+          </header>
+
+          <div class="flex-1 min-h-[240px] overflow-y-auto px-5 py-4">
+            <button
+              type="button"
+              class="w-full min-h-12 px-3 rounded-lg border flex items-center gap-3 text-left transition-colors cursor-pointer"
+              :class="newSessionHostDraft.length === 0 ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10' : 'border-slate-200 dark:border-white/[0.08] hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+              @click="newSessionHostDraft = []"
+            >
+              <span class="w-7 h-7 rounded-md flex items-center justify-center shrink-0" :class="newSessionHostDraft.length === 0 ? 'bg-sky-500 text-white' : 'bg-slate-100 dark:bg-white/[0.05] text-slate-400'">
+                <AppIcon name="globe" :size="14" />
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="text-sm font-medium" :class="newSessionHostDraft.length === 0 ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">全局对话</div>
+                <div class="mt-0.5 text-xs text-slate-400 dark:text-slate-500">不绑定具体 VPS</div>
+              </div>
+            </button>
+
+            <div class="mt-4 flex items-center justify-between gap-3">
+              <div class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">VPS</div>
+              <div class="text-xs text-slate-400 dark:text-slate-500">{{ newSessionHostDraft.length ? workspaceLabel(newSessionHostDraft) : '全局' }}</div>
+            </div>
+
+            <div class="mt-2 space-y-1.5">
+              <button
+                v-for="host in hosts"
+                :key="host.id"
+                type="button"
+                class="w-full min-h-11 px-3 rounded-lg border flex items-center gap-3 text-left transition-colors cursor-pointer"
+                :class="newSessionHostDraft.includes(host.id) ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10' : 'border-slate-200 dark:border-white/[0.08] hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                @click="toggleNewSessionHost(host.id)"
+              >
+                <span class="w-5 h-5 rounded border flex items-center justify-center shrink-0" :class="newSessionHostDraft.includes(host.id) ? 'border-sky-500 bg-sky-500 text-white' : 'border-slate-300 dark:border-slate-600 text-transparent'">
+                  <AppIcon name="check" :size="13" />
+                </span>
+                <span class="w-7 h-7 rounded-md bg-sky-50 dark:bg-sky-400/10 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+                  <AppIcon name="server" :size="14" />
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-medium truncate text-slate-700 dark:text-slate-200">{{ host.name || host.id }}</div>
+                  <div class="mt-0.5 text-xs text-slate-400 dark:text-slate-500 truncate">{{ host.host || host.id }}</div>
+                </div>
+              </button>
+              <div v-if="!hosts.length" class="px-3 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
+                暂无 VPS
+              </div>
+            </div>
+          </div>
+
+          <footer class="shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-t border-slate-200 dark:border-white/[0.06] bg-stone-50 dark:bg-[#0b0f19]">
+            <div class="text-xs text-slate-500 dark:text-slate-400">工作区：{{ newSessionHostDraft.length ? workspaceLabel(newSessionHostDraft) : '全局' }}</div>
+            <div class="flex items-center gap-2">
+              <button type="button" class="h-8 px-3 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white dark:hover:bg-white/[0.04] transition-colors cursor-pointer" @click="closeNewSessionModal">取消</button>
+              <button type="button" class="h-8 px-3 rounded-lg text-xs font-medium bg-slate-900 dark:bg-sky-500 text-white hover:bg-slate-800 dark:hover:bg-sky-400 transition-colors cursor-pointer" @click="confirmNewSession">建立对话</button>
+            </div>
+          </footer>
+        </section>
+      </div>
+
       <div
         v-if="rewindModalOpen"
         class="fixed inset-0 z-[2200] flex items-center justify-center bg-slate-950/55 backdrop-blur-[2px] p-4"
@@ -1829,7 +2146,7 @@ function approveAction(action: 'allow' | 'deny'): void {
           <header class="shrink-0 flex items-start justify-between gap-4 px-5 py-4 border-b border-slate-200 dark:border-white/[0.06]">
             <div class="min-w-0">
               <div class="flex items-center gap-2">
-                <span class="w-8 h-8 rounded-lg bg-emerald-50 dark:bg-emerald-400/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                <span class="w-8 h-8 rounded-lg bg-sky-50 dark:bg-sky-400/10 text-sky-600 dark:text-sky-400 flex items-center justify-center">
                   <AppIcon name="history" :size="16" />
                 </span>
                 <h2 id="rewind-modal-title" class="text-base font-semibold text-slate-800 dark:text-slate-100">Rewind to...</h2>
@@ -1859,12 +2176,12 @@ function approveAction(action: 'allow' | 'deny'): void {
                 :key="point.id"
                 type="button"
                 class="w-full min-h-[54px] px-5 py-3 text-left border-b border-slate-100 dark:border-white/[0.04] flex items-center gap-3 transition-colors cursor-pointer"
-                :class="i === rewindHighlight ? 'bg-emerald-50 dark:bg-emerald-400/10 outline outline-1 outline-emerald-400/60 outline-offset-[-1px]' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                :class="i === rewindHighlight ? 'bg-sky-50 dark:bg-sky-400/10 outline outline-1 outline-sky-400/60 outline-offset-[-1px]' : 'hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
                 @mouseenter="rewindHighlight = i"
                 @click="runRewind(point)"
               >
                 <span class="shrink-0 w-9 h-9 rounded-lg border flex items-center justify-center text-xs font-semibold"
-                  :class="i === rewindHighlight ? 'border-emerald-300 dark:border-emerald-400/30 text-emerald-700 dark:text-emerald-300 bg-white/70 dark:bg-emerald-400/10' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-white/[0.03]'">
+                  :class="i === rewindHighlight ? 'border-sky-300 dark:border-sky-400/30 text-sky-700 dark:text-sky-300 bg-white/70 dark:bg-sky-400/10' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-white/[0.03]'">
                   #{{ point.ordinal }}
                 </span>
                 <div class="min-w-0 flex-1">
@@ -1901,7 +2218,7 @@ function approveAction(action: 'allow' | 'deny'): void {
               <button
                 type="button"
                 class="shrink-0 h-8 px-3 rounded-lg text-xs font-medium transition-colors"
-                :class="rewindPoints.length && !rewindLoading ? 'bg-slate-900 dark:bg-emerald-500 text-white hover:bg-slate-800 dark:hover:bg-emerald-400 cursor-pointer' : 'bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-600 cursor-not-allowed'"
+                :class="rewindPoints.length && !rewindLoading ? 'bg-slate-900 dark:bg-sky-500 text-white hover:bg-slate-800 dark:hover:bg-sky-400 cursor-pointer' : 'bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-600 cursor-not-allowed'"
                 :disabled="!rewindPoints.length || rewindLoading"
                 @click="runRewind()"
               >

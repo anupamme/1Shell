@@ -12,6 +12,7 @@ interface SessionMeta {
   title: string;
   entry: string;
   hostId: string;
+  workspaceHostIds?: string[];
   modelLabel: string;
   messageCount: number;
   preview: string;
@@ -51,6 +52,7 @@ const emit = defineEmits<{
   (e: 'select', id: string): void;
   (e: 'new-session'): void;
   (e: 'rename', id: string, title: string): void;
+  (e: 'copy', id: string): void;
   (e: 'delete', id: string): void;
   (e: 'update:activeTab', tab: RailTab): void;
   (e: 'select-host', id: string): void;
@@ -63,10 +65,10 @@ const fileHostId = ref('local');
 
 const fb = useFileBrowser({ hostId: fileHostId, singleton: false });
 
-const tabs: Array<{ key: RailTab; label: string; icon: string }> = [
-  { key: 'chat', label: '对话', icon: 'terminal' },
-  { key: 'files', label: '文件', icon: 'folder' },
-  { key: 'tools', label: 'Tools', icon: 'wrench' },
+const tabs: Array<{ key: RailTab; label: string }> = [
+  { key: 'chat', label: '对话' },
+  { key: 'files', label: '文件' },
+  { key: 'tools', label: '工具' },
 ];
 
 const hostList = computed(() => props.hosts || []);
@@ -78,6 +80,31 @@ const filtered = computed(() => {
 });
 
 const chatSessions = computed(() => filtered.value.slice().sort((a, b) => parseTime(b.updatedAt) - parseTime(a.updatedAt)));
+
+interface SessionGroup {
+  key: string;
+  label: string;
+  sessions: SessionMeta[];
+  updatedAt: string;
+}
+
+const chatGroups = computed<SessionGroup[]>(() => {
+  const groups = new Map<string, SessionGroup>();
+  for (const session of chatSessions.value) {
+    const ids = sessionWorkspaceIds(session);
+    const key = workspaceKey(ids);
+    const group = groups.get(key) || {
+      key,
+      label: workspaceLabel(ids),
+      sessions: [],
+      updatedAt: session.updatedAt || '',
+    };
+    group.sessions.push(session);
+    if (parseTime(session.updatedAt) > parseTime(group.updatedAt)) group.updatedAt = session.updatedAt;
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((a, b) => parseTime(b.updatedAt) - parseTime(a.updatedAt));
+});
 
 const visibleItems = computed<DirItem[]>(() => {
   const list = fb.showHidden.value
@@ -101,7 +128,7 @@ const focusStatusLabel = computed(() => {
 });
 const focusStatusClass = computed(() => {
   switch (activeFileFocus.value?.status) {
-    case 'running': return 'border-emerald-300 dark:border-emerald-400/25 text-emerald-700 dark:text-emerald-300 bg-emerald-100/70 dark:bg-emerald-400/10';
+    case 'running': return 'border-sky-300 dark:border-sky-400/25 text-sky-700 dark:text-sky-300 bg-sky-100/70 dark:bg-sky-400/10';
     case 'error': return 'border-red-300 dark:border-red-400/25 text-red-700 dark:text-red-300 bg-red-100/70 dark:bg-red-400/10';
     case 'done': return 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 bg-white/70 dark:bg-white/[0.04]';
     default: return 'border-amber-300 dark:border-amber-400/25 text-amber-700 dark:text-amber-300 bg-amber-100/70 dark:bg-amber-400/10';
@@ -206,6 +233,33 @@ function commitRename(): void {
   if (id && title) emit('rename', id, title);
 }
 
+function normalizeWorkspaceHostIds(ids: unknown): string[] {
+  if (!Array.isArray(ids)) return [];
+  return Array.from(new Set(ids
+    .map((id) => String(id || '').trim())
+    .filter((id) => id && id !== 'all' && id !== '*')));
+}
+
+function sessionWorkspaceIds(session: SessionMeta): string[] {
+  const ids = normalizeWorkspaceHostIds(session.workspaceHostIds);
+  if (ids.length) return ids;
+  const hostId = String(session.hostId || '').trim();
+  return hostId && hostId !== 'all' ? [hostId] : [];
+}
+
+function workspaceKey(ids: string[]): string {
+  const normalized = normalizeWorkspaceHostIds(ids).slice().sort();
+  return normalized.length ? normalized.join('|') : '__global__';
+}
+
+function workspaceLabel(ids: string[]): string {
+  const normalized = normalizeWorkspaceHostIds(ids);
+  if (!normalized.length) return '全局';
+  const names = normalized.map((id) => hostName(id));
+  if (names.length <= 2) return names.join('、');
+  return `${names.slice(0, 2).join('、')} +${names.length - 2}`;
+}
+
 function hostName(id: string): string {
   if (!id || id === 'local') return '本机';
   const host = hostList.value.find((item) => item.id === id);
@@ -254,28 +308,27 @@ function isFocusedItem(item: DirItem): boolean {
 </script>
 
 <template>
-  <aside class="w-1/5 min-w-[300px] max-w-[460px] shrink-0 h-full flex flex-col border-r border-slate-200 dark:border-white/[0.05] bg-stone-100/60 dark:bg-[#0c1019]">
-    <div class="shrink-0 p-2 border-b border-slate-200 dark:border-white/[0.05]">
-      <div class="grid grid-cols-3 gap-1 rounded-lg bg-white dark:bg-[#0b0f19] border border-slate-200 dark:border-white/[0.06] p-1">
+  <aside class="w-[328px] min-w-[292px] max-w-[360px] shrink-0 h-full flex flex-col border-r border-slate-200/80 dark:border-white/[0.06] bg-white dark:bg-[#0d111b]">
+    <div class="shrink-0 p-2.5 border-b border-slate-200/80 dark:border-white/[0.06]">
+      <div class="grid grid-cols-3 gap-1 rounded-xl bg-slate-100/70 dark:bg-white/[0.035] border border-slate-200/80 dark:border-white/[0.06] p-1">
         <button
           v-for="tab in tabs"
           :key="tab.key"
           type="button"
-          class="h-8 rounded-md flex items-center justify-center gap-1.5 text-[11px] font-semibold transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-400/30"
-          :class="props.activeTab === tab.key ? 'bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+          class="h-8 rounded-lg flex items-center justify-center text-[12px] font-semibold transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-400/25"
+          :class="props.activeTab === tab.key ? 'bg-white dark:bg-white/[0.08] text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white/70 dark:hover:bg-white/[0.05]'"
           @click="setTab(tab.key)"
         >
-          <AppIcon :name="tab.icon" :size="13" />
           <span>{{ tab.label }}</span>
         </button>
       </div>
     </div>
 
     <template v-if="props.activeTab === 'chat'">
-      <div class="shrink-0 flex items-center gap-2 px-3 h-11 border-b border-slate-200 dark:border-white/[0.05]">
+      <div class="shrink-0 flex items-center gap-2 px-3.5 h-12 border-b border-slate-200/70 dark:border-white/[0.05]">
         <span class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">对话</span>
         <button
-          class="ml-auto flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-emerald-50 dark:bg-emerald-400/10 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-400/15 hover:bg-emerald-100 dark:hover:bg-emerald-400/15 cursor-pointer transition-colors"
+          class="ml-auto h-7 flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg bg-slate-900 dark:bg-sky-500 text-white border border-slate-900 dark:border-sky-400 hover:bg-slate-800 dark:hover:bg-sky-400 cursor-pointer transition-colors shadow-sm"
           title="新对话"
           @click="emit('new-session')"
         >
@@ -284,62 +337,77 @@ function isFocusedItem(item: DirItem): boolean {
         </button>
       </div>
 
-      <div class="shrink-0 px-3 py-2 border-b border-slate-200 dark:border-white/[0.04]">
+      <div class="shrink-0 px-3.5 py-2.5 border-b border-slate-200/70 dark:border-white/[0.04]">
         <input
           v-model="keyword"
           type="text"
           placeholder="搜索对话..."
-          class="w-full px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-[#0b0f19] border border-slate-200 dark:border-white/[0.06] rounded-lg focus:outline-none focus:border-emerald-400/30 placeholder:text-slate-400 dark:placeholder:text-slate-600 transition-colors"
+          class="w-full h-8 px-2.5 text-xs text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-[#090d15] border border-slate-200/90 dark:border-white/[0.07] rounded-lg focus:outline-none focus:border-sky-400/40 placeholder:text-slate-400 dark:placeholder:text-slate-600 transition-colors"
         />
       </div>
 
-      <div class="flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
+      <div class="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
         <div v-if="props.loading && !props.sessions.length" class="px-2 py-6 text-center text-xs text-slate-400 dark:text-slate-600">加载中...</div>
         <div v-else-if="!filtered.length" class="px-2 py-8 text-center text-xs text-slate-400 dark:text-slate-600">
           {{ keyword ? '没有匹配的对话' : '暂无历史对话' }}
         </div>
 
-        <div
-          v-for="s in chatSessions"
-          :key="s.id"
-          class="group relative mb-0.5 rounded-lg cursor-pointer transition-colors"
-          :class="s.id === props.activeId ? 'bg-emerald-50 dark:bg-emerald-400/10 border border-emerald-200 dark:border-emerald-400/15' : 'border border-transparent hover:bg-slate-100 dark:hover:bg-white/[0.04]'"
-          @click="renamingId === s.id ? null : emit('select', s.id)"
-        >
-          <div class="px-2.5 py-2">
-            <input
-              v-if="renamingId === s.id"
-              :ref="(el) => focusRename(el, s.id)"
-              v-model="renameText"
-              type="text"
-              class="w-full px-1.5 py-0.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-[#0b0f19] border border-emerald-300 dark:border-emerald-400/30 rounded focus:outline-none"
-              @click.stop
-              @keydown.enter.prevent="commitRename"
-              @keydown.esc.prevent="renamingId = null"
-              @blur="commitRename"
-            />
-            <div v-else class="flex items-center gap-1.5">
-              <span v-if="s.entry === 'task'" class="shrink-0 text-amber-500 dark:text-amber-400" title="任务会话"><AppIcon name="save" :size="11" /></span>
-              <span class="text-xs font-medium truncate" :class="s.id === props.activeId ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-200'">{{ s.title || '新对话' }}</span>
-              <span v-if="s.awaitingApproval" class="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400">待确认</span>
-              <span v-if="s.running" class="shrink-0 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 animate-pulse">运行中</span>
+        <section v-for="group in chatGroups" :key="group.key" class="agent-chat-group">
+          <div class="agent-chat-group-header sticky top-0 z-10">
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-[13px] font-bold text-slate-700 dark:text-slate-200">{{ group.label }}</div>
+              <div class="mt-0.5 text-[10px] font-medium tracking-wider text-slate-400 dark:text-slate-600">工作区</div>
             </div>
-
-            <div v-if="renamingId !== s.id" class="flex items-center gap-1.5 mt-0.5">
-              <span class="text-[10px] text-slate-400 dark:text-slate-600 shrink-0">{{ relTime(s.updatedAt) }}</span>
-              <span v-if="s.preview" class="text-[10px] text-slate-400 dark:text-slate-600 truncate">· {{ s.preview }}</span>
-            </div>
+            <span class="min-w-6 h-5 px-1.5 rounded-full bg-white dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.07] text-center text-[11px] leading-5 font-semibold text-slate-500 dark:text-slate-400">{{ group.sessions.length }}</span>
           </div>
 
-          <div v-if="renamingId !== s.id" class="absolute right-1.5 top-1.5 hidden group-hover:flex items-center gap-0.5">
-            <button class="w-6 h-6 flex items-center justify-center rounded text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white dark:hover:bg-white/[0.06] transition-colors cursor-pointer" title="重命名" @click.stop="startRename(s)">
-              <AppIcon name="pen" :size="12" />
-            </button>
-            <button class="w-6 h-6 flex items-center justify-center rounded text-slate-400 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-white dark:hover:bg-white/[0.06] transition-colors cursor-pointer" title="删除" @click.stop="emit('delete', s.id)">
-              <AppIcon name="close" :size="12" />
-            </button>
+          <div class="agent-chat-group-list">
+            <div
+              v-for="s in group.sessions"
+              :key="s.id"
+              class="group relative rounded-xl cursor-pointer transition-all border"
+              :class="s.id === props.activeId ? 'bg-sky-50/80 dark:bg-sky-400/10 border-sky-200/90 dark:border-sky-400/20 shadow-sm' : 'bg-white/70 dark:bg-white/[0.02] border-transparent hover:bg-white dark:hover:bg-white/[0.04] hover:border-slate-200/80 dark:hover:border-white/[0.06]'"
+              @click="renamingId === s.id ? null : emit('select', s.id)"
+            >
+              <div class="px-3 py-2.5">
+                <input
+                  v-if="renamingId === s.id"
+                  :ref="(el) => focusRename(el, s.id)"
+                  v-model="renameText"
+                  type="text"
+                  class="w-full px-1.5 py-0.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-[#0b0f19] border border-sky-300 dark:border-sky-400/30 rounded focus:outline-none"
+                  @click.stop
+                  @keydown.enter.prevent="commitRename"
+                  @keydown.esc.prevent="renamingId = null"
+                  @blur="commitRename"
+                />
+                <div v-else class="flex items-center gap-1.5">
+                  <span v-if="s.entry === 'task'" class="shrink-0 text-amber-500 dark:text-amber-400" title="任务会话"><AppIcon name="save" :size="11" /></span>
+                  <span class="text-[13px] font-semibold truncate" :class="s.id === props.activeId ? 'text-slate-950 dark:text-slate-100' : 'text-slate-700 dark:text-slate-200'">{{ s.title || '新对话' }}</span>
+                  <span v-if="s.awaitingApproval" class="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400">待确认</span>
+                  <span v-if="s.running" class="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400 animate-pulse">运行中</span>
+                </div>
+
+                <div v-if="renamingId !== s.id" class="flex items-center gap-1.5 mt-0.5">
+                  <span class="text-[10px] text-slate-400 dark:text-slate-600 shrink-0">{{ relTime(s.updatedAt) }}</span>
+                  <span v-if="s.preview" class="text-[10px] text-slate-400 dark:text-slate-600 truncate">· {{ s.preview }}</span>
+                </div>
+              </div>
+
+              <div v-if="renamingId !== s.id" class="absolute right-1.5 top-1.5 hidden group-hover:flex items-center gap-0.5 rounded-lg border border-slate-200/80 dark:border-white/[0.06] bg-white/95 dark:bg-[#121826]/95 p-0.5 shadow-sm">
+                <button class="w-6 h-6 flex items-center justify-center rounded text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] transition-colors cursor-pointer" title="重命名" @click.stop="startRename(s)">
+                  <AppIcon name="pen" :size="12" />
+                </button>
+                <button class="w-6 h-6 flex items-center justify-center rounded text-slate-400 dark:text-slate-500 hover:text-sky-600 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer" title="复制" @click.stop="emit('copy', s.id)">
+                  <AppIcon name="copy" :size="12" />
+                </button>
+                <button class="w-6 h-6 flex items-center justify-center rounded text-slate-400 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer" title="删除" @click.stop="emit('delete', s.id)">
+                  <AppIcon name="close" :size="12" />
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
       </div>
     </template>
 
@@ -352,8 +420,8 @@ function isFocusedItem(item: DirItem): boolean {
           </div>
           <button class="h-7 px-2 rounded-md border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white dark:hover:bg-white/[0.04] transition-colors cursor-pointer" title="刷新当前目录" @click="fb.refreshCurrent">刷新</button>
         </div>
-        <div v-if="activeFileFocus" class="mt-2 rounded-lg border border-emerald-200 dark:border-emerald-400/15 bg-emerald-50/70 dark:bg-emerald-400/8 px-2.5 py-2">
-          <div class="flex items-center gap-1.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+        <div v-if="activeFileFocus" class="mt-2 rounded-lg border border-sky-200 dark:border-sky-400/15 bg-sky-50/70 dark:bg-sky-400/8 px-2.5 py-2">
+          <div class="flex items-center gap-1.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
             <AppIcon name="wrench" :size="12" />
             <span class="truncate">{{ activeFileFocus.action || activeFileFocus.toolName || 'Agent 文件操作' }}</span>
             <span
@@ -362,7 +430,7 @@ function isFocusedItem(item: DirItem): boolean {
               :class="focusStatusClass"
             >{{ focusStatusLabel }}</span>
           </div>
-          <div class="mt-1 text-[10px] text-emerald-700/70 dark:text-emerald-300/70 truncate" :title="focusDetail">{{ focusDetail }}</div>
+          <div class="mt-1 text-[10px] text-sky-700/70 dark:text-sky-300/70 truncate" :title="focusDetail">{{ focusDetail }}</div>
         </div>
       </div>
 
@@ -370,14 +438,14 @@ function isFocusedItem(item: DirItem): boolean {
         <div class="flex gap-1.5 overflow-x-auto pb-0.5">
           <button
             class="h-7 px-2 rounded-md text-[11px] border transition-colors cursor-pointer whitespace-nowrap"
-            :class="fileHostId === 'local' ? 'border-emerald-300 dark:border-emerald-400/25 bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:bg-white dark:hover:bg-white/[0.04]'"
+            :class="fileHostId === 'local' ? 'border-sky-300 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:bg-white dark:hover:bg-white/[0.04]'"
             @click="selectHost('local')"
           >本机</button>
           <button
             v-for="host in hostList"
             :key="host.id"
             class="h-7 px-2 rounded-md text-[11px] border transition-colors cursor-pointer whitespace-nowrap max-w-28 truncate"
-            :class="fileHostId === host.id ? 'border-emerald-300 dark:border-emerald-400/25 bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:bg-white dark:hover:bg-white/[0.04]'"
+            :class="fileHostId === host.id ? 'border-sky-300 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:bg-white dark:hover:bg-white/[0.04]'"
             :title="host.name || host.id"
             @click="selectHost(host.id)"
           >{{ host.name || host.id }}</button>
@@ -421,11 +489,11 @@ function isFocusedItem(item: DirItem): boolean {
             :key="item.path"
             type="button"
             class="group w-full min-h-9 px-2 rounded-lg flex items-center gap-2 text-left transition-colors cursor-pointer border"
-            :class="isFocusedItem(item) ? 'border-emerald-300 dark:border-emerald-400/25 bg-emerald-50 dark:bg-emerald-400/10' : 'border-transparent hover:bg-white dark:hover:bg-white/[0.04]'"
+            :class="isFocusedItem(item) ? 'border-sky-300 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10' : 'border-transparent hover:bg-white dark:hover:bg-white/[0.04]'"
             @click="onFileClick(item)"
           >
             <AppIcon :name="item.isDir || item.isDrive ? 'folder' : 'file'" :size="14" :class="item.isDir || item.isDrive ? 'text-sky-500 dark:text-sky-400' : 'text-slate-400 dark:text-slate-500'" />
-            <span class="min-w-0 flex-1 truncate text-xs" :class="isFocusedItem(item) ? 'text-emerald-700 dark:text-emerald-300 font-semibold' : 'text-slate-700 dark:text-slate-200'">{{ item.name }}</span>
+            <span class="min-w-0 flex-1 truncate text-xs" :class="isFocusedItem(item) ? 'text-sky-700 dark:text-sky-300 font-semibold' : 'text-slate-700 dark:text-slate-200'">{{ item.name }}</span>
             <span v-if="!item.isDir && !item.isDrive" class="text-[10px] text-slate-400 dark:text-slate-600 shrink-0">{{ formatSize(item.size) }}</span>
           </button>
         </template>
@@ -441,3 +509,54 @@ function isFocusedItem(item: DirItem): boolean {
     </template>
   </aside>
 </template>
+
+<style scoped>
+.agent-chat-group {
+  margin-bottom: 18px;
+}
+
+.agent-chat-group + .agent-chat-group {
+  padding-top: 8px;
+}
+
+.agent-chat-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin: 0 -2px 8px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 12px;
+  background:
+    linear-gradient(90deg, rgba(14, 165, 233, 0.08), rgba(255, 255, 255, 0) 48%),
+    rgba(248, 250, 252, 0.96);
+}
+
+.agent-chat-group-header::before {
+  content: "";
+  width: 3px;
+  height: 24px;
+  border-radius: 999px;
+  background: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.08);
+}
+
+.agent-chat-group-list {
+  display: grid;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(203, 213, 225, 0.72);
+}
+
+:global(.dark) .agent-chat-group-header {
+  border-color: rgba(255, 255, 255, 0.07);
+  background:
+    linear-gradient(90deg, rgba(56, 189, 248, 0.12), rgba(15, 23, 42, 0) 48%),
+    rgba(255, 255, 255, 0.035);
+}
+
+:global(.dark) .agent-chat-group-list {
+  border-left-color: rgba(255, 255, 255, 0.08);
+}
+</style>

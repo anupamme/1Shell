@@ -87,7 +87,7 @@ try_system_node() {
   NPM_CMD="$(command -v npm)"
 }
 
-log "1Shell v4.2.4 starter package"
+log "1Shell v4.3.0 starter package"
 if [ ! -x "$NODE_EXE" ]; then
   if [ "${ONE_SHELL_USE_SYSTEM_NODE:-0}" = "1" ] && try_system_node; then
     :

@@ -16,7 +16,7 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
 
   const stmts = {
     selectMetaList: db.prepare(`
-      SELECT id, title, entry, host_id, model_label, message_count, preview, created_at, updated_at
+      SELECT id, title, entry, host_id, workspace_hosts_json, model_label, message_count, preview, created_at, updated_at
       FROM ide_sessions
       ORDER BY updated_at DESC
     `),
@@ -24,13 +24,14 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
     selectMeta: db.prepare('SELECT id FROM ide_sessions WHERE id = ?'),
     selectFull: db.prepare('SELECT * FROM ide_sessions WHERE id = ?'),
     insert: db.prepare(`
-      INSERT INTO ide_sessions (id, title, entry, host_id, model_label, message_count, messages_json, preview, created_at, updated_at)
-      VALUES (@id, @title, @entry, @host_id, @model_label, @message_count, @messages_json, @preview, datetime('now'), datetime('now'))
+      INSERT INTO ide_sessions (id, title, entry, host_id, workspace_hosts_json, model_label, message_count, messages_json, preview, created_at, updated_at)
+      VALUES (@id, @title, @entry, @host_id, @workspace_hosts_json, @model_label, @message_count, @messages_json, @preview, datetime('now'), datetime('now'))
     `),
     update: db.prepare(`
       UPDATE ide_sessions
       SET entry = @entry,
           host_id = @host_id,
+          workspace_hosts_json = @workspace_hosts_json,
           model_label = @model_label,
           message_count = @message_count,
           messages_json = @messages_json,
@@ -50,6 +51,7 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
       title: String(payload.title || '').slice(0, 200),
       entry: payload.entry || 'core',
       host_id: payload.hostId || null,
+      workspace_hosts_json: JSON.stringify(normalizeWorkspaceHostIds(payload.workspaceHostIds, payload.hostId)),
       model_label: payload.modelLabel || null,
       message_count: Number.isFinite(payload.messageCount) ? payload.messageCount : (Array.isArray(payload.messages) ? payload.messages.length : 0),
       messages_json: JSON.stringify(Array.isArray(payload.messages) ? payload.messages : []),
@@ -66,6 +68,7 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
       title: row.title || '',
       entry: row.entry || 'core',
       hostId: row.host_id || '',
+      workspaceHostIds: normalizeWorkspaceHostIds(safeParseArray(row.workspace_hosts_json), row.host_id || ''),
       modelLabel: row.model_label || '',
       messageCount: row.message_count || 0,
       preview: row.preview || '',
@@ -124,6 +127,16 @@ function safeParseArray(value) {
   }
 }
 
+function normalizeWorkspaceHostIds(value, fallbackHostId = '') {
+  const list = Array.isArray(value) ? value : [];
+  const ids = [...new Set(list
+    .map((item) => String(item || '').trim())
+    .filter((item) => item && item !== 'all' && item !== '*'))];
+  if (ids.length > 0) return ids;
+  const fallback = String(fallbackHostId || '').trim();
+  return fallback && fallback !== 'all' ? [fallback] : [];
+}
+
 function createFileIdeSessionRepository(dataDir) {
   const root = dataDir ? path.resolve(dataDir) : path.join(process.cwd(), 'data');
   const filePath = path.join(root, 'ide-sessions.json');
@@ -174,6 +187,7 @@ function createFileIdeSessionRepository(dataDir) {
       title: existing?.title || String(payload.title || '').slice(0, 200),
       entry: payload.entry || existing?.entry || 'core',
       hostId: payload.hostId || existing?.hostId || '',
+      workspaceHostIds: normalizeWorkspaceHostIds(payload.workspaceHostIds, payload.hostId || existing?.hostId || ''),
       modelLabel: payload.modelLabel || existing?.modelLabel || '',
       messageCount: Number.isFinite(payload.messageCount)
         ? payload.messageCount
@@ -218,6 +232,7 @@ function normalizeFileRow(value) {
     title: String(row.title || '').slice(0, 200),
     entry: String(row.entry || 'core'),
     hostId: String(row.hostId || row.host_id || ''),
+    workspaceHostIds: normalizeWorkspaceHostIds(row.workspaceHostIds || row.workspace_host_ids || safeParseArray(row.workspace_hosts_json), row.hostId || row.host_id || ''),
     modelLabel: String(row.modelLabel || row.model_label || ''),
     messageCount: Number.isFinite(Number(row.messageCount ?? row.message_count))
       ? Number(row.messageCount ?? row.message_count)
@@ -235,6 +250,7 @@ function fileRowToMeta(row) {
     title: row.title || '',
     entry: row.entry || 'core',
     hostId: row.hostId || '',
+    workspaceHostIds: normalizeWorkspaceHostIds(row.workspaceHostIds, row.hostId || ''),
     modelLabel: row.modelLabel || '',
     messageCount: row.messageCount || 0,
     preview: row.preview || '',

@@ -51,6 +51,21 @@ async function handleSetup(): Promise<void> {
   }
 }
 
+async function handleModelChange(event: Event): Promise<void> {
+  const modelId = (event.target as HTMLSelectElement).value;
+  if (!modelId) return;
+  try {
+    await agent.setSelectedModel(modelId);
+    notify.success('模型已切换');
+  } catch (err) {
+    notify.error((err as Error).message || '模型切换失败');
+  }
+}
+
+function activeModelValue(): string {
+  return agent.activeModelOptions.value.find((model) => model.active)?.id || agent.activeModelOptions.value[0]?.id || '';
+}
+
 function getSessionDotColor(status: string): string {
   if (status === 'ready') return 'bg-purple-400';
   if (status === 'starting') return 'bg-amber-400';
@@ -104,7 +119,22 @@ function getSessionDotColor(status: string): string {
           :key="p.id"
           :value="p.id"
         >
-          {{ p.label }}{{ p.configured ? (p.activeProviderName ? ` · ${p.activeProviderName}` : '') + (p.model ? ` · ${p.model}` : '') : ' · 未配置 API' }}
+          {{ p.label }}{{ p.configured ? (p.activeProviderName ? ` · ${p.activeProviderName}` : '') : ' · 未配置 API' }}
+        </option>
+      </select>
+      <select
+        :value="activeModelValue()"
+        class="agent-model-select"
+        :disabled="agent.activeModelOptions.value.length <= 1"
+        title="切换 1Shell 网关模型"
+        @change="handleModelChange"
+      >
+        <option
+          v-for="model in agent.activeModelOptions.value"
+          :key="model.id"
+          :value="model.id"
+        >
+          {{ model.label }}
         </option>
       </select>
       <button

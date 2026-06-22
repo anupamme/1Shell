@@ -220,7 +220,7 @@ function onInputKeydown(event: KeyboardEvent): void {
     if (slashSubView.value === 'model') {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
-        slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, modelProviders.enabledProviders.value.length);
+        slashSubHighlight.value = Math.min(slashSubHighlight.value + 1, modelProviders.modelOptions.value.length);
         return;
       }
       if (event.key === 'ArrowUp') {
@@ -230,8 +230,8 @@ function onInputKeydown(event: KeyboardEvent): void {
       }
       if (event.key === 'Enter') {
         event.preventDefault();
-        const provider = slashSubHighlight.value === 0 ? null : modelProviders.enabledProviders.value[slashSubHighlight.value - 1];
-        void selectModelFromSlash(provider?.id || null);
+        const option = slashSubHighlight.value === 0 ? null : modelProviders.modelOptions.value[slashSubHighlight.value - 1];
+        void selectModelFromSlash(option?.providerId || null, option?.modelId || null);
         return;
       }
       if (event.key === 'Escape' || event.key === 'Backspace') {
@@ -363,9 +363,9 @@ function closeSlashSubView(): void {
   slashHighlight.value = 0;
 }
 
-async function selectModelFromSlash(providerId: string | null): Promise<void> {
+async function selectModelFromSlash(providerId: string | null, modelId: string | null = null): Promise<void> {
   try {
-    const nextModel = await modelProviders.selectProvider(providerId);
+    const nextModel = await modelProviders.selectProvider(providerId, modelId);
     ide.inputText.value = '';
     slashSubView.value = null;
     ide.pushSystemEvent('/model', `模型偏好已切换为：${nextModel}`, 'success');
@@ -475,8 +475,8 @@ onMounted(() => {
         />
         <IdeModelSlashMenu
           v-if="slashSubView === 'model'"
-          :providers="modelProviders.enabledProviders.value"
-          :active-provider-id="modelProviders.activeProviderId.value"
+          :options="modelProviders.modelOptions.value"
+          :active-model-key="modelProviders.activeModelKey.value"
           :highlighted="slashSubHighlight"
           :loading="modelProviders.loading.value"
           density="compact"

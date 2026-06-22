@@ -42,6 +42,16 @@ function createIdeSessionRouter({ ideService }) {
     }
   });
 
+  router.post('/agent/sessions/:id/copy', (req, res, next) => {
+    try {
+      const session = ideService.copySessionRecord(req.params.id);
+      if (!session) return res.status(404).json({ ok: false, error: '会话不存在，或正在运行中' });
+      return res.json({ ok: true, session });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
   router.delete('/agent/sessions/:id', (req, res, next) => {
     try {
       ideService.removeSessionRecord(req.params.id);

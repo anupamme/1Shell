@@ -1,4 +1,4 @@
-name: CI - 1Shell 4.2
+name: CI - 1Shell 4.3
 
 on:
   push:

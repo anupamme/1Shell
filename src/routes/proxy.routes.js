@@ -41,6 +41,59 @@ function normalizeBase(apiBase) {
   return base;
 }
 
+const DEFAULT_CLAUDE_MODEL_PROFILES = [
+  { apiModel: 'claude-sonnet-4-20250514', displayName: 'Claude Sonnet 4', createdAt: '2025-05-14' },
+  { apiModel: 'claude-opus-4-20250514', displayName: 'Claude Opus 4', createdAt: '2025-05-14' },
+  { apiModel: 'claude-haiku-4-20250514', displayName: 'Claude Haiku 4', createdAt: '2025-05-14' },
+];
+
+function getProviderModelProfiles(provider, fallbackProfiles = []) {
+  const profiles = [];
+  const seen = new Set();
+  const push = (apiModel, displayName, createdAt = '') => {
+    const id = String(apiModel || '').trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    profiles.push({
+      apiModel: id,
+      displayName: String(displayName || id).trim() || id,
+      createdAt: String(createdAt || '').trim(),
+    });
+  };
+
+  for (const model of (Array.isArray(provider?.models) ? provider.models : [])) {
+    if (model?.enabled === false) continue;
+    push(model?.apiModel, model?.displayName);
+  }
+
+  if (!profiles.length) push(provider?.model, provider?.model);
+  if (!profiles.length) {
+    for (const model of fallbackProfiles) {
+      push(model.apiModel, model.displayName, model.createdAt);
+    }
+  }
+
+  return profiles;
+}
+
+function buildAnthropicProxyModelList(provider) {
+  return {
+    data: getProviderModelProfiles(provider, DEFAULT_CLAUDE_MODEL_PROFILES).map((model) => ({
+      id: model.apiModel,
+      display_name: model.displayName,
+      created_at: model.createdAt,
+    })),
+  };
+}
+
+function buildOpenAIProxyModelList(provider) {
+  const profiles = getProviderModelProfiles(provider, [{ apiModel: 'gpt-4o', displayName: 'gpt-4o' }]);
+  return {
+    object: 'list',
+    data: profiles.map((model) => ({ id: model.apiModel, object: 'model', owned_by: '1shell-proxy' })),
+  };
+}
+
 function normalizeUrlHost(hostname) {
   return String(hostname || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
 }
@@ -645,6 +698,41 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
     }
   }
 
+  function getPositiveInteger(value) {
+    const n = Number(value);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  function applyMaxOutputTokens(body, provider, protocol) {
+    if (!body || typeof body !== 'object') return body;
+    const limit = getPositiveInteger(provider?.maxOutputTokens);
+    if (!limit) return body;
+
+    const clamp = (value) => {
+      const current = getPositiveInteger(value);
+      return current ? Math.min(current, limit) : limit;
+    };
+
+    if (protocol === 'anthropic') {
+      body.max_tokens = clamp(body.max_tokens);
+      return body;
+    }
+
+    if (protocol === 'openai-responses') {
+      body.max_output_tokens = clamp(body.max_output_tokens);
+      return body;
+    }
+
+    if (body.max_completion_tokens != null) {
+      body.max_completion_tokens = clamp(body.max_completion_tokens);
+    } else if (body.max_tokens != null) {
+      body.max_tokens = clamp(body.max_tokens);
+    } else {
+      body.max_tokens = limit;
+    }
+    return body;
+  }
+
   function requireProvider(cliId, cliLabel, res) {
     const p = getActive(cliId);
     if (!p || !p.apiBase || !p.apiKey) {
@@ -673,7 +761,10 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
 
     if (upstream === 'anthropic') {
       // 透传到 Anthropic API
-      maybeInjectReasoning(body, provider, body.model || provider.model || '', 'anthropic');
+      const targetModel = provider.model || body.model || '';
+      if (provider.model) body.model = provider.model;
+      maybeInjectReasoning(body, provider, targetModel, 'anthropic');
+      applyMaxOutputTokens(body, provider, 'anthropic');
       try {
         const upResp = await callAnthropicUpstream(provider.apiBase, provider.apiKey, body, undefined, requestAbort.signal);
         if (isStream) {
@@ -695,7 +786,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       const openaiBody = {
         model: targetModel,
         messages: anthropicToOpenAIMessages(body.system, body.messages),
-        max_tokens: body.max_tokens || 4096,
+        max_tokens: body.max_tokens || provider.maxOutputTokens || 4096,
         stream: isStream,
       };
       if (body.temperature != null) openaiBody.temperature = body.temperature;
@@ -705,6 +796,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
         openaiBody.tool_choice = 'auto';
       }
       maybeInjectReasoning(openaiBody, provider, targetModel, 'openai');
+      applyMaxOutputTokens(openaiBody, provider, 'openai-chat');
       try {
         const upResp = await callOpenAIUpstream(provider.apiBase, provider.apiKey, openaiBody, requestAbort.signal);
         if (!upResp.ok) {
@@ -750,7 +842,10 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
     const requestAbort = createRequestAbort(req, res);
 
     if (upstream === 'anthropic') {
-      maybeInjectReasoning(body, active, body.model || active.model || '', 'anthropic');
+      const targetModel = active.model || body.model || '';
+      if (active.model) body.model = active.model;
+      maybeInjectReasoning(body, active, targetModel, 'anthropic');
+      applyMaxOutputTokens(body, active, 'anthropic');
       try {
         // 若请求体包含 mcp_servers，自动附带 mcp-client beta header
         const extra = {};
@@ -776,7 +871,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       const openaiBody = {
         model: targetModel,
         messages: anthropicToOpenAIMessages(body.system, body.messages),
-        max_tokens: body.max_tokens || 4096,
+        max_tokens: body.max_tokens || active.maxOutputTokens || 4096,
         stream: isStream,
       };
       if (body.temperature != null) openaiBody.temperature = body.temperature;
@@ -786,6 +881,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
         openaiBody.tool_choice = 'auto';
       }
       maybeInjectReasoning(openaiBody, active, targetModel, 'openai');
+      applyMaxOutputTokens(openaiBody, active, 'openai-chat');
       try {
         const upResp = await callOpenAIUpstream(active.apiBase, active.apiKey, openaiBody, requestAbort.signal);
         if (!upResp.ok) {
@@ -811,11 +907,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
   router.post('/skills/v1/messages', handleSkillsClient);
 
   router.get('/claude/v1/models', (_req, res) => {
-    res.json({ data: [
-      { id: 'claude-sonnet-4-20250514', display_name: 'Claude Sonnet 4', created_at: '2025-05-14' },
-      { id: 'claude-opus-4-20250514', display_name: 'Claude Opus 4', created_at: '2025-05-14' },
-      { id: 'claude-haiku-4-20250514', display_name: 'Claude Haiku 4', created_at: '2025-05-14' },
-    ] });
+    res.json(buildAnthropicProxyModelList(getActive('claude-code')));
   });
 
   // ─── Codex / OpenCode 端点 (clientProtocol = openai) ────────────────
@@ -833,6 +925,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       // 透传
       if (provider.model) body.model = provider.model;
       maybeInjectReasoning(body, provider, body.model || '', 'openai');
+      applyMaxOutputTokens(body, provider, 'openai-chat');
       try {
         const upResp = await callOpenAIUpstream(provider.apiBase, provider.apiKey, { ...body, stream: isStream }, requestAbort.signal);
         if (!upResp.ok) {
@@ -858,7 +951,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       const anthropicTools = convertOpenAIToolsToAnthropic(body.tools);
       const anthropicBody = {
         model: provider.model || 'claude-sonnet-4-20250514',
-        max_tokens: body.max_tokens || body.max_completion_tokens || 4096,
+        max_tokens: body.max_tokens || body.max_completion_tokens || provider.maxOutputTokens || 4096,
         system,
         messages: openaiMessagesToAnthropic(body.messages),
         stream: isStream,
@@ -867,6 +960,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       if (body.top_p != null) anthropicBody.top_p = body.top_p;
       if (anthropicTools && anthropicTools.length > 0) anthropicBody.tools = anthropicTools;
       maybeInjectReasoning(anthropicBody, provider, anthropicBody.model, 'anthropic');
+      applyMaxOutputTokens(anthropicBody, provider, 'anthropic');
       try {
         const upResp = await callAnthropicUpstream(provider.apiBase, provider.apiKey, anthropicBody, undefined, requestAbort.signal);
         if (!upResp.ok) {
@@ -914,6 +1008,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
 
     if (provider.model) body.model = provider.model;
     maybeInjectReasoning(body, provider, body.model || '', 'openai');
+    applyMaxOutputTokens(body, provider, 'openai-responses');
     try {
       const upResp = await callOpenAIResponsesUpstream(provider.apiBase, provider.apiKey, body, requestAbort.signal);
       if (!upResp.ok) {
@@ -943,18 +1038,13 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
   router.get('/opencode/v1/models', (_req, res) => proxyModelsList('opencode', res));
 
   function proxyModelsList(cliId, res) {
-    const p = getActive(cliId);
-    const model = p?.model || 'gpt-4o';
-    res.json({ object: 'list', data: [{ id: model, object: 'model', owned_by: '1shell-proxy' }] });
+    res.json(buildOpenAIProxyModelList(getActive(cliId)));
   }
 
   // ─── 兼容旧路径 /v1/messages → Claude ──────────────────────────────
   router.post('/v1/messages', (req, res) => handleAnthropicClient('claude-code', 'Claude Code', req, res));
   router.get('/v1/models', (_req, res) => {
-    res.json({ data: [
-      { id: 'claude-sonnet-4-20250514', display_name: 'Claude Sonnet 4', created_at: '2025-05-14' },
-      { id: 'claude-opus-4-20250514', display_name: 'Claude Opus 4', created_at: '2025-05-14' },
-    ] });
+    res.json(buildAnthropicProxyModelList(getActive('claude-code')));
   });
 
   return router;
@@ -1086,9 +1176,18 @@ function createProxyConfigStore(dataDir) {
   const path = require('path');
   const crypto = require('crypto');
   const configPath = path.join(dataDir, 'proxy-configs.json');
+  const GLOBAL_PROVIDERS_KEY = '__globalProviders';
+  const DEFAULT_PROVIDER_SLOTS = ['skills', 'claude-code', 'codex', 'opencode'];
+  const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
   function _readAll() {
-    try { return JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch { return {}; }
+    try {
+      const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (migrateLegacyProviderPools(data)) _writeAll(data);
+      return data;
+    } catch {
+      return {};
+    }
   }
   function _writeAll(data) {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -1099,24 +1198,68 @@ function createProxyConfigStore(dataDir) {
     if (!Array.isArray(all[cliId].providers)) all[cliId].providers = [];
     return all[cliId];
   }
+  function _getGlobalProviders(all) {
+    return Array.isArray(all[GLOBAL_PROVIDERS_KEY]) ? all[GLOBAL_PROVIDERS_KEY] : [];
+  }
+  function isCliEntry(key, value) {
+    return key !== GLOBAL_PROVIDERS_KEY && value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function getCliEntries(all) {
+    return Object.entries(all || {}).filter(([key, value]) => isCliEntry(key, value));
+  }
+
+  function cloneProviderForLocal(provider) {
+    const cloned = JSON.parse(JSON.stringify(provider || {}));
+    if (!cloned.id) cloned.id = crypto.randomBytes(4).toString('hex');
+    persistActiveModelProjection(cloned);
+    return cloned;
+  }
+
+  function copyProviderIntoCli(cli, provider) {
+    if (!provider || typeof provider !== 'object') return false;
+    const providerId = provider.id || crypto.randomBytes(4).toString('hex');
+    if (cli.providers.some(p => p?.id === providerId)) return false;
+    cli.providers.push(cloneProviderForLocal({ ...provider, id: providerId }));
+    return true;
+  }
+
+  function migrateLegacyProviderPools(all) {
+    if (!all || typeof all !== 'object' || Array.isArray(all)) return false;
+    const globalProviders = _getGlobalProviders(all).filter(p => p && typeof p === 'object');
+    if (!globalProviders.length) {
+      if (hasOwn(all, GLOBAL_PROVIDERS_KEY)) {
+        delete all[GLOBAL_PROVIDERS_KEY];
+        return true;
+      }
+      return false;
+    }
+    let changed = false;
+
+    const targetIds = new Set([...DEFAULT_PROVIDER_SLOTS, ...getCliEntries(all).map(([cliId]) => cliId)]);
+    for (const cliId of targetIds) {
+      const cli = _ensureCli(all, cliId);
+      const hadRoute = Boolean(cli.activeRoute?.providerId || cli.activeProviderId);
+      for (const provider of globalProviders) {
+        changed = copyProviderIntoCli(cli, provider) || changed;
+      }
+      if (!hadRoute && globalProviders[0]?.id) {
+        const { activeModelId } = normalizeProviderModels(globalProviders[0]);
+        cli.activeProviderId = globalProviders[0].id;
+        cli.activeRoute = { providerId: globalProviders[0].id, modelId: activeModelId || null };
+        changed = true;
+      }
+      persistActiveRoute(cli, getProviderRecordsForCli(all, cli));
+    }
+
+    delete all[GLOBAL_PROVIDERS_KEY];
+    changed = true;
+    return changed;
+  }
 
   function maskKey(key) {
     if (!key || key.length < 10) return '****';
     return key.substring(0, 5) + '…' + key.substring(key.length - 4);
-  }
-
-  function maskProvider(p) {
-    return {
-      id: p.id, name: p.name || '',
-      apiBase: p.apiBase || '',
-      apiKey: p.apiKey ? maskKey(p.apiKey) : '',
-      apiKeySet: Boolean(p.apiKey),
-      model: p.model || '',
-      upstreamProtocol: p.upstreamProtocol || 'openai',
-      reasoningEffort: p.reasoningEffort || 'auto',
-      presetId: p.presetId || '',
-      enabled: p.enabled !== false,
-    };
   }
 
   function normalizeReasoningEffort(value) {
@@ -1124,60 +1267,350 @@ function createProxyConfigStore(dataDir) {
     return ['auto', 'low', 'medium', 'high'].includes(v) ? v : 'auto';
   }
 
+  function normalizeOptionalPositiveInteger(value, fieldName) {
+    if (value === undefined || value === null || value === '') return null;
+    const n = Number(value);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`${fieldName} must be a positive integer`);
+    }
+    return n;
+  }
+
+  function setOptionalPositiveInteger(target, fieldName, value) {
+    const normalized = normalizeOptionalPositiveInteger(value, fieldName);
+    if (normalized === null) {
+      delete target[fieldName];
+    } else {
+      target[fieldName] = normalized;
+    }
+  }
+
+  function readOptionalPositiveInteger(source, fieldName) {
+    return hasOwn(source, fieldName)
+      ? normalizeOptionalPositiveInteger(source[fieldName], fieldName)
+      : undefined;
+  }
+
+  function makeModelId() {
+    return `model-${crypto.randomBytes(3).toString('hex')}`;
+  }
+
+  function normalizeModelProfile(input = {}, fallback = {}) {
+    const source = input && typeof input === 'object' ? input : {};
+    const apiModel = String(source.apiModel ?? source.model ?? fallback.apiModel ?? fallback.model ?? '').trim();
+    const displayName = String(source.displayName ?? source.name ?? fallback.displayName ?? apiModel).trim();
+    const profile = {
+      id: String(source.id || fallback.id || makeModelId()).trim() || makeModelId(),
+      apiModel,
+      displayName: displayName || apiModel,
+      enabled: source.enabled !== false,
+      reasoningEffort: normalizeReasoningEffort(source.reasoningEffort ?? fallback.reasoningEffort),
+    };
+    const contextTokenLimit = readOptionalPositiveInteger(
+      hasOwn(source, 'contextTokenLimit') ? source : fallback,
+      'contextTokenLimit',
+    );
+    const maxOutputTokens = readOptionalPositiveInteger(
+      hasOwn(source, 'maxOutputTokens') ? source : fallback,
+      'maxOutputTokens',
+    );
+    if (contextTokenLimit !== undefined && contextTokenLimit !== null) profile.contextTokenLimit = contextTokenLimit;
+    if (maxOutputTokens !== undefined && maxOutputTokens !== null) profile.maxOutputTokens = maxOutputTokens;
+    return profile;
+  }
+
+  function normalizeProviderModels(provider) {
+    const storedModels = Array.isArray(provider.models) ? provider.models : [];
+    let models = storedModels.map((model) => normalizeModelProfile(model));
+    if (!models.length) {
+      models = [normalizeModelProfile({}, {
+        id: provider.activeModelId || 'default',
+        model: provider.model,
+        displayName: provider.model,
+        reasoningEffort: provider.reasoningEffort,
+        contextTokenLimit: provider.contextTokenLimit,
+        maxOutputTokens: provider.maxOutputTokens,
+      })];
+    }
+    const activeModelId = models.some((model) => model.id === provider.activeModelId)
+      ? provider.activeModelId
+      : (models.find((model) => model.enabled !== false)?.id || models[0]?.id || null);
+    const activeModel = models.find((model) => model.id === activeModelId) || models[0] || null;
+    return { models, activeModelId, activeModel };
+  }
+
+  function projectActiveModel(provider, modelId) {
+    if (!provider) return null;
+    const projected = { ...provider };
+    const normalized = normalizeProviderModels(provider);
+    const routeModel = modelId
+      ? normalized.models.find((model) => model.id === modelId)
+      : null;
+    const activeModel = routeModel || normalized.activeModel;
+    const activeModelId = activeModel?.id || normalized.activeModelId;
+    projected.models = normalized.models;
+    projected.activeModelId = activeModelId;
+    if (activeModel) {
+      projected.model = activeModel.apiModel || '';
+      projected.reasoningEffort = activeModel.reasoningEffort || 'auto';
+      if (hasOwn(activeModel, 'contextTokenLimit')) projected.contextTokenLimit = activeModel.contextTokenLimit;
+      else delete projected.contextTokenLimit;
+      if (hasOwn(activeModel, 'maxOutputTokens')) projected.maxOutputTokens = activeModel.maxOutputTokens;
+      else delete projected.maxOutputTokens;
+    }
+    return projected;
+  }
+
+  function getProviderRecordsForCli(all, cli) {
+    const records = [];
+    const seen = new Set();
+    for (const provider of (cli?.providers || [])) {
+      if (!provider?.id || seen.has(provider.id)) continue;
+      seen.add(provider.id);
+      records.push({ provider, scope: 'local' });
+    }
+    return records;
+  }
+
+  function findProviderRecord(records, providerId) {
+    return (records || []).find((record) => record.provider?.id === providerId) || null;
+  }
+
+  function normalizeRoute(route, providerRecords, fallbackProviderId = null) {
+    const list = Array.isArray(providerRecords) ? providerRecords : [];
+    if (!list.length) return null;
+    const requestedProviderId = typeof route?.providerId === 'string' ? route.providerId : fallbackProviderId;
+    const record = findProviderRecord(list, requestedProviderId) || list[0];
+    const provider = record?.provider;
+    if (!provider) return null;
+    const { models, activeModelId } = normalizeProviderModels(provider);
+    const requestedModelId = typeof route?.modelId === 'string' ? route.modelId : null;
+    const modelId = models.some((model) => model.id === requestedModelId)
+      ? requestedModelId
+      : activeModelId;
+    return { providerId: provider.id, modelId: modelId || null };
+  }
+
+  function resolveActiveRoute(cli, providerRecords) {
+    return normalizeRoute(cli?.activeRoute, providerRecords, cli?.activeProviderId || null);
+  }
+
+  function persistActiveRoute(cli, providerRecords) {
+    const route = resolveActiveRoute(cli, providerRecords);
+    cli.activeProviderId = route?.providerId || null;
+    if (route?.providerId) cli.activeRoute = route;
+    else delete cli.activeRoute;
+    return route;
+  }
+
+  function getRoutedProvider(cli, providerRecords) {
+    const route = resolveActiveRoute(cli, providerRecords);
+    if (!route) return null;
+    const record = findProviderRecord(providerRecords, route.providerId);
+    const provider = record?.provider;
+    const projected = projectActiveModel(provider, route.modelId);
+    if (projected) projected.activeRoute = route;
+    return projected;
+  }
+
+  function persistActiveModelProjection(provider) {
+    const projected = projectActiveModel(provider);
+    provider.models = projected.models;
+    provider.activeModelId = projected.activeModelId;
+    provider.model = projected.model || '';
+    provider.reasoningEffort = projected.reasoningEffort || 'auto';
+    if (hasOwn(projected, 'contextTokenLimit')) provider.contextTokenLimit = projected.contextTokenLimit;
+    else delete provider.contextTokenLimit;
+    if (hasOwn(projected, 'maxOutputTokens')) provider.maxOutputTokens = projected.maxOutputTokens;
+    else delete provider.maxOutputTokens;
+  }
+
+  function updateActiveModelFromLegacyFields(provider, partial) {
+    const { models, activeModelId } = normalizeProviderModels(provider);
+    provider.models = models;
+    provider.activeModelId = activeModelId;
+    let activeModel = provider.models.find((model) => model.id === provider.activeModelId);
+    if (!activeModel) {
+      activeModel = normalizeModelProfile({}, { id: provider.activeModelId || 'default' });
+      provider.models.push(activeModel);
+      provider.activeModelId = activeModel.id;
+    }
+    if (typeof partial.model === 'string') {
+      const previousApiModel = activeModel.apiModel || '';
+      const previousDisplayName = activeModel.displayName || '';
+      activeModel.apiModel = partial.model.trim();
+      if (!previousDisplayName || previousDisplayName === previousApiModel) {
+        activeModel.displayName = activeModel.apiModel;
+      }
+    }
+    if (typeof partial.reasoningEffort === 'string') {
+      activeModel.reasoningEffort = normalizeReasoningEffort(partial.reasoningEffort);
+    }
+    if (hasOwn(partial, 'contextTokenLimit')) {
+      setOptionalPositiveInteger(activeModel, 'contextTokenLimit', partial.contextTokenLimit);
+    }
+    if (hasOwn(partial, 'maxOutputTokens')) {
+      setOptionalPositiveInteger(activeModel, 'maxOutputTokens', partial.maxOutputTokens);
+    }
+  }
+
+  function maskModelProfile(model) {
+    return {
+      id: model.id,
+      apiModel: model.apiModel || '',
+      displayName: model.displayName || model.apiModel || '',
+      enabled: model.enabled !== false,
+      reasoningEffort: model.reasoningEffort || 'auto',
+      contextTokenLimit: model.contextTokenLimit || null,
+      maxOutputTokens: model.maxOutputTokens || null,
+    };
+  }
+
+  function maskProvider(p, modelId, scope = 'local') {
+    const projected = projectActiveModel(p, modelId);
+    return {
+      id: projected.id, name: projected.name || '',
+      apiBase: projected.apiBase || '',
+      apiKey: projected.apiKey ? maskKey(projected.apiKey) : '',
+      apiKeySet: Boolean(projected.apiKey),
+      model: projected.model || '',
+      upstreamProtocol: projected.upstreamProtocol || 'openai',
+      reasoningEffort: projected.reasoningEffort || 'auto',
+      contextTokenLimit: projected.contextTokenLimit || null,
+      maxOutputTokens: projected.maxOutputTokens || null,
+      presetId: projected.presetId || '',
+      enabled: projected.enabled !== false,
+      activeModelId: projected.activeModelId || null,
+      routeModelId: modelId || null,
+      scope,
+      models: (projected.models || []).map(maskModelProfile),
+    };
+  }
+
   /** 列出某 CLI 的所有 Provider（脱敏） */
   function listProviders(cliId) {
-    const cli = _readAll()[cliId];
-    if (!cli) return { providers: [], activeProviderId: null };
+    const all = _readAll();
+    const cli = all[cliId] || { providers: [], activeProviderId: null };
+    const providerRecords = getProviderRecordsForCli(all, cli);
+    if (!providerRecords.length) return { providers: [], activeProviderId: null, activeRoute: null };
+    const activeRoute = resolveActiveRoute(cli, providerRecords);
     return {
-      providers: (cli.providers || []).map(maskProvider),
-      activeProviderId: cli.activeProviderId,
+      providers: providerRecords.map((record) => maskProvider(
+        record.provider,
+        record.provider.id === activeRoute?.providerId ? activeRoute.modelId : undefined,
+        record.scope,
+      )),
+      activeProviderId: activeRoute?.providerId || cli.activeProviderId || null,
+      activeRoute,
     };
   }
 
   /** 获取某 CLI 的活跃 Provider（原始，含 apiKey） */
   function getActiveProvider(cliId) {
-    const cli = _readAll()[cliId];
-    if (!cli || !cli.providers?.length) return null;
-    const active = cli.providers.find(p => p.id === cli.activeProviderId);
-    return active || cli.providers[0];
+    const all = _readAll();
+    const cli = all[cliId] || { providers: [], activeProviderId: null };
+    const providerRecords = getProviderRecordsForCli(all, cli);
+    if (!providerRecords.length) return null;
+    return getRoutedProvider(cli, providerRecords);
+  }
+
+  /** 获取某 CLI 的指定 Provider（原始，含 apiKey） */
+  function getProvider(cliId, providerId, modelId = null) {
+    const all = _readAll();
+    const cli = all[cliId] || { providers: [], activeProviderId: null };
+    const providerRecords = getProviderRecordsForCli(all, cli);
+    const record = findProviderRecord(providerRecords, providerId);
+    if (!record?.provider) return null;
+    return projectActiveModel(record.provider, modelId);
   }
 
   /** 添加 Provider，返回新 ID */
   function addProvider(cliId, data) {
     const all = _readAll();
     const cli = _ensureCli(all, cliId);
+    const hadRoute = Boolean(cli.activeRoute?.providerId || cli.activeProviderId);
     const id = crypto.randomBytes(4).toString('hex');
     const provider = {
       id,
       name: data.name || `Provider ${cli.providers.length + 1}`,
       apiBase: normalizeProviderApiBase(data.apiBase),
       apiKey: (data.apiKey || '').trim(),
-      model: (data.model || '').trim(),
       upstreamProtocol: data.upstreamProtocol || 'openai',
-      reasoningEffort: normalizeReasoningEffort(data.reasoningEffort),
       presetId: (data.presetId || '').trim(),
       enabled: true,
     };
+    if (Array.isArray(data.models)) {
+      provider.models = data.models.map((model) => normalizeModelProfile(model));
+      provider.activeModelId = data.activeModelId || provider.models[0]?.id || null;
+    } else {
+      provider.model = (data.model || '').trim();
+      provider.reasoningEffort = normalizeReasoningEffort(data.reasoningEffort);
+      setOptionalPositiveInteger(provider, 'contextTokenLimit', data.contextTokenLimit);
+      setOptionalPositiveInteger(provider, 'maxOutputTokens', data.maxOutputTokens);
+    }
+    persistActiveModelProjection(provider);
     cli.providers.push(provider);
-    if (!cli.activeProviderId) cli.activeProviderId = id;
+    if (!hadRoute) {
+      cli.activeProviderId = id;
+      cli.activeRoute = { providerId: id, modelId: provider.activeModelId || null };
+    }
+    persistActiveRoute(cli, getProviderRecordsForCli(all, cli));
     _writeAll(all);
     return id;
+  }
+
+  /** 复制 Provider，返回新 ID */
+  function copyProvider(cliId, providerId) {
+    const all = _readAll();
+    const cli = _ensureCli(all, cliId);
+    const providerRecords = getProviderRecordsForCli(all, cli);
+    const record = findProviderRecord(providerRecords, providerId);
+    if (!record?.provider) return null;
+
+    const copied = cloneProviderForLocal({
+      ...JSON.parse(JSON.stringify(record.provider)),
+      id: crypto.randomBytes(4).toString('hex'),
+      name: `${record.provider.name || 'Provider'}-copy`,
+    });
+    cli.providers.push(copied);
+    persistActiveRoute(cli, getProviderRecordsForCli(all, cli));
+    _writeAll(all);
+    return copied.id;
   }
 
   /** 更新 Provider */
   function updateProvider(cliId, providerId, partial) {
     const all = _readAll();
     const cli = _ensureCli(all, cliId);
-    const p = cli.providers.find(x => x.id === providerId);
+    const providerRecords = getProviderRecordsForCli(all, cli);
+    const record = findProviderRecord(providerRecords, providerId);
+    const p = record?.provider;
     if (!p) return false;
+    const activeRoute = resolveActiveRoute(cli, providerRecords);
     if (typeof partial.name === 'string') p.name = partial.name.trim();
     if (typeof partial.apiBase === 'string') p.apiBase = normalizeProviderApiBase(partial.apiBase);
     if (typeof partial.apiKey === 'string') p.apiKey = partial.apiKey.trim();
-    if (typeof partial.model === 'string') p.model = partial.model.trim();
     if (typeof partial.upstreamProtocol === 'string') p.upstreamProtocol = partial.upstreamProtocol;
-    if (typeof partial.reasoningEffort === 'string') p.reasoningEffort = normalizeReasoningEffort(partial.reasoningEffort);
+    if (Array.isArray(partial.models)) {
+      p.models = partial.models.map((model) => normalizeModelProfile(model));
+      p.activeModelId = partial.activeModelId || p.activeModelId || p.models[0]?.id || null;
+    }
+    if (typeof partial.activeModelId === 'string') p.activeModelId = partial.activeModelId;
+    if (
+      typeof partial.model === 'string'
+      || typeof partial.reasoningEffort === 'string'
+      || hasOwn(partial, 'contextTokenLimit')
+      || hasOwn(partial, 'maxOutputTokens')
+    ) {
+      updateActiveModelFromLegacyFields(p, partial);
+    }
     if (typeof partial.presetId === 'string') p.presetId = partial.presetId.trim();
     if (typeof partial.enabled === 'boolean') { p.enabled = partial.enabled; }
+    persistActiveModelProjection(p);
+    if (activeRoute?.providerId === providerId && typeof partial.activeModelId === 'string') {
+      cli.activeRoute = { providerId, modelId: partial.activeModelId };
+    }
+    persistActiveRoute(cli, getProviderRecordsForCli(all, cli));
     _writeAll(all);
     return true;
   }
@@ -1186,24 +1619,43 @@ function createProxyConfigStore(dataDir) {
   function deleteProvider(cliId, providerId) {
     const all = _readAll();
     const cli = _ensureCli(all, cliId);
+    const list = cli.providers;
     const idx = cli.providers.findIndex(x => x.id === providerId);
     if (idx === -1) return false;
-    cli.providers.splice(idx, 1);
-    if (cli.activeProviderId === providerId) {
-      cli.activeProviderId = cli.providers[0]?.id || null;
-    }
+    list.splice(idx, 1);
+    if (cli.activeProviderId === providerId) cli.activeProviderId = null;
+    if (cli.activeRoute?.providerId === providerId) delete cli.activeRoute;
+    persistActiveRoute(cli, getProviderRecordsForCli(all, cli));
     _writeAll(all);
     return true;
   }
 
   /** 设为活跃 Provider */
-  function setActive(cliId, providerId) {
+  function setActive(cliId, providerId, modelId = null) {
     const all = _readAll();
     const cli = _ensureCli(all, cliId);
-    if (!cli.providers.find(x => x.id === providerId)) return false;
+    const providerRecords = getProviderRecordsForCli(all, cli);
+    const record = findProviderRecord(providerRecords, providerId);
+    const provider = record?.provider;
+    if (!provider) return false;
+    const { models, activeModelId } = normalizeProviderModels(provider);
+    const selectedModelId = models.some((model) => model.id === modelId) ? modelId : activeModelId;
     cli.activeProviderId = providerId;
+    cli.activeRoute = { providerId, modelId: selectedModelId || null };
     _writeAll(all);
     return true;
+  }
+
+  /** 设为活跃 Route（Provider + Model Profile） */
+  function setRoute(cliId, route) {
+    const all = _readAll();
+    const cli = _ensureCli(all, cliId);
+    const activeRoute = normalizeRoute(route, getProviderRecordsForCli(all, cli), cli.activeProviderId);
+    if (!activeRoute) return false;
+    cli.activeProviderId = activeRoute.providerId;
+    cli.activeRoute = activeRoute;
+    _writeAll(all);
+    return activeRoute;
   }
 
   /** 获取所有 CLI 的摘要（前端 scan 用） */
@@ -1211,16 +1663,32 @@ function createProxyConfigStore(dataDir) {
     const all = _readAll();
     const result = {};
     for (const [cliId, cli] of Object.entries(all)) {
-      const active = (cli.providers || []).find(p => p.id === cli.activeProviderId) || (cli.providers || [])[0];
+      if (!isCliEntry(cliId, cli)) continue;
+      const providerRecords = getProviderRecordsForCli(all, cli);
+      const active = getRoutedProvider(cli, providerRecords);
       result[cliId] = {
-        providerCount: (cli.providers || []).length,
-        activeProvider: active ? { name: active.name, model: active.model, upstreamProtocol: active.upstreamProtocol, apiKeySet: Boolean(active.apiKey) } : null,
+        providerCount: providerRecords.length,
+        activeProvider: active ? {
+          name: active.name,
+          model: active.model,
+          upstreamProtocol: active.upstreamProtocol,
+          apiKeySet: Boolean(active.apiKey),
+          contextTokenLimit: active.contextTokenLimit || null,
+          maxOutputTokens: active.maxOutputTokens || null,
+          activeModelId: active.activeModelId || null,
+          activeRoute: active.activeRoute || null,
+        } : null,
       };
     }
     return result;
   }
 
-  return { listProviders, getActiveProvider, addProvider, updateProvider, deleteProvider, setActive, getAllSummary, maskKey };
+  return { listProviders, getActiveProvider, getProvider, addProvider, copyProvider, updateProvider, deleteProvider, setActive, setRoute, getAllSummary, maskKey };
 }
 
-module.exports = { createProxyRouter, createProxyConfigStore };
+module.exports = {
+  createProxyRouter,
+  createProxyConfigStore,
+  buildAnthropicProxyModelList,
+  buildOpenAIProxyModelList,
+};

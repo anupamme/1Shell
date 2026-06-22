@@ -25,13 +25,30 @@ export interface AgentSession {
   xterm: AgentXtermInstance;
 }
 
+export interface ProviderModelMeta {
+  id: string;
+  apiModel: string;
+  displayName?: string;
+  enabled?: boolean;
+}
+
 export interface ProviderMeta {
   id: string;
   label: string;
   configured: boolean;
   isDefault?: boolean;
+  activeProviderId?: string;
   activeProviderName?: string;
+  activeModelId?: string | null;
   model?: string;
+  models?: ProviderModelMeta[];
+}
+
+export interface AgentModelOption {
+  id: string;
+  label: string;
+  apiModel: string;
+  active: boolean;
 }
 
 export interface AgentPanelApi {
@@ -40,6 +57,7 @@ export interface AgentPanelApi {
   readonly statusText: Ref<string>;
   readonly providers: Ref<ProviderMeta[]>;
   readonly selectedProviderId: Ref<string>;
+  readonly activeModelOptions: ComputedRef<AgentModelOption[]>;
   readonly mcpConfigured: Ref<boolean>;
   readonly hasSessions: ComputedRef<boolean>;
 
@@ -51,6 +69,7 @@ export interface AgentPanelApi {
   closeSession(sessionKey: string): void;
   newSession(): Promise<void>;
   setSelectedProvider(providerId: string): void;
+  setSelectedModel(modelId: string): Promise<void>;
   setupMcp(): Promise<void>;
 }
 
@@ -84,6 +103,32 @@ function create(): AgentPanelApi {
   const mcpConfigured = ref(false);
 
   const hasSessions = computed(() => sessions.value.size > 0);
+  const activeModelOptions = computed<AgentModelOption[]>(() => {
+    const provider = providers.value.find((p) => p.id === selectedProviderId.value);
+    if (!provider) return [];
+    const models = (provider.models || [])
+      .filter((model) => model.enabled !== false && (model.apiModel || model.displayName || model.id))
+      .map((model) => {
+        const apiModel = model.apiModel || provider.model || '';
+        const label = model.displayName || apiModel || model.id;
+        return {
+          id: model.id || apiModel,
+          label,
+          apiModel,
+          active: Boolean(provider.activeModelId && model.id === provider.activeModelId) || (!provider.activeModelId && apiModel === provider.model),
+        };
+      });
+    if (models.length > 0) return models;
+    if (provider.model) {
+      return [{
+        id: provider.activeModelId || 'default',
+        label: provider.model,
+        apiModel: provider.model,
+        active: true,
+      }];
+    }
+    return [];
+  });
 
   let sessionCounter = 0;
   let socketBound = false;
@@ -294,8 +339,7 @@ function create(): AgentPanelApi {
 
     if (selected.configured) {
       const channel = selected.activeProviderName || '已配置渠道';
-      const model = selected.model ? ` · ${selected.model}` : '';
-      setStatus(`就绪 · ${channel}${model}`);
+      setStatus(`就绪 · ${channel}`);
       return;
     }
 
@@ -433,6 +477,38 @@ function create(): AgentPanelApi {
     void checkMcpStatus();
   }
 
+  async function setSelectedModel(modelId: string): Promise<void> {
+    const provider = providers.value.find((p) => p.id === selectedProviderId.value);
+    if (!provider?.activeProviderId) {
+      throw new Error('当前 CLI 没有可切换的活跃 API 渠道');
+    }
+    const option = activeModelOptions.value.find((item) => item.id === modelId);
+    if (!option) {
+      throw new Error('模型档案不存在');
+    }
+    if (option.active) return;
+
+    const res = await fetch(`/api/agent/providers/${encodeURIComponent(selectedProviderId.value)}/${encodeURIComponent(provider.activeProviderId)}/activate`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-csrf-token': getCsrfToken() },
+      body: JSON.stringify({ modelId }),
+    });
+    const json = await res.json() as { ok?: boolean; error?: string };
+    if (!json.ok) throw new Error(json.error || '模型切换失败');
+
+    await loadProviders(true);
+    const next = providers.value.find((p) => p.id === selectedProviderId.value);
+    const active = (next?.models || []).find((model) => model.id === modelId);
+    const label = active?.displayName || active?.apiModel || option.label;
+    appendSystemLine(`[1Shell] 模型已切换: ${label}`);
+    const activeSess = activeSessionKey.value ? sessions.value.get(activeSessionKey.value) : null;
+    if (activeSess?.status === 'ready' || activeSess?.status === 'starting') {
+      setStatus(`运行中 · ${next?.activeProviderName || next?.label || selectedProviderId.value}`);
+    } else {
+      syncProviderRuntimeStatus(providers.value);
+    }
+  }
+
   async function setupMcp(): Promise<void> {
     const meta = providers.value.find((p) => p.id === selectedProviderId.value);
     const label = meta?.label || selectedProviderId.value;
@@ -500,6 +576,7 @@ function create(): AgentPanelApi {
     statusText,
     providers,
     selectedProviderId,
+    activeModelOptions,
     mcpConfigured,
     hasSessions,
     initialize,
@@ -510,6 +587,7 @@ function create(): AgentPanelApi {
     closeSession,
     newSession,
     setSelectedProvider,
+    setSelectedModel,
     setupMcp,
   };
 }

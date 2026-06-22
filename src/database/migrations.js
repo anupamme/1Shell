@@ -513,6 +513,15 @@ const migrations = [
       `);
     },
   },
+  {
+    version: 14,
+    name: 'ide sessions: workspace host scope',
+    up(db) {
+      if (!columnExists(db, 'ide_sessions', 'workspace_hosts_json')) {
+        db.exec("ALTER TABLE ide_sessions ADD COLUMN workspace_hosts_json TEXT NOT NULL DEFAULT '[]'");
+      }
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

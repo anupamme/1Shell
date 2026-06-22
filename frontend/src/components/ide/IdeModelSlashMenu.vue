@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import AppIcon from '@/components/AppIcon.vue';
-import type { AgentModelProvider } from '@/composables/useAgentModelProviders';
+import type { AgentModelOption } from '@/composables/useAgentModelProviders';
 
 withDefaults(defineProps<{
-  providers: AgentModelProvider[];
-  activeProviderId?: string | null;
+  options: AgentModelOption[];
+  activeModelKey?: string | null;
   highlighted?: number;
   density?: 'full' | 'compact';
   loading?: boolean;
 }>(), {
-  activeProviderId: null,
+  activeModelKey: null,
   highlighted: 0,
   density: 'full',
   loading: false,
@@ -17,8 +17,21 @@ withDefaults(defineProps<{
 
 const emit = defineEmits<{
   back: [];
-  select: [providerId: string | null];
+  select: [providerId: string | null, modelId?: string | null];
 }>();
+
+function fmtTokenLimit(value?: number | null): string {
+  if (!value) return '';
+  return value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
+}
+
+function modelMeta(option: AgentModelOption): string {
+  const parts = [option.providerName || '未命名渠道'];
+  if (option.apiModel && option.apiModel !== option.label) parts.push(option.apiModel);
+  if (option.contextTokenLimit) parts.push(`ctx ${fmtTokenLimit(option.contextTokenLimit)}`);
+  if (option.maxOutputTokens) parts.push(`out ${fmtTokenLimit(option.maxOutputTokens)}`);
+  return parts.join(' · ');
+}
 </script>
 
 <template>
@@ -35,33 +48,33 @@ const emit = defineEmits<{
       @mousedown.prevent
       @click="emit('select', null)"
     >
-      <span class="ide-model-slash-dot" :class="{ 'ide-model-slash-dot--on': !activeProviderId }"></span>
+      <span class="ide-model-slash-dot" :class="{ 'ide-model-slash-dot--on': !activeModelKey }"></span>
       <span class="ide-model-slash-copy">
         <strong>默认模型</strong>
         <span>系统默认路由</span>
       </span>
     </button>
 
-    <div v-if="providers.length" class="ide-model-slash-divider"></div>
+    <div v-if="options.length" class="ide-model-slash-divider"></div>
 
     <button
-      v-for="(provider, index) in providers"
-      :key="provider.id"
+      v-for="(option, index) in options"
+      :key="option.key"
       type="button"
       class="ide-model-slash-option"
       :class="{ 'ide-model-slash-option--active': highlighted === index + 1 }"
       @mousedown.prevent
-      @click="emit('select', provider.id)"
+      @click="emit('select', option.providerId, option.modelId)"
     >
-      <span class="ide-model-slash-dot" :class="{ 'ide-model-slash-dot--on': provider.id === activeProviderId }"></span>
+      <span class="ide-model-slash-dot" :class="{ 'ide-model-slash-dot--on': option.key === activeModelKey }"></span>
       <span class="ide-model-slash-copy">
-        <strong>{{ provider.model || '未指定模型' }}</strong>
-        <span>{{ provider.name }}</span>
+        <strong>{{ option.label || '未指定模型' }}</strong>
+        <span>{{ modelMeta(option) }}</span>
       </span>
     </button>
 
     <div v-if="loading" class="ide-model-slash-empty">读取模型配置中...</div>
-    <div v-else-if="!providers.length" class="ide-model-slash-empty">暂无可用模型，前往 AI 配置添加渠道</div>
+    <div v-else-if="!options.length" class="ide-model-slash-empty">暂无可用模型，前往 AI 配置添加渠道</div>
   </div>
 </template>
 

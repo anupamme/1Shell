@@ -2696,6 +2696,29 @@
   outline: none;
 }
 .dark .agent-provider-select { background: #0f172a; border-color: #1e293b; color: #e2e8f0; }
+.agent-model-select {
+  flex: 0 1 220px;
+  min-width: 140px;
+  max-width: 240px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid #dbeafe;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+}
+.agent-model-select:disabled {
+  opacity: .55;
+  cursor: default;
+}
+.dark .agent-model-select {
+  background: rgba(14, 165, 233, .10);
+  border-color: rgba(56, 189, 248, .22);
+  color: #bae6fd;
+}
 .agent-setup-btn {
   color: #a78bfa;
   font-size: 12px;

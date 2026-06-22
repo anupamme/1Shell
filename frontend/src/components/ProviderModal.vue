@@ -8,6 +8,8 @@ import {
   PRESET_CATEGORY_LABELS,
   REASONING_EFFORT_OPTIONS,
   type ProviderInfo,
+  type ProviderModelInfo,
+  type ProviderRouteInfo,
   type ProvidersResponse,
   type ProviderPreset,
   type PresetCategory,
@@ -21,6 +23,17 @@ interface Props {
   cliName?: string;
   supportedUpstream: UpstreamProtocol[];
   launchCommand?: string;
+  editProviderId?: string | null;
+}
+
+interface ProviderModelForm {
+  id: string;
+  apiModel: string;
+  displayName: string;
+  reasoningEffort: ReasoningEffort;
+  contextTokenLimit: string;
+  maxOutputTokens: string;
+  enabled: boolean;
 }
 
 const props = defineProps<Props>();
@@ -34,7 +47,7 @@ const { requestJson } = useApiClient();
 const notify = useNotifyStore();
 
 const providers = ref<ProviderInfo[]>([]);
-const activeProviderId = ref<string | undefined>(undefined);
+const activeRoute = ref<ProviderRouteInfo | null>(null);
 const loadingList = ref(false);
 const listError = ref<string | null>(null);
 
@@ -44,12 +57,77 @@ const fUpstream = ref<UpstreamProtocol>('openai');
 const fApiBase = ref('');
 const fApiKey = ref('');
 const fApiKeyPlaceholder = ref('sk-...');
-const fModel = ref('');
-const fReasoningEffort = ref<ReasoningEffort>('auto');
+const fModels = ref<ProviderModelForm[]>([]);
+const fActiveModelId = ref<string | null>(null);
 const fPresetId = ref('');
 const statusText = ref('');
 const statusOk = ref<boolean | null>(null);
 const saving = ref(false);
+let draftModelSeq = 0;
+
+function createDraftModelId(): string {
+  draftModelSeq += 1;
+  return `model-${Date.now().toString(36)}-${draftModelSeq}`;
+}
+
+function createModelForm(model?: ProviderModelInfo): ProviderModelForm {
+  return {
+    id: model?.id || createDraftModelId(),
+    apiModel: model?.apiModel || '',
+    displayName: model?.displayName || model?.apiModel || '',
+    reasoningEffort: model?.reasoningEffort || 'auto',
+    contextTokenLimit: model?.contextTokenLimit ? String(model.contextTokenLimit) : '',
+    maxOutputTokens: model?.maxOutputTokens ? String(model.maxOutputTokens) : '',
+    enabled: model?.enabled !== false,
+  };
+}
+
+function ensureActiveModelForm(): ProviderModelForm {
+  if (fModels.value.length === 0) {
+    const model = createModelForm();
+    fModels.value = [model];
+    fActiveModelId.value = model.id;
+    return model;
+  }
+  const active = fModels.value.find((model) => model.id === fActiveModelId.value) || fModels.value[0];
+  fActiveModelId.value = active.id;
+  return active;
+}
+
+const activeModelForm = computed<ProviderModelForm | null>(() => (
+  fModels.value.find((model) => model.id === fActiveModelId.value) || fModels.value[0] || null
+));
+
+const fModel = computed<string>({
+  get: () => activeModelForm.value?.apiModel || '',
+  set: (value) => {
+    const model = ensureActiveModelForm();
+    const previousApiModel = model.apiModel.trim();
+    const previousDisplayName = model.displayName.trim();
+    model.apiModel = value;
+    if (!previousDisplayName || previousDisplayName === previousApiModel) model.displayName = value;
+  },
+});
+
+const fModelDisplayName = computed<string>({
+  get: () => activeModelForm.value?.displayName || '',
+  set: (value) => { ensureActiveModelForm().displayName = value; },
+});
+
+const fReasoningEffort = computed<ReasoningEffort>({
+  get: () => activeModelForm.value?.reasoningEffort || 'auto',
+  set: (value) => { ensureActiveModelForm().reasoningEffort = value; },
+});
+
+const fContextTokenLimit = computed<string>({
+  get: () => activeModelForm.value?.contextTokenLimit || '',
+  set: (value) => { ensureActiveModelForm().contextTokenLimit = value; },
+});
+
+const fMaxOutputTokens = computed<string>({
+  get: () => activeModelForm.value?.maxOutputTokens || '',
+  set: (value) => { ensureActiveModelForm().maxOutputTokens = value; },
+});
 
 // Provider preset 库(添加模式下用)
 const presetsAll = ref<ProviderPreset[]>([]);
@@ -123,6 +201,88 @@ function clearPreset(): void {
   presetsCollapsed.value = false;
 }
 
+function fallbackProviderModels(p: ProviderInfo): ProviderModelInfo[] {
+  if (p.models?.length) return p.models;
+  return [{
+    id: p.activeModelId || 'default',
+    apiModel: p.model || '',
+    displayName: p.model || '',
+    enabled: true,
+    reasoningEffort: p.reasoningEffort || 'auto',
+    contextTokenLimit: p.contextTokenLimit || null,
+    maxOutputTokens: p.maxOutputTokens || null,
+  }];
+}
+
+function modelProfileLabel(model: ProviderModelForm): string {
+  return model.displayName.trim() || model.apiModel.trim() || '未命名模型';
+}
+
+function modelProfileMeta(model: ProviderModelForm): string {
+  const parts = [model.apiModel.trim() || '未指定 API 名'];
+  if (model.reasoningEffort && model.reasoningEffort !== 'auto') parts.push(`reasoning ${model.reasoningEffort}`);
+  if (model.contextTokenLimit.trim()) parts.push(`ctx ${model.contextTokenLimit.trim()}`);
+  if (model.maxOutputTokens.trim()) parts.push(`out ${model.maxOutputTokens.trim()}`);
+  return parts.join(' · ');
+}
+
+function isRouteModel(modelId: string): boolean {
+  return Boolean(editingPid.value && activeRoute.value?.providerId === editingPid.value && activeRoute.value?.modelId === modelId);
+}
+
+function isPersistedModel(modelId: string): boolean {
+  const provider = providers.value.find((p) => p.id === editingPid.value);
+  return Boolean(provider?.models?.some((model) => model.id === modelId));
+}
+
+function selectModelProfile(id: string): void {
+  fActiveModelId.value = id;
+}
+
+function addModelProfile(): void {
+  const model = createModelForm();
+  fModels.value.push(model);
+  fActiveModelId.value = model.id;
+}
+
+function removeModelProfile(id: string): void {
+  if (fModels.value.length <= 1) {
+    const model = ensureActiveModelForm();
+    model.apiModel = '';
+    model.displayName = '';
+    model.reasoningEffort = 'auto';
+    model.contextTokenLimit = '';
+    model.maxOutputTokens = '';
+    model.enabled = true;
+    return;
+  }
+  const next = fModels.value.filter((model) => model.id !== id);
+  fModels.value = next;
+  if (fActiveModelId.value === id) fActiveModelId.value = next[0]?.id || null;
+}
+
+function parseOptionalPositiveIntegerInput(value: string, label: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^[1-9]\d*$/.test(trimmed)) throw new Error(`${label}必须是正整数`);
+  return Number(trimmed);
+}
+
+function serializeModelForms(): ProviderModelInfo[] {
+  return fModels.value.map((model) => {
+    const label = modelProfileLabel(model);
+    return {
+      id: model.id || createDraftModelId(),
+      apiModel: model.apiModel.trim(),
+      displayName: model.displayName.trim() || model.apiModel.trim(),
+      enabled: model.enabled,
+      reasoningEffort: model.reasoningEffort || 'auto',
+      contextTokenLimit: parseOptionalPositiveIntegerInput(model.contextTokenLimit, `模型「${label}」上下文 Token 上限`),
+      maxOutputTokens: parseOptionalPositiveIntegerInput(model.maxOutputTokens, `模型「${label}」最大输出 Token`),
+    };
+  });
+}
+
 const isSkillsSlot = computed(() => props.cliId === SKILLS_SLOT_ID);
 const isCodex = computed(() => props.cliId === 'codex');
 const title = computed(() => {
@@ -166,8 +326,9 @@ function resetFormToAdd(): void {
   fApiBase.value = '';
   fApiKey.value = '';
   fApiKeyPlaceholder.value = 'sk-...';
-  fModel.value = '';
-  fReasoningEffort.value = 'auto';
+  const model = createModelForm();
+  fModels.value = [model];
+  fActiveModelId.value = model.id;
   fPresetId.value = '';
   presetsCollapsed.value = false;
   statusText.value = '';
@@ -181,39 +342,80 @@ function startEdit(p: ProviderInfo): void {
   fApiBase.value = p.apiBase || '';
   fApiKey.value = '';
   fApiKeyPlaceholder.value = p.apiKeySet ? (p.apiKey || '已设置') : 'sk-...';
-  fModel.value = p.model || '';
-  fReasoningEffort.value = (p.reasoningEffort as ReasoningEffort) || 'auto';
+  fModels.value = fallbackProviderModels(p).map(createModelForm);
+  fActiveModelId.value = p.activeModelId || fModels.value[0]?.id || null;
   fPresetId.value = p.presetId || '';
   presetsCollapsed.value = true;
   statusText.value = '';
   statusOk.value = null;
 }
 
-async function loadProviders(): Promise<void> {
-  if (!props.cliId) return;
+async function loadProviders(): Promise<ProviderInfo[]> {
+  if (!props.cliId) return [];
   loadingList.value = true;
   listError.value = null;
   try {
     const resp = await requestJson<ProvidersResponse>(`/api/agent/providers/${encodeURIComponent(props.cliId)}`);
     providers.value = resp.providers || [];
-    activeProviderId.value = resp.activeProviderId;
+    activeRoute.value = resp.activeRoute || null;
+    return providers.value;
   } catch (err) {
     listError.value = err instanceof Error ? err.message : String(err);
     providers.value = [];
+    activeRoute.value = null;
+    return [];
   } finally {
     loadingList.value = false;
   }
 }
 
+function applyRequestedMode(providerId = props.editProviderId || null): void {
+  if (!providerId) {
+    resetFormToAdd();
+    return;
+  }
+  const provider = providers.value.find((item) => item.id === providerId);
+  if (provider) {
+    startEdit(provider);
+    return;
+  }
+  resetFormToAdd();
+  statusText.value = '✗ 未找到要编辑的渠道，可能已经被删除';
+  statusOk.value = false;
+}
+
+async function prepareModal(): Promise<void> {
+  providers.value = [];
+  activeRoute.value = null;
+  listError.value = null;
+  resetFormToAdd();
+  await Promise.all([loadProviders(), loadPresetsIfNeeded()]);
+  applyRequestedMode();
+}
+
 async function onSave(): Promise<void> {
   if (!props.cliId) return;
-  const body: Record<string, string | boolean | undefined> = {
+  let modelProfiles: ProviderModelInfo[];
+  try {
+    modelProfiles = serializeModelForms();
+  } catch (err) {
+    statusText.value = `✗ ${err instanceof Error ? err.message : String(err)}`;
+    statusOk.value = false;
+    return;
+  }
+  const activeModel = modelProfiles.find((model) => model.id === fActiveModelId.value) || modelProfiles[0] || null;
+
+  const body: Record<string, unknown> = {
     name: fName.value.trim() || undefined,
     upstreamProtocol: fUpstream.value,
     apiBase: fApiBase.value.trim(),
     apiKey: fApiKey.value.trim() || undefined,
-    model: fModel.value.trim() || undefined,
-    reasoningEffort: fReasoningEffort.value,
+    model: activeModel?.apiModel || undefined,
+    reasoningEffort: activeModel?.reasoningEffort || 'auto',
+    contextTokenLimit: activeModel?.contextTokenLimit ?? null,
+    maxOutputTokens: activeModel?.maxOutputTokens ?? null,
+    models: modelProfiles,
+    activeModelId: activeModel?.id || null,
     presetId: fPresetId.value || '',
     enabled: (editingPid.value ? providers.value.find(p => p.id === editingPid.value) : null)?.enabled,
   };
@@ -230,6 +432,7 @@ async function onSave(): Promise<void> {
   }
 
   saving.value = true;
+  const wasEditing = Boolean(editingPid.value);
   try {
     if (editingPid.value) {
       await requestJson(`/api/agent/providers/${encodeURIComponent(props.cliId)}/${editingPid.value}`, {
@@ -249,7 +452,8 @@ async function onSave(): Promise<void> {
     statusOk.value = true;
     await loadProviders();
     emit('changed');
-    resetFormToAdd();
+    if (wasEditing) close();
+    else resetFormToAdd();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     statusText.value = `✗ 保存失败: ${msg}`;
@@ -260,28 +464,16 @@ async function onSave(): Promise<void> {
   }
 }
 
-async function onActivate(pid: string): Promise<void> {
+async function onActivate(pid: string, modelId?: string): Promise<void> {
   if (!props.cliId) return;
   try {
-    await requestJson(`/api/agent/providers/${encodeURIComponent(props.cliId)}/${pid}/activate`, { method: 'PUT' });
+    await requestJson(`/api/agent/providers/${encodeURIComponent(props.cliId)}/${pid}/activate`, {
+      method: 'PUT',
+      body: JSON.stringify(modelId ? { modelId } : {}),
+    });
     notify.success('已切换活跃渠道');
     await loadProviders();
     emit('changed');
-  } catch (err) {
-    notify.error(err instanceof Error ? err.message : String(err), 5000);
-  }
-}
-
-async function onDelete(pid: string): Promise<void> {
-  if (!props.cliId) return;
-  const p = providers.value.find((x) => x.id === pid);
-  if (!window.confirm(`确定删除渠道「${p?.name || pid}」？`)) return;
-  try {
-    await requestJson(`/api/agent/providers/${encodeURIComponent(props.cliId)}/${pid}`, { method: 'DELETE' });
-    notify.success('已删除');
-    await loadProviders();
-    emit('changed');
-    if (editingPid.value === pid) resetFormToAdd();
   } catch (err) {
     notify.error(err instanceof Error ? err.message : String(err), 5000);
   }
@@ -303,22 +495,18 @@ async function copyLaunchCmd(): Promise<void> {
 
 watch(() => props.open, async (v) => {
   if (v && props.cliId) {
-    providers.value = [];
-    activeProviderId.value = undefined;
-    listError.value = null;
-    resetFormToAdd();
-    await Promise.all([loadProviders(), loadPresetsIfNeeded()]);
+    await prepareModal();
   }
 });
 
 watch(() => props.cliId, async (newId, oldId) => {
   if (props.open && newId && newId !== oldId) {
-    providers.value = [];
-    activeProviderId.value = undefined;
-    listError.value = null;
-    resetFormToAdd();
-    await Promise.all([loadProviders(), loadPresetsIfNeeded()]);
+    await prepareModal();
   }
+});
+
+watch(() => props.editProviderId, (newId, oldId) => {
+  if (props.open && newId !== oldId) applyRequestedMode();
 });
 </script>
 
@@ -328,7 +516,7 @@ watch(() => props.cliId, async (newId, oldId) => {
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
     @click="onBackdropClick"
   >
-    <div class="w-[580px] max-h-[90vh] overflow-y-auto bg-white dark:bg-[#111827] rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700">
+    <div class="w-[640px] max-h-[90vh] overflow-y-auto bg-white dark:bg-[#111827] rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700">
       <!-- 头 -->
       <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-700">
         <div>
@@ -338,51 +526,11 @@ watch(() => props.cliId, async (newId, oldId) => {
         <button type="button" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 text-sm" @click="close">✕</button>
       </div>
 
-      <!-- Provider 列表 -->
-      <div class="px-5 pt-4 pb-2">
-        <div class="flex items-center justify-between mb-2">
-          <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">API 渠道列表</span>
-          <button type="button" class="h-6 px-2.5 rounded-md bg-cyan-50 border border-cyan-200 text-cyan-600 text-[10px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" @click="resetFormToAdd">+ 添加渠道</button>
-        </div>
-        <div class="flex flex-col gap-1.5 max-h-36 overflow-y-auto">
-          <div v-if="loadingList" class="text-[10px] text-slate-400 text-center py-3">加载中...</div>
-          <div v-else-if="listError" class="text-[10px] text-red-500 py-2">加载失败: {{ listError }}</div>
-          <div v-else-if="providers.length === 0" class="text-[10px] text-slate-400 text-center py-3">尚未添加任何 API 渠道</div>
-          <div
-            v-for="p in providers"
-            v-else
-            :key="p.id"
-            class="flex items-center gap-2 px-3 py-2 rounded-lg border text-xs"
-            :class="p.id === activeProviderId
-              ? 'border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20'
-              : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-[#0b1324]'"
-          >
-            <div class="flex-1 min-w-0">
-              <div class="font-semibold text-slate-700 dark:text-slate-200 truncate">
-                <span v-if="p.id === activeProviderId" class="text-emerald-500 mr-1">●</span>
-                <span v-else class="text-slate-300 mr-1">○</span>
-                {{ p.name || '未命名' }}
-              </div>
-              <div class="text-[10px] text-slate-400 truncate">
-                {{ UPSTREAM_LABELS[p.upstreamProtocol] || p.upstreamProtocol || 'openai' }}
-                · {{ p.model || '默认模型' }}
-                · {{ p.apiKeySet ? 'Key ✓' : 'Key ✗' }}
-              </div>
-            </div>
-            <div class="flex items-center gap-1 shrink-0">
-              <button v-if="p.id !== activeProviderId" type="button" class="h-6 px-1.5 rounded text-[10px] border border-emerald-200 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-500/10" title="设为活跃" @click="onActivate(p.id)">启用</button>
-              <button type="button" class="h-6 px-1.5 rounded text-[10px] border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800" title="编辑" @click="startEdit(p)">编辑</button>
-              <button type="button" class="h-6 px-1.5 rounded text-[10px] border border-red-200 dark:border-red-500/30 text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10" title="删除" @click="onDelete(p.id)">✕</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 分割线 -->
-      <div class="mx-5 h-px bg-slate-100 dark:bg-slate-700"></div>
-
       <!-- 表单 -->
       <div class="px-5 py-4 flex flex-col gap-3">
+        <div v-if="loadingList" class="text-[10px] text-slate-400">正在加载渠道配置...</div>
+        <div v-else-if="listError" class="text-[10px] text-red-500">加载失败: {{ listError }}</div>
+
         <div class="flex items-center gap-2">
           <span class="text-[11px] font-bold text-slate-600 dark:text-slate-300">{{ formLabel }}</span>
           <span v-if="editingPid" class="text-[9px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-300 font-semibold">编辑中</span>
@@ -442,15 +590,70 @@ watch(() => props.cliId, async (newId, oldId) => {
           <label class="text-[10px] font-semibold text-slate-400 uppercase">API Key</label>
           <input v-model="fApiKey" type="password" :placeholder="fApiKeyPlaceholder" class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400" />
         </div>
+
+        <!-- Model profiles -->
         <div class="flex flex-col gap-1.5">
-          <label class="text-[10px] font-semibold text-slate-400 uppercase">目标模型</label>
-          <input
-            v-model="fModel"
-            type="text"
-            placeholder="gpt-4o / deepseek-chat"
-            list="provider-modal-model-suggestions"
-            class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
-          />
+          <div class="flex items-center justify-between">
+            <label class="text-[10px] font-semibold text-slate-400 uppercase">模型档案</label>
+            <button type="button" class="h-6 px-2 rounded-md border border-cyan-200 text-cyan-600 dark:border-cyan-500/30 dark:text-cyan-300 text-[10px] font-semibold hover:bg-cyan-50 dark:hover:bg-cyan-500/10" @click="addModelProfile">+ 添加模型</button>
+          </div>
+          <div class="flex flex-col gap-1 max-h-32 overflow-y-auto">
+            <div
+              v-for="model in fModels"
+              :key="model.id"
+              role="button"
+              tabindex="0"
+              class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg border text-left cursor-pointer"
+              :class="model.id === fActiveModelId
+                ? 'border-cyan-300 bg-cyan-50 dark:bg-cyan-500/10 dark:border-cyan-500/30'
+                : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] hover:border-cyan-300'"
+              @click="selectModelProfile(model.id)"
+              @keydown.enter.prevent="selectModelProfile(model.id)"
+              @keydown.space.prevent="selectModelProfile(model.id)"
+            >
+              <span class="w-2 h-2 rounded-full shrink-0" :class="model.id === fActiveModelId ? 'bg-cyan-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
+              <span class="flex-1 min-w-0">
+                <span class="block text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate">{{ modelProfileLabel(model) }}</span>
+                <span class="block text-[10px] text-slate-400 truncate">{{ modelProfileMeta(model) }}</span>
+              </span>
+              <span v-if="isRouteModel(model.id)" class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300 font-semibold">入口</span>
+              <span v-else-if="model.id === fActiveModelId" class="text-[9px] px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-300 font-semibold">当前</span>
+              <button
+                v-if="editingPid && isPersistedModel(model.id) && !isRouteModel(model.id)"
+                type="button"
+                class="h-6 px-1.5 rounded text-[10px] border border-emerald-200 dark:border-emerald-500/30 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10"
+                title="设为此入口使用的模型"
+                @click.stop="onActivate(editingPid, model.id)"
+              >
+                设为入口
+              </button>
+              <button type="button" class="h-6 px-1.5 rounded text-[10px] border border-red-200 dark:border-red-500/30 text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10" title="删除模型档案" @click.stop="removeModelProfile(model.id)">✕</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[10px] font-semibold text-slate-400 uppercase">显示名称</label>
+            <input
+              v-model="fModelDisplayName"
+              type="text"
+              placeholder="例：GPT-5 High"
+              class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[10px] font-semibold text-slate-400 uppercase">模型 API 名称</label>
+            <input
+              v-model="fModel"
+              type="text"
+              placeholder="gpt-4o / deepseek-chat"
+              list="provider-modal-model-suggestions"
+              class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
+            />
+          </div>
+        </div>
+        <div class="flex flex-col gap-1.5">
           <datalist v-if="activePreset && activePreset.models.length > 0" id="provider-modal-model-suggestions">
             <option v-for="m in activePreset.models" :key="m" :value="m" />
           </datalist>
@@ -488,6 +691,31 @@ watch(() => props.cliId, async (newId, oldId) => {
             <span v-if="isCodex">codex 通过 config.toml 配置;</span>
             <span v-else>请求时由 1Shell proxy 注入。</span>
           </div>
+        </div>
+
+        <!-- Shared model limits -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[10px] font-semibold text-slate-400 uppercase">上下文 Token 上限</label>
+            <input
+              v-model="fContextTokenLimit"
+              inputmode="numeric"
+              placeholder="例如 200000"
+              class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
+            />
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[10px] font-semibold text-slate-400 uppercase">最大输出 Token</label>
+            <input
+              v-model="fMaxOutputTokens"
+              inputmode="numeric"
+              placeholder="例如 8192"
+              class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
+            />
+          </div>
+        </div>
+        <div class="text-[10px] text-slate-400">
+          这两个字段随当前渠道保存；不同入口可以保留不同协议、模型映射和上下文策略。
         </div>
 
         <!-- 启动命令提示（仅 CLI 沙箱模式） -->

@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # ============================================================================
-#  1Shell 快速启动脚本
-#  用法: bash start.sh
+#  1Shell 快速启动脚�?#  用法: bash start.sh
 #  适用于已下载源码包的场景（非一键安装）
 # ============================================================================
 
@@ -27,14 +26,14 @@ fi
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         1Shell v4.2.4                          ║${NC}"
-echo -e "${GREEN}║     One Shell to rule them all.                ║${NC}"
+echo -e "${GREEN}�?        1Shell v4.3.0                          �?{NC}"
+echo -e "${GREEN}�?    One Shell to rule them all.                �?{NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# 检查 Node.js
+# 检�?Node.js
 if ! "$NODE_EXE" -v &>/dev/null; then
-  err "未检测到 Node.js，请先安装 Node.js 20 或 22"
+  err "未检测到 Node.js，请先安�?Node.js 20 �?22"
   err "安装方式: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt install -y nodejs"
   exit 1
 fi
@@ -42,14 +41,14 @@ fi
 NODE_VER=$("$NODE_EXE" -v | tr -d 'v')
 NODE_MAJOR=$(echo "$NODE_VER" | cut -d. -f1)
 if [[ "$NODE_MAJOR" -lt 20 || "$NODE_MAJOR" -ge 25 ]]; then
-  err "Node.js 版本不受支持 (v${NODE_VER})，需要 v20-v24"
+  err "Node.js 版本不受支持 (v${NODE_VER})，需�?v20-v24"
   exit 1
 fi
 log "Node.js v${NODE_VER} 已检测到"
 
 # 安装后端依赖
 if [[ ! -d "node_modules" ]]; then
-  log "首次运行，正在安装后端依赖..."
+  log "首次运行，正在安装后端依�?.."
   npm install
   log "后端依赖安装完成"
 fi
@@ -57,10 +56,10 @@ fi
 # 缺少生产前端包时自动构建
 if [[ ! -f "frontend/dist/index.html" ]]; then
   if [[ ! -f "frontend/package.json" ]]; then
-    err "frontend/package.json 不存在"
+    err "frontend/package.json 不存�?
     exit 1
   fi
-  log "未检测到前端构建产物，正在准备前端..."
+  log "未检测到前端构建产物，正在准备前�?.."
   pushd frontend >/dev/null
   if [[ ! -d "node_modules" ]]; then
     npm install
@@ -81,14 +80,14 @@ if [[ ! -f ".env" ]] && [[ -f ".env.example" ]]; then
   } >> .env
   log "Generated APP_SECRET for credential encryption"
   log "已从 .env.example 创建 .env 配置文件"
-  warn "请编辑 .env 设置登录密码和 API Key"
+  warn "请编�?.env 设置登录密码�?API Key"
   echo ""
 fi
 
 # 启动
 log "正在启动服务..."
-log "启动后访问: http://localhost:3301"
-log "默认账号: admin / admin（请在设置中修改）"
-log "按 Ctrl+C 停止服务"
+log "启动后访�? http://localhost:3301"
+log "默认账号: admin / admin（请在设置中修改�?
+log "�?Ctrl+C 停止服务"
 echo ""
 exec "$NODE_EXE" server.js

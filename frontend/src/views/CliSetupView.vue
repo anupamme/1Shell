@@ -43,6 +43,8 @@ const activeTabId = ref<string>(SKILLS_SLOT_ID);
 const providers = ref<ProviderInfo[]>([]);
 const activeProviderId = ref<string | null>(null);
 const loadingProviders = ref(false);
+const testingProviderIds = ref<Set<string>>(new Set());
+const copyingProviderIds = ref<Set<string>>(new Set());
 
 // CLI tabs
 const tools = ref<ToolInfo[]>([]);
@@ -53,6 +55,7 @@ const ensuringIds = ref<Set<string>>(new Set());
 // modal
 const modalOpen = ref(false);
 const modalCliId = ref<string | null>(null);
+const modalEditProviderId = ref<string | null>(null);
 
 // ── computed ──
 const activeTab = computed(() => TABS.find(t => t.id === activeTabId.value) || TABS[0]);
@@ -83,6 +86,21 @@ const modalProps = computed(() => {
 });
 
 const enabledCount = computed(() => providers.value.filter(p => p.enabled !== false).length);
+
+interface ProviderCopyResponse {
+  ok: boolean;
+  id: string;
+}
+
+interface ProviderTestResponse {
+  ok: boolean;
+  status?: number;
+  ms?: number;
+  probe?: string;
+  model?: string;
+  upstreamProtocol?: UpstreamProtocol;
+  error?: string;
+}
 
 // ── skills: providers ──
 async function loadProviders(cliId: string): Promise<void> {
@@ -131,7 +149,7 @@ async function deleteProvider(providerId: string): Promise<void> {
   const p = providers.value.find(x => x.id === providerId);
   const ok = await confirm({
     title: '删除渠道',
-    message: `确定删除渠道"${p?.name || providerId}"吗？此操作不可恢复。`,
+    message: `确定删除 ${activeTab.value.label} 的渠道"${p?.name || providerId}"吗？此操作不会影响其他入口。`,
   });
   if (!ok) return;
   try {
@@ -143,8 +161,53 @@ async function deleteProvider(providerId: string): Promise<void> {
   }
 }
 
+async function testProvider(p: ProviderInfo): Promise<void> {
+  if (testingProviderIds.value.has(p.id)) return;
+  setBusyFlag(testingProviderIds, p.id, true);
+  try {
+    const resp = await requestJson<ProviderTestResponse>(`/api/agent/providers/${encodeURIComponent(activeTabId.value)}/${encodeURIComponent(p.id)}/test`, {
+      method: 'POST',
+      body: JSON.stringify({ modelId: p.activeModelId || p.routeModelId || null }),
+    });
+    if (resp.ok) {
+      const ms = typeof resp.ms === 'number' ? ` · ${resp.ms}ms` : '';
+      notify.success(`${p.name || '渠道'} 测试通过${ms}`);
+    } else {
+      notify.error(resp.error || '测试失败', 8000);
+    }
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : String(err), 8000);
+  } finally {
+    setBusyFlag(testingProviderIds, p.id, false);
+  }
+}
+
+async function copyProvider(p: ProviderInfo): Promise<void> {
+  if (copyingProviderIds.value.has(p.id)) return;
+  setBusyFlag(copyingProviderIds, p.id, true);
+  try {
+    await requestJson<ProviderCopyResponse>(`/api/agent/providers/${encodeURIComponent(activeTabId.value)}/${encodeURIComponent(p.id)}/copy`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    notify.success(`${p.name || '渠道'} 已复制为 ${p.name || 'Provider'}-copy`);
+    await loadProviders(activeTabId.value);
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : String(err), 8000);
+  } finally {
+    setBusyFlag(copyingProviderIds, p.id, false);
+  }
+}
+
 function openAddModal(): void {
   modalCliId.value = activeTabId.value;
+  modalEditProviderId.value = null;
+  modalOpen.value = true;
+}
+
+function openEditModal(providerId: string): void {
+  modalCliId.value = activeTabId.value;
+  modalEditProviderId.value = providerId;
   modalOpen.value = true;
 }
 
@@ -315,6 +378,11 @@ function fmtBase(url: string): string {
   catch { return url.replace(/https?:\/\//, '').replace(/\/+$/, ''); }
 }
 
+function fmtTokenLimit(value?: number | null): string {
+  if (!value) return '';
+  return value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
+}
+
 // ── lifecycle ──
 function switchTab(cliId: string): void {
   if (activeTabId.value === cliId) return;
@@ -397,12 +465,12 @@ onMounted(() => {
             <div
               v-for="p in providers"
               :key="p.id"
-              class="flex items-center gap-4 px-4 py-3 rounded-xl border transition-colors group cursor-pointer"
+              class="flex items-center gap-4 px-5 py-4 rounded-xl border bg-white dark:bg-[#101827] shadow-sm transition-all group cursor-pointer"
               :class="p.id === activeProviderId
-                ? 'border-emerald-300 dark:border-emerald-500/30 bg-emerald-50/30 dark:bg-emerald-500/[0.03]'
+                ? 'border-emerald-300 dark:border-emerald-500/40 bg-emerald-50/50 dark:bg-emerald-500/[0.06] ring-1 ring-emerald-200/70 dark:ring-emerald-500/20 shadow-[0_10px_24px_rgba(15,118,110,0.08)]'
                 : (p.enabled !== false
-                  ? 'border-slate-200 dark:border-white/[0.06] hover:border-slate-300 dark:hover:border-white/[0.1]'
-                  : 'border-slate-100 dark:border-white/[0.03] opacity-60 hover:opacity-80')"
+                  ? 'border-slate-200 dark:border-white/[0.08] hover:border-slate-300 dark:hover:border-white/[0.14] hover:shadow-md'
+                  : 'border-slate-200/80 dark:border-white/[0.06] bg-slate-50/70 dark:bg-white/[0.025] hover:border-slate-300 dark:hover:border-white/[0.12]')"
               @click="setActive(p.id)"
             >
               <!-- enable toggle -->
@@ -433,27 +501,53 @@ onMounted(() => {
                   <span class="truncate">{{ p.model || '未指定模型' }}</span>
                   <span class="text-slate-300 dark:text-slate-700">·</span>
                   <span class="truncate">{{ fmtBase(p.apiBase || '') }}</span>
+                  <span v-if="p.contextTokenLimit" class="text-slate-300 dark:text-slate-700">·</span>
+                  <span v-if="p.contextTokenLimit" class="shrink-0">ctx {{ fmtTokenLimit(p.contextTokenLimit) }}</span>
+                  <span v-if="p.maxOutputTokens" class="text-slate-300 dark:text-slate-700">·</span>
+                  <span v-if="p.maxOutputTokens" class="shrink-0">out {{ fmtTokenLimit(p.maxOutputTokens) }}</span>
                   <span v-if="!p.apiKeySet" class="text-amber-500 dark:text-amber-400 shrink-0">· 未设 Key</span>
                 </div>
               </div>
 
               <!-- actions -->
-              <div class="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div class="shrink-0 flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50/80 dark:bg-white/[0.035] p-1 shadow-sm">
                 <button
                   type="button"
-                  class="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-sky-500 dark:hover:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
-                  title="编辑渠道"
-                  @click.stop="modalCliId = activeTabId; modalOpen = true"
+                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                  :disabled="testingProviderIds.has(p.id)"
+                  title="测试渠道"
+                  @click.stop="testProvider(p)"
                 >
-                  <AppIcon name="cog" :size="14" />
+                  <AppIcon name="radio" :size="13" />
+                  {{ testingProviderIds.has(p.id) ? '测试中' : '测试' }}
                 </button>
                 <button
                   type="button"
-                  class="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
+                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                  :disabled="copyingProviderIds.has(p.id)"
+                  title="复制渠道"
+                  @click.stop="copyProvider(p)"
+                >
+                  <AppIcon name="copy" :size="13" />
+                  {{ copyingProviderIds.has(p.id) ? '复制中' : '复制' }}
+                </button>
+                <button
+                  type="button"
+                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
+                  title="编辑渠道"
+                  @click.stop="openEditModal(p.id)"
+                >
+                  <AppIcon name="cog" :size="13" />
+                  设置
+                </button>
+                <button
+                  type="button"
+                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
                   title="删除渠道"
                   @click.stop="deleteProvider(p.id)"
                 >
-                  <AppIcon name="close" :size="14" />
+                  <AppIcon name="close" :size="13" />
+                  删除
                 </button>
               </div>
             </div>
@@ -589,10 +683,10 @@ onMounted(() => {
               <div
                 v-for="p in providers"
                 :key="p.id"
-                class="flex items-center gap-3 px-3 py-2 rounded-lg border transition-colors group cursor-pointer"
+                class="flex items-center gap-3 px-3.5 py-3 rounded-xl border bg-white dark:bg-[#101827] shadow-sm transition-all group cursor-pointer"
                 :class="p.id === activeProviderId
-                  ? 'border-emerald-300 dark:border-emerald-500/30 bg-emerald-50/30 dark:bg-emerald-500/[0.03]'
-                  : 'border-slate-100 dark:border-white/[0.04] hover:border-slate-200 dark:hover:border-white/[0.08]'"
+                  ? 'border-emerald-300 dark:border-emerald-500/40 bg-emerald-50/50 dark:bg-emerald-500/[0.06] ring-1 ring-emerald-200/60 dark:ring-emerald-500/20'
+                  : 'border-slate-200 dark:border-white/[0.08] hover:border-slate-300 dark:hover:border-white/[0.14] hover:shadow-md'"
                 @click="setActive(p.id)"
               >
                 <span class="w-2 h-2 rounded-full shrink-0" :class="p.id === activeProviderId ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
@@ -601,16 +695,52 @@ onMounted(() => {
                     <span class="text-xs font-medium text-slate-700 dark:text-slate-200 truncate">{{ p.name || '未命名' }}</span>
                     <span v-if="p.id === activeProviderId" class="text-[9px] px-1 rounded bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">活跃</span>
                   </div>
-                  <div class="text-[11px] text-slate-400 dark:text-slate-500 truncate">{{ p.model || '未指定模型' }} · {{ fmtBase(p.apiBase || '') }}</div>
+                  <div class="text-[11px] text-slate-400 dark:text-slate-500 truncate">
+                    {{ p.model || '未指定模型' }} · {{ fmtBase(p.apiBase || '') }}
+                    <span v-if="p.contextTokenLimit"> · ctx {{ fmtTokenLimit(p.contextTokenLimit) }}</span>
+                    <span v-if="p.maxOutputTokens"> · out {{ fmtTokenLimit(p.maxOutputTokens) }}</span>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  class="shrink-0 w-6 h-6 rounded flex items-center justify-center text-slate-300 dark:text-slate-600 hover:text-red-400 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
-                  title="删除"
-                  @click.stop="deleteProvider(p.id)"
-                >
-                  <AppIcon name="close" :size="12" />
-                </button>
+                <div class="shrink-0 flex items-center gap-1 rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50/80 dark:bg-white/[0.035] p-1 shadow-sm">
+                  <button
+                    type="button"
+                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                    :disabled="testingProviderIds.has(p.id)"
+                    title="测试渠道"
+                    @click.stop="testProvider(p)"
+                  >
+                    <AppIcon name="radio" :size="12" />
+                    {{ testingProviderIds.has(p.id) ? '测试中' : '测试' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                    :disabled="copyingProviderIds.has(p.id)"
+                    title="复制渠道"
+                    @click.stop="copyProvider(p)"
+                  >
+                    <AppIcon name="copy" :size="12" />
+                    {{ copyingProviderIds.has(p.id) ? '复制中' : '复制' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
+                    title="设置"
+                    @click.stop="openEditModal(p.id)"
+                  >
+                    <AppIcon name="cog" :size="12" />
+                    设置
+                  </button>
+                  <button
+                    type="button"
+                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
+                    title="删除"
+                    @click.stop="deleteProvider(p.id)"
+                  >
+                    <AppIcon name="close" :size="12" />
+                    删除
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -625,6 +755,7 @@ onMounted(() => {
       :cli-name="modalProps.cliName"
       :supported-upstream="modalProps.supportedUpstream"
       :launch-command="modalProps.launchCommand"
+      :edit-provider-id="modalEditProviderId"
       @changed="onModalChanged"
     />
   </div>
