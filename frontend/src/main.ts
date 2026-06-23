@@ -2,6 +2,7 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import App from './App.vue';
 import router from './router';
+import { setupMarkdownCodeCopy } from './utils/markdown';
 import './style.css';
 
 // 主题初始化：尊重 localStorage 设置 / 默认浅色
@@ -11,6 +12,8 @@ import './style.css';
   if (saved === 'dark') html.classList.add('dark');
   else html.classList.remove('dark');
 })();
+
+setupMarkdownCodeCopy();
 
 const app = createApp(App);
 app.use(createPinia());

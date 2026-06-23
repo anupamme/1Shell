@@ -365,7 +365,7 @@ async function onFetchModels(): Promise<void> {
 }
 
 function openMcpHub(): void {
-  void router.push('/mcp-hub');
+  void router.push('/config/mcp');
 }
 
 function onAiSubmit(e: Event): void {

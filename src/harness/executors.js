@@ -28,6 +28,7 @@ function createExecutors({ bridgeService, hostService, fallback = null } = {}) {
       const hostId = String(input.hostId || context.hostId || 'local').trim();
       const command = String(input.command || '').trim();
       const timeout = Number(input.timeout) > 0 ? Number(input.timeout) : undefined;
+      const env = context.env && typeof context.env === 'object' && !Array.isArray(context.env) ? context.env : {};
 
       if (!command) {
         return { stdout: '', stderr: 'command 为空', exitCode: 1, durationMs: 0 };
@@ -47,7 +48,7 @@ function createExecutors({ bridgeService, hostService, fallback = null } = {}) {
             durationMs: 0,
           };
         }
-        return execLocalCommand(isolatedCommand.command, { timeout: timeout || 30000, signal: context.signal, onOutput: context.onOutput });
+        return execLocalCommand(isolatedCommand.command, { timeout: timeout || 30000, signal: context.signal, onOutput: context.onOutput, env });
       }
 
       if (!bridgeService?.execOnHost) {
@@ -60,6 +61,8 @@ function createExecutors({ bridgeService, hostService, fallback = null } = {}) {
         auditCommand: context.auditCommand || isolatedCommand.command,
         signal: context.signal,
         onOutput: context.onOutput,
+        env,
+        secrets: context.secrets,
       });
     }
 

@@ -14,6 +14,7 @@ const {
   resolveAiSkillContext,
 } = require('../skills/ai-skill-resolver');
 const { formatOutputDiagnostics } = require('../utils/output-diagnostics');
+const { redactCredentialPatterns, redactPotentialSecrets } = require('../../lib/secret-redaction');
 const { canUseTool, createBudgetExceededResult } = require('../agent-runtime/budget');
 const {
   DEFAULT_IDE_AGENT_LIMITS,
@@ -633,7 +634,7 @@ const TASK_AUTHORING_SYSTEM_PROMPT = [
   '不要执行真正的变更操作（安装、写文件、删除、重启、部署等）；创作模式下这类变更/高危工具会被拒绝，这是正常的，继续用只读方式推演即可。',
   '探索清楚后，用 create_ai_task 保存任务：name + description + inputs（关键）+ 可选的 steps 提示。',
   'inputs 是会随主机或环境变化、需要用户填写的值，例如目标主机、域名、端口、仓库地址、服务名、密钥引用等；保持简单，不要设计 DSL、调度器、审批层或第二套 Agent。',
-  '需要密钥、token、密码时用 request_secret，只用 secret 引用，不要让用户在普通文本里粘贴明文。',
+  '需要密钥、token、密码时优先建议 request_secret/Secret 引用；如果用户明确选择直接提供明文，可以用于本次操作，但工具输入、审计和输出摘要必须脱敏。',
   '不必追求一次就完美：任务以后执行失败时，可以让那次执行的 1Shell AI 直接用 update_ai_task 修正任务。',
   'preview_ai_task 可先检查结构；create_ai_task / update_ai_task 是保存任务的唯一入口，不要把任务 JSON 直接贴给用户来代替保存。',
 ].join('\n');
@@ -910,8 +911,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   function redactAgentTraceValue(value) {
     try {
-      return JSON.parse(JSON.stringify(value || {}, (key, item) => {
-        if (/token|key|secret|password|auth|content|base64/i.test(key)) return '<redacted>';
+      return JSON.parse(JSON.stringify(redactPotentialSecrets(value || {}), (key, item) => {
+        if (/token|key|secret|password|auth|credential|content|base64|sensitive|redact/i.test(key)) return '<redacted>';
         if (typeof item === 'string' && item.length > 1000) return `${item.slice(0, 1000)}…`;
         return item;
       }));
@@ -1685,7 +1686,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
   function validateSecretRefForAgent(response = {}, input = {}) {
     const secretRef = normalizeSecretRefResponse(response);
     if (!secretRef) {
-      return { ok: false, error: '用户未提供 secret ref/id。请不要粘贴密钥明文，只提供已保存的 secret 引用。' };
+      return { ok: false, error: '此 Secret 工具只接收已保存的 secret ref/id。若你选择直接提供明文，请在普通对话中明确授权发送，AI 可用于本次操作并做记录脱敏。' };
     }
     if (!/^sec_[a-zA-Z0-9-]+$/.test(secretRef)) {
       return { ok: false, error: '输入不是有效的 secret ref/id。请先保存到 Secret Manager，再选择或填写 sec_ 开头的引用。' };
@@ -1757,7 +1758,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
         `需要 Secret 引用：${label}`,
         input.provider ? `平台/用途：${input.provider}` : '',
         input.reason ? `原因：${input.reason}` : '',
-        '请不要粘贴密钥明文。请先在 Secret Manager 中保存密钥，然后用“自定义回复”填入 secret ref/id。',
+        '此 Secret 工具只接收 Secret Manager 中已保存的 secret ref/id；如果你明确选择直接提供明文，请回到普通对话发送，AI 可用于本次操作并做记录脱敏。',
       ].filter(Boolean).join('\n');
     }
     const options = Array.isArray(input.options) ? input.options.map((item, index) => `${index + 1}. ${item}`).join('\n') : '';
@@ -1835,6 +1836,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
           sessionId,
           runId,
           requestId,
+          toolUseId: tc.id,
           toolName: tc.name,
           title: isSecret ? '需要 Secret 引用' : '需要补充信息',
           detail: userInterruptDetail(tc),
@@ -1893,11 +1895,12 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     const input = tc.input || {};
     switch (tc.name) {
       case 'execute_command':
+        const safeCommand = redactCredentialPatterns(String(input.command || ''));
         return {
           title: '执行命令',
-          detail: `主机: ${input.hostId || 'local'}\n命令: ${input.command || ''}`,
           actionKind: 'command',
-          actionText: String(input.command || ''),
+          detail: `host: ${input.hostId || 'local'}\ncommand: ${safeCommand}`,
+          actionText: safeCommand,
           hostId: input.hostId || 'local',
         };
       case 'create_directory':
@@ -2092,13 +2095,13 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
             toolUseId: tc.id,
             name: tc.name,
             stream: stream === 'stderr' ? 'stderr' : 'stdout',
-            text: String(text),
+            text: redactCredentialPatterns(String(text)),
           });
         };
         let result = null;
         try {
           throwIfStopped(session, runId);
-          if (emitLifecycle) emitToSession(session, socket, 'ide:tool-start', { sessionId, runId, toolUseId: tc.id, name: tc.name, input: tc.input, workNote: readToolWorkNote(session, runId, tc.id) });
+          if (emitLifecycle) emitToSession(session, socket, 'ide:tool-start', { sessionId, runId, toolUseId: tc.id, name: tc.name, input: redactAgentTraceValue(tc.input), workNote: readToolWorkNote(session, runId, tc.id) });
           if (recordPhase) {
             const phaseId = tc.name === 'verify_outcome'
               ? 'verify'
@@ -2591,7 +2594,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
           sessionId,
           hostId: session.hostId,
           toolName: toolCalls.length > 0 ? 'ai_tool_decision' : 'ai_response',
-          summary: fullText,
+          summary: redactCredentialPatterns(fullText),
         });
       }
       if (hasProviderAssistantContent(data.content)) {
@@ -3393,16 +3396,17 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       if (!ideSessionRepository?.upsertSession || !isPersistableSessionId(sessionId)) return;
       const messages = Array.isArray(session?.messages) ? session.messages : [];
       if (messages.length === 0) return;
+      const persistedMessages = redactPotentialSecrets(messages);
       session.updatedAt = new Date().toISOString();
       ideSessionRepository.upsertSession({
         id: sessionId,
-        title: session.firstUserMessage ? session.firstUserMessage.slice(0, 60) : deriveSessionTitle(messages),
+        title: redactCredentialPatterns(session.firstUserMessage ? session.firstUserMessage.slice(0, 60) : deriveSessionTitle(messages)),
         entry: session.entry || 'core',
         hostId: session.hostId || '',
         workspaceHostIds: cleanWorkspaceHostIds(session.workspaceHostIds),
         modelLabel: modelLabel || '',
-        messages,
-        preview: deriveSessionPreview(messages),
+        messages: persistedMessages,
+        preview: redactCredentialPatterns(deriveSessionPreview(messages)),
       });
     } catch (err) {
       logger?.warn?.(`[ide] persist session failed: ${err.message}`);
@@ -3821,8 +3825,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     };
     const redactInput = (value) => {
       try {
-        return JSON.parse(JSON.stringify(value || {}, (key, item) => {
-          if (/token|key|secret|password|auth|content|base64/i.test(key)) return '<redacted>';
+        return JSON.parse(JSON.stringify(redactPotentialSecrets(value || {}), (key, item) => {
+          if (/token|key|secret|password|auth|credential|content|base64|sensitive|redact/i.test(key)) return '<redacted>';
           if (typeof item === 'string' && item.length > 500) return `${item.slice(0, 500)}…`;
           return item;
         }));
@@ -3830,9 +3834,9 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     };
     const summarizeEventPayload = (payload = {}) => {
       const summary = { ...payload };
-      if (summary.delta) summary.delta = String(summary.delta).slice(0, 200);
-      if (summary.text) summary.text = String(summary.text).slice(0, 200);
-      if (summary.result) summary.result = String(summary.result).slice(0, 500);
+      if (summary.delta) summary.delta = redactCredentialPatterns(String(summary.delta)).slice(0, 200);
+      if (summary.text) summary.text = redactCredentialPatterns(String(summary.text)).slice(0, 200);
+      if (summary.result) summary.result = redactCredentialPatterns(String(summary.result)).slice(0, 500);
       if (summary.input) summary.input = redactInput(summary.input);
       return summary;
     };

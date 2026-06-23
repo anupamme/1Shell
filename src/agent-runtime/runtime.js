@@ -17,6 +17,7 @@ const { pushAgentEvent } = require('./events');
 const { createInitialAgentState, setRunnerStatus, setTaskStatus, touch } = require('./state');
 const { normalizeAgentStore } = require('./store');
 const { buildHarnessContext, createToolCallEnvelope, normalizeToolResult } = require('./tools');
+const { redactCredentialPatterns, redactPotentialSecrets } = require('../../lib/secret-redaction');
 
 function createAgentRuntime({ harness, io, logger, store, verifierRegistry = null } = {}) {
   const agentStore = normalizeAgentStore(store);
@@ -972,10 +973,11 @@ function approvalTitleForTool(toolName = '') {
 
 function summarizeApprovalArgs(toolName = '', args = {}) {
   if (toolName === 'execute_command' || toolName === 'host_exec') {
+    const safeCommand = redactCredentialPatterns(String(args.command || ''));
     return [
       `主机：${String(args.hostId || args.host_id || 'local')}`,
       '命令：',
-      String(args.command || '').slice(0, 1200),
+      safeCommand.slice(0, 1200),
     ].filter(Boolean).join('\n');
   }
   try {
@@ -987,8 +989,8 @@ function summarizeApprovalArgs(toolName = '', args = {}) {
 
 function redactApprovalArgs(value) {
   try {
-    return JSON.parse(JSON.stringify(value || {}, (key, item) => {
-      if (/token|key|secret|password|auth|credential/i.test(key)) return '<redacted>';
+    return JSON.parse(JSON.stringify(redactPotentialSecrets(value || {}), (key, item) => {
+      if (/token|key|secret|password|auth|credential|sensitive|redact/i.test(key)) return '<redacted>';
       return item;
     }));
   } catch {
@@ -1119,8 +1121,8 @@ function isPositiveInterruptResolution(status = '') {
 
 function redactPotentialSecretsForRuntime(value) {
   try {
-    return JSON.parse(JSON.stringify(value || {}, (key, item) => {
-      if (/token|key|secret|password|auth|credential|value|content|body|text/i.test(key)) return '<redacted>';
+    return JSON.parse(JSON.stringify(redactPotentialSecrets(value || {}), (key, item) => {
+      if (/token|key|secret|password|auth|credential|value|content|body|text|sensitive|redact/i.test(key)) return '<redacted>';
       if (typeof item === 'string' && item.length > 1000) return `${item.slice(0, 1000)}\n...[truncated ${item.length - 1000} chars]`;
       return item;
     }));

@@ -5,6 +5,7 @@ const { createId } = require('../utils/common');
 const { BRIDGE_TOKEN } = require('../config/env');
 const { toMcpToolResult } = require('./mcp.tools');
 const { createOneShellCoreTools } = require('../tools/oneshell-core.tools');
+const { redactCredentialPatterns, redactPotentialSecrets } = require('../../lib/secret-redaction');
 const log = require('../../lib/logger');
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
@@ -190,7 +191,7 @@ function createMcpService(deps = {}) {
 
   function summarizeArgs(args) {
     try {
-      const s = JSON.stringify(args || {}, (key, value) => /token|key|secret|password|content|base64|chunk/i.test(key) ? '<redacted>' : value);
+      const s = JSON.stringify(redactPotentialSecrets(args || {}));
       return s.length > 200 ? s.slice(0, 200) + '…' : s;
     } catch { return '<unserializable>'; }
   }
@@ -203,7 +204,7 @@ function createMcpService(deps = {}) {
       clientIp: context.clientIp,
       command: name,
       durationMs: Date.now() - startedAt,
-      error: error ? error.message : (result?.isError ? 'tool returned error' : null),
+      error: error ? redactCredentialPatterns(error.message) : (result?.isError ? 'tool returned error' : null),
       details: JSON.stringify({
         exposure: context.exposure || 'unknown',
         origin: context.origin || null,

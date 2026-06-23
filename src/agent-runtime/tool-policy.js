@@ -2,8 +2,11 @@
 
 const { checkCapabilities, isReadonlyCommand } = require('../harness/capabilities');
 const { SIDE_EFFECT_TOOL_NAMES } = require('./observation-interpreter');
+const { redactCredentialPatterns, redactPotentialSecrets: redactPotentialSecretsDeep } = require('../../lib/secret-redaction');
 
 const READONLY_TOOL_NAMES = new Set([
+  'ask_user',
+  'request_secret',
   'list_hosts',
   'read_remote_file',
   'list_remote_dir',
@@ -241,7 +244,7 @@ function summarizeToolArgs(toolName, args = {}) {
     return [
       `主机：${String(args.hostId || args.host_id || 'local')}`,
       '命令：',
-      String(args.command || '').slice(0, 1200),
+      redactCredentialPatterns(String(args.command || '')).slice(0, 1200),
     ].join('\n');
   }
   try {
@@ -283,8 +286,8 @@ function describeCommandSideEffects(command = '') {
 
 function redactPotentialSecrets(value) {
   try {
-    return JSON.parse(JSON.stringify(value || {}, (key, item) => {
-      if (/token|key|secret|password|auth|credential/i.test(key)) return '<redacted>';
+    return JSON.parse(JSON.stringify(redactPotentialSecretsDeep(value || {}), (key, item) => {
+      if (/token|key|secret|password|auth|credential|sensitive|redact/i.test(key)) return '<redacted>';
       if (typeof item === 'string' && item.length > 1000) return `${item.slice(0, 1000)}\n...[truncated ${item.length - 1000} chars]`;
       return item;
     }));

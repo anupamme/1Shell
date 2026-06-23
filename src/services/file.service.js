@@ -4,9 +4,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const zlib = require('zlib');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { DATA_DIR } = require('../config/env');
+
+const execFileAsync = promisify(execFile);
 
 /**
  * 文件浏览服务
@@ -190,6 +195,130 @@ function createFileService({ hostService, probeAgentService = null }) {
   function parsePositiveSize(value) {
     const size = Number(String(value || '').trim());
     return Number.isFinite(size) && size >= 0 ? size : null;
+  }
+
+  const ARCHIVE_SUFFIXES = [
+    { suffix: '.tar.gz', kind: 'tar.gz' },
+    { suffix: '.tgz', kind: 'tar.gz' },
+    { suffix: '.tar.bz2', kind: 'tar.bz2' },
+    { suffix: '.tbz2', kind: 'tar.bz2' },
+    { suffix: '.tar.xz', kind: 'tar.xz' },
+    { suffix: '.txz', kind: 'tar.xz' },
+    { suffix: '.tar', kind: 'tar' },
+    { suffix: '.zip', kind: 'zip' },
+    { suffix: '.gz', kind: 'gz' },
+  ];
+
+  function archiveKind(filePath) {
+    const lower = String(filePath || '').toLowerCase();
+    const match = ARCHIVE_SUFFIXES.find((entry) => lower.endsWith(entry.suffix));
+    return match?.kind || '';
+  }
+
+  function stripArchiveSuffix(filename) {
+    const text = String(filename || '').trim();
+    const lower = text.toLowerCase();
+    const match = ARCHIVE_SUFFIXES.find((entry) => lower.endsWith(entry.suffix));
+    const stripped = match ? text.slice(0, -match.suffix.length) : text;
+    return stripped && stripped !== '.' && stripped !== '..' ? stripped : 'extracted';
+  }
+
+  function remoteBasename(filePath) {
+    const clean = String(filePath || '').replace(/\/+$/, '');
+    return clean.split('/').pop() || '';
+  }
+
+  function remoteDirname(filePath) {
+    const clean = String(filePath || '').replace(/\/+$/, '');
+    const idx = clean.lastIndexOf('/');
+    if (idx < 0) return '.';
+    if (idx === 0) return '/';
+    return clean.slice(0, idx);
+  }
+
+  function remoteJoin(dirPath, name) {
+    const dir = String(dirPath || '.').replace(/\/+$/, '');
+    if (!dir || dir === '.') return name;
+    if (dir === '/') return `/${name}`;
+    return `${dir}/${name}`;
+  }
+
+  function tarExtractFlag(kind) {
+    if (kind === 'tar.gz') return '-xzf';
+    if (kind === 'tar.bz2') return '-xjf';
+    if (kind === 'tar.xz') return '-xJf';
+    if (kind === 'tar') return '-xf';
+    return '';
+  }
+
+  async function pathExistsLocal(targetPath) {
+    return fs.promises.lstat(targetPath).then(() => true).catch(() => false);
+  }
+
+  async function runLocalTool(command, args, options, action) {
+    try {
+      return await execFileAsync(command, args, {
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+        ...options,
+      });
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        throw new Error(`${action}失败: 当前系统缺少 ${command} 命令`);
+      }
+      const detail = String(err?.stderr || err?.stdout || err?.message || '').trim();
+      throw new Error(`${action}失败: ${detail || `exit ${err?.code || 'unknown'}`}`);
+    }
+  }
+
+  async function runPowerShell(script, args, action) {
+    const params = args.map((_, index) => `$p${index}`).join(', ');
+    return runLocalTool('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      `& { param(${params}) $ErrorActionPreference = "Stop"; ${script} }`,
+      ...args,
+    ], {}, action);
+  }
+
+  async function runRemoteShell(hostId, command, action) {
+    const { client, proxyClient } = await hostService.connectToHost(hostId, { readyTimeout: 30000, probeOs: false });
+    let closed = false;
+
+    function closeConnection() {
+      if (closed) return;
+      closed = true;
+      try { client.end(); } catch { /* ignore */ }
+      try { proxyClient?.end(); } catch { /* ignore */ }
+    }
+
+    return new Promise((resolve, reject) => {
+      client.exec(command, { pty: false }, (err, stream) => {
+        if (err) {
+          closeConnection();
+          return reject(new Error(`${action}失败: ${err.message}`));
+        }
+        let stdout = '';
+        let stderr = '';
+        stream.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+        stream.stderr?.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+        stream.on('close', (code) => {
+          closeConnection();
+          if (code !== 0) {
+            const detail = (stderr || stdout || `exit ${code}`).trim();
+            reject(new Error(`${action}失败: ${detail}`));
+            return;
+          }
+          resolve({ stdout, stderr });
+        });
+        stream.on('error', (streamErr) => {
+          closeConnection();
+          reject(new Error(`${action}失败: ${streamErr.message}`));
+        });
+      });
+    });
   }
 
   function createParallelSftpReadStream(sftp, filePath, fileSize, options = {}) {
@@ -1178,6 +1307,183 @@ function createFileService({ hostService, probeAgentService = null }) {
     }
   }
 
+  async function archiveLocal(targetPath, options = {}) {
+    assertSafeMutationTarget(targetPath, '压缩');
+    const resolved = path.resolve(targetPath);
+    await fs.promises.lstat(resolved).catch(() => {
+      throw new Error(`路径不存在: ${resolved}`);
+    });
+
+    const format = String(options.format || (os.platform() === 'win32' ? 'zip' : 'tar.gz')).toLowerCase();
+    if (!['zip', 'tar.gz'].includes(format)) {
+      throw new Error(`压缩失败: 不支持的压缩格式 ${format}`);
+    }
+
+    const dirPath = path.dirname(resolved);
+    const baseName = path.basename(resolved);
+    const archiveName = `${baseName}.${format}`;
+    const archivePath = path.join(dirPath, archiveName);
+    assertSafeMutationTarget(archivePath, '压缩');
+    if (await pathExistsLocal(archivePath)) {
+      throw new Error(`压缩失败: 目标压缩包已存在: ${archivePath}`);
+    }
+
+    try {
+      if (format === 'zip') {
+        await runPowerShell(
+          'Compress-Archive -LiteralPath $p0 -DestinationPath $p1',
+          [resolved, archivePath],
+          '压缩',
+        );
+      } else {
+        await runLocalTool('tar', ['-czf', archiveName, '--', baseName], { cwd: dirPath }, '压缩');
+      }
+    } catch (err) {
+      await fs.promises.rm(archivePath, { force: true }).catch(() => {});
+      throw await enrichLocalWriteError(err, archivePath, '压缩');
+    }
+
+    const stat = await fs.promises.stat(archivePath);
+    return { path: archivePath, filename: archiveName, size: stat.size, format };
+  }
+
+  async function archiveRemote(hostId, targetPath, options = {}) {
+    assertSafeMutationTarget(targetPath, '压缩');
+    const format = String(options.format || 'tar.gz').toLowerCase();
+    if (format !== 'tar.gz') {
+      throw new Error('压缩失败: 远程主机暂只支持 tar.gz 格式');
+    }
+    const dirPath = remoteDirname(targetPath);
+    const baseName = remoteBasename(targetPath);
+    if (!baseName) throw new Error('压缩失败: 路径无效');
+    const archiveName = `${baseName}.tar.gz`;
+    const archivePath = remoteJoin(dirPath, archiveName);
+    assertSafeMutationTarget(archivePath, '压缩');
+
+    const command = [
+      'set -eu',
+      `dir=${shellQuote(dirPath)}`,
+      `base=${shellQuote(baseName)}`,
+      `archive=${shellQuote(archiveName)}`,
+      `target_full=${shellQuote(targetPath)}`,
+      `archive_full=${shellQuote(archivePath)}`,
+      'cd "$dir"',
+      'if [ ! -e "$base" ] && [ ! -L "$base" ]; then printf "路径不存在: %s\\n" "$target_full" >&2; exit 2; fi',
+      'if [ -e "$archive" ] || [ -L "$archive" ]; then printf "目标压缩包已存在: %s\\n" "$archive_full" >&2; exit 3; fi',
+      'command -v tar >/dev/null 2>&1 || { printf "缺少 tar 命令\\n" >&2; exit 4; }',
+      'tar -czf "$archive" -- "$base"',
+      'printf "%s\\n" "$archive_full"',
+    ].join('\n');
+
+    await runRemoteShell(hostId, command, '压缩');
+    return { path: archivePath, filename: archiveName, format };
+  }
+
+  async function extractLocal(archivePath) {
+    assertSafeMutationTarget(archivePath, '解压');
+    const resolved = path.resolve(archivePath);
+    const stat = await fs.promises.lstat(resolved).catch(() => {
+      throw new Error(`归档文件不存在: ${resolved}`);
+    });
+    if (stat.isDirectory()) throw new Error('解压失败: 不能解压目录');
+
+    const kind = archiveKind(resolved);
+    if (!kind) throw new Error('解压失败: 暂不支持该归档格式');
+
+    const dirPath = path.dirname(resolved);
+    const outputName = stripArchiveSuffix(path.basename(resolved));
+    let outputPath = path.join(dirPath, outputName);
+    if (await pathExistsLocal(outputPath)) {
+      outputPath = path.join(dirPath, `${outputName}.extracted`);
+    }
+    assertSafeMutationTarget(outputPath, '解压');
+    if (await pathExistsLocal(outputPath)) {
+      throw new Error(`解压失败: 目标目录已存在: ${outputPath}`);
+    }
+
+    try {
+      await fs.promises.mkdir(outputPath, { recursive: false });
+    } catch (err) {
+      throw await enrichLocalWriteError(err, outputPath, '解压');
+    }
+
+    try {
+      if (kind === 'zip') {
+        if (os.platform() === 'win32') {
+          await runPowerShell(
+            'Expand-Archive -LiteralPath $p0 -DestinationPath $p1',
+            [resolved, outputPath],
+            '解压',
+          );
+        } else {
+          await runLocalTool('unzip', ['-q', resolved, '-d', outputPath], {}, '解压');
+        }
+      } else if (kind === 'gz') {
+        const outputFile = path.join(outputPath, outputName);
+        await pipeline(
+          fs.createReadStream(resolved),
+          zlib.createGunzip(),
+          fs.createWriteStream(outputFile, { flags: 'wx' }),
+        );
+      } else {
+        await runLocalTool('tar', [tarExtractFlag(kind), resolved, '-C', outputPath], {}, '解压');
+      }
+    } catch (err) {
+      await fs.promises.rm(outputPath, { recursive: true, force: true }).catch(() => {});
+      if (String(err?.message || '').startsWith('解压失败:')) throw err;
+      throw await enrichLocalWriteError(new Error(`解压失败: ${err.message}`), outputPath, '解压');
+    }
+
+    return { path: outputPath, sourcePath: resolved, format: kind };
+  }
+
+  async function extractRemote(hostId, archivePath) {
+    assertSafeMutationTarget(archivePath, '解压');
+    const kind = archiveKind(archivePath);
+    if (!kind) throw new Error('解压失败: 暂不支持该归档格式');
+
+    const dirPath = remoteDirname(archivePath);
+    const archiveName = remoteBasename(archivePath);
+    const outputName = stripArchiveSuffix(archiveName);
+    const outputPath = remoteJoin(dirPath, outputName);
+    const fallbackOutputPath = remoteJoin(dirPath, `${outputName}.extracted`);
+    assertSafeMutationTarget(outputPath, '解压');
+    assertSafeMutationTarget(fallbackOutputPath, '解压');
+
+    let requiredTool = 'tar';
+    let extractCommand = `${tarExtractFlag(kind)} "$archive" -C "$out"`;
+    if (kind === 'zip') {
+      requiredTool = 'unzip';
+      extractCommand = 'unzip -q "$archive" -d "$out"';
+    } else if (kind === 'gz') {
+      requiredTool = 'gzip';
+      extractCommand = 'gzip -dc "$archive" > "$out/$inner"';
+    } else {
+      extractCommand = `tar ${extractCommand}`;
+    }
+
+    const command = [
+      'set -eu',
+      `archive=${shellQuote(archivePath)}`,
+      `out=${shellQuote(outputPath)}`,
+      `fallback_out=${shellQuote(fallbackOutputPath)}`,
+      `inner=${shellQuote(outputName)}`,
+      'if [ ! -f "$archive" ]; then printf "归档文件不存在或不是普通文件: %s\\n" "$archive" >&2; exit 2; fi',
+      'if [ -e "$out" ] || [ -L "$out" ]; then out="$fallback_out"; fi',
+      'if [ -e "$out" ] || [ -L "$out" ]; then printf "目标目录已存在: %s\\n" "$out" >&2; exit 3; fi',
+      `command -v ${requiredTool} >/dev/null 2>&1 || { printf "缺少 ${requiredTool} 命令\\n" >&2; exit 4; }`,
+      'mkdir -- "$out"',
+      'cleanup() { code=$?; if [ "$code" -ne 0 ]; then rm -rf -- "$out"; fi; exit "$code"; }',
+      'trap cleanup EXIT',
+      extractCommand,
+      'trap - EXIT',
+      'printf "%s\\n" "$out"',
+    ].join('\n');
+
+    const result = await runRemoteShell(hostId, command, '解压');
+    return { path: result.stdout.trim() || outputPath, sourcePath: archivePath, format: kind };
+  }
+
   /**
    * 统一入口：创建目录（递归）
    */
@@ -1226,6 +1532,30 @@ function createFileService({ hostService, probeAgentService = null }) {
     return renameRemote(hostId, oldPath, newPath);
   }
 
+  /**
+   * 统一入口：压缩文件或目录
+   */
+  async function archivePath(hostId, targetPath, options = {}) {
+    const host = hostService.findHost(hostId);
+    if (!host) throw new Error('主机不存在');
+    if (host.type === 'local' || host.id === 'local') {
+      return archiveLocal(targetPath, options);
+    }
+    return archiveRemote(hostId, targetPath, options);
+  }
+
+  /**
+   * 统一入口：解压归档文件到同目录的新文件夹
+   */
+  async function extractArchive(hostId, targetPath) {
+    const host = hostService.findHost(hostId);
+    if (!host) throw new Error('主机不存在');
+    if (host.type === 'local' || host.id === 'local') {
+      return extractLocal(targetPath);
+    }
+    return extractRemote(hostId, targetPath);
+  }
+
   return {
     listDir,
     readFile,
@@ -1237,6 +1567,8 @@ function createFileService({ hostService, probeAgentService = null }) {
     createFile,
     deletePath,
     renamePath,
+    archivePath,
+    extractArchive,
     writeSelfCheck,
   };
 }

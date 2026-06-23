@@ -15,7 +15,7 @@ function commandHasTruncationMarker(command) {
   return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
 }
 
-function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness, agentRuntime, skillRegistry }) {
+function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness, agentRuntime, skillRegistry, secretService }) {
   const coreTools = createOneShellCoreTools({
     bridgeService,
     hostService,
@@ -33,6 +33,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     probeDiagService,
     probeAgentInstallerService,
     harness,
+    secretService,
   });
 
   const TOOL_SCHEMAS = [
@@ -49,6 +50,16 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
           hostId:  { type: 'string', description: '目标主机 ID（用 list_hosts 获取）' },
           command: { type: 'string', description: '要执行的 shell 命令' },
           timeout: { type: 'number', description: '超时毫秒，默认 30000' },
+          secretEnv: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+            description: 'Optional env var name -> sec_... Secret Manager ref. Backend resolves at execution time; audit/tool records keep refs, not plaintext.',
+          },
+          sensitiveValues: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional plaintext values explicitly provided by the user for this run. Used only for redaction from audit/tool output.',
+          },
         },
         required: ['hostId', 'command'],
       },
@@ -806,6 +817,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       }
 
       case 'execute_command': {
+        return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta, source: 'ide' });
         const hostId = String(input.hostId || '').trim();
         let command = String(input.command || '').trim();
         const timeout = Number(input.timeout) > 0 ? Number(input.timeout) : 30000;

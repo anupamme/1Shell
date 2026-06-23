@@ -204,6 +204,7 @@ const ideTools = createIdeTools({
   harness,
   agentRuntime,
   skillRegistry,
+  secretService,
 });
 const ideService = createIdeService({
   ideTools,
@@ -241,6 +242,7 @@ const mcpService = createMcpService({
   remoteMcpService,
   ideService,
   harness,
+  secretService,
 });
 
 // ─── 路由挂载 ───────────────────────────────────────────────────────────

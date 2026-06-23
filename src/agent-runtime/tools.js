@@ -50,6 +50,7 @@ function buildHarnessContext({ harness, state, toolCall, overrides = {} } = {}) 
     requestApproval: overrides.requestApproval,
     signal: overrides.signal,
     onOutput: overrides.onOutput,
+    env: normalizeObject(overrides.env || overrides.extraEnv),
     secrets: Array.isArray(overrides.secrets) ? overrides.secrets : (Array.isArray(base.secrets) ? base.secrets : []),
     auditCommand: overrides.auditCommand,
   };

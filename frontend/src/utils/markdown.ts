@@ -16,13 +16,14 @@ export interface RenderMarkdownOptions {
 }
 
 const ALLOWED_TAGS = new Set([
-  'a', 'blockquote', 'br', 'code', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-  'hr', 'li', 'ol', 'p', 'pre', 'strong', 'table', 'tbody', 'td', 'th', 'thead',
+  'a', 'blockquote', 'br', 'button', 'code', 'div', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'hr', 'li', 'ol', 'p', 'pre', 'span', 'strong', 'table', 'tbody', 'td', 'th', 'thead',
   'tr', 'ul',
 ]);
 const GLOBAL_ATTRS = new Set(['class']);
 const TAG_ATTRS: Record<string, Set<string>> = {
   a: new Set(['href', 'target', 'rel']),
+  button: new Set(['aria-label', 'title', 'type']),
   code: new Set(['class']),
   pre: new Set(['class']),
 };
@@ -70,6 +71,33 @@ export function escapeHtml(text: string): string {
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string
   ));
 }
+
+type MarkdownToken = { info?: string; content?: string };
+
+function normalizeCodeLanguage(info: string): string {
+  return String(info || '').trim().split(/\s+/)[0]?.replace(/[^\w-]/g, '').slice(0, 40) || '';
+}
+
+function renderCodeBlock(tokens: MarkdownToken[], idx: number): string {
+  const token = tokens[idx] || {};
+  const lang = normalizeCodeLanguage(token.info || '');
+  const label = lang || 'code';
+  const codeClass = lang ? ` class="language-${escapeHtml(lang)}"` : '';
+  return [
+    '<div class="markdown-code-block">',
+    '<div class="markdown-code-toolbar">',
+    `<span class="markdown-code-language">${escapeHtml(label)}</span>`,
+    '<button type="button" class="markdown-copy-button" title="复制代码" aria-label="复制代码">复制</button>',
+    '</div>',
+    `<pre><code${codeClass}>${escapeHtml(token.content || '')}</code></pre>`,
+    '</div>\n',
+  ].join('');
+}
+
+md.renderer.rules.fence = renderCodeBlock;
+md.renderer.rules.code_block = renderCodeBlock;
+mdNoTables.renderer.rules.fence = renderCodeBlock;
+mdNoTables.renderer.rules.code_block = renderCodeBlock;
 
 function normalizeTableMode(value: RenderMarkdownOptions['tables']): MarkdownTableMode {
   if (value === false) return 'disabled';
@@ -214,4 +242,54 @@ export function renderMarkdown(text: string, options: RenderMarkdownOptions = {}
   const source = mode === 'safe' ? protectUnsafeMarkdownTables(String(text || '')) : String(text || '');
   const renderer = mode === 'disabled' ? mdNoTables : md;
   return sanitizeHtml(renderer.render(source));
+}
+
+function fallbackCopyText(text: string): boolean {
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand('copy');
+    textarea.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+export function setupMarkdownCodeCopy(): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  const global = window as Window & { __oneshellMarkdownCodeCopy?: boolean };
+  if (global.__oneshellMarkdownCodeCopy) return;
+  global.__oneshellMarkdownCodeCopy = true;
+
+  document.addEventListener('click', async (event) => {
+    const target = event.target instanceof Element
+      ? event.target.closest<HTMLButtonElement>('.markdown-copy-button')
+      : null;
+    if (!target) return;
+    const block = target.closest('.markdown-code-block');
+    const text = block?.querySelector('pre code')?.textContent || '';
+    if (!text) return;
+
+    const original = target.textContent || '复制';
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else if (!fallbackCopyText(text)) throw new Error('clipboard unavailable');
+      target.textContent = '已复制';
+      target.classList.add('is-copied');
+    } catch {
+      target.textContent = '复制失败';
+      target.classList.add('is-copy-error');
+    }
+    window.setTimeout(() => {
+      target.textContent = original;
+      target.classList.remove('is-copied', 'is-copy-error');
+    }, 1500);
+  });
 }

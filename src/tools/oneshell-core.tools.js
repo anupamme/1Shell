@@ -8,6 +8,7 @@ const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { DATA_DIR, ROOT_DIR } = require('../config/env');
 const { execLocalCommand } = require('../../lib/exec-local');
+const { redactKnownSecrets } = require('../../lib/secret-redaction');
 const { emitIdeEvent } = require('../ide/ide.events');
 const { MCP_STANDARD_TOOL_SET } = require('./mcp-tool-profiles');
 const { formatOutputDiagnostics, withOutputDiagnostics } = require('../utils/output-diagnostics');
@@ -61,6 +62,16 @@ const EXEC_SCHEMA = {
     background: { type: 'boolean', description: 'true 时立即返回 runId，命令在后台继续运行' },
     async: { type: 'boolean', description: 'background 的别名' },
     wait: { type: 'boolean', description: 'false 等同 background=true；true 强制同步等待' },
+    secretEnv: {
+      type: 'object',
+      additionalProperties: { type: 'string' },
+      description: 'Optional env var name -> sec_... Secret Manager ref. Backend resolves refs only at execution time; audit/tool records keep refs, not plaintext.',
+    },
+    sensitiveValues: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Optional plaintext values provided by the user for this run. Used only for redaction from audit/tool output; prefer secretEnv for reusable secrets.',
+    },
   },
   required: ['hostId', 'command'],
 };
@@ -658,6 +669,98 @@ function createOneShellCoreTools(deps = {}) {
     return { ...result, stderr: `${result.stderr || ''}${READONLY_MOUNT_HINT}` };
   }
 
+  async function buildExecSecretContext(input = {}) {
+    const sensitiveValues = normalizeSensitiveValues(input.sensitiveValues);
+    const secretEnv = await resolveSecretEnv(input.secretEnv);
+    const secrets = mergeSecrets(sensitiveValues, Object.values(secretEnv.env));
+    return {
+      env: secretEnv.env,
+      refs: secretEnv.refs,
+      secrets,
+      sensitiveCount: sensitiveValues.length,
+    };
+  }
+
+  async function resolveSecretEnv(secretEnvInput) {
+    if (!secretEnvInput || typeof secretEnvInput !== 'object' || Array.isArray(secretEnvInput)) {
+      return { env: {}, refs: {} };
+    }
+    if (!deps.secretService?.resolve) throw new Error('Secret Manager unavailable; cannot resolve secretEnv refs');
+    const env = {};
+    const refs = {};
+    for (const [rawName, rawRef] of Object.entries(secretEnvInput)) {
+      const name = String(rawName || '').trim();
+      const ref = String(rawRef || '').trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) throw new Error(`Invalid secretEnv name: ${name || '(empty)'}`);
+      if (!/^sec_[a-zA-Z0-9-]+$/.test(ref)) throw new Error(`secretEnv.${name} must be a sec_... Secret Manager ref`);
+      env[name] = String(deps.secretService.resolve(ref));
+      refs[name] = ref;
+    }
+    return { env, refs };
+  }
+
+  function normalizeSensitiveValues(value) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value
+      .map((item) => String(item || ''))
+      .filter((item) => item.length >= 3))]
+      .sort((a, b) => b.length - a.length);
+  }
+
+  function mergeSecrets(...groups) {
+    return [...new Set(groups
+      .flatMap((group) => Array.isArray(group) ? group : [])
+      .map((item) => String(item || ''))
+      .filter((item) => item.length >= 3))]
+      .sort((a, b) => b.length - a.length);
+  }
+
+  function safeExecCommand(command, execSecrets) {
+    return redactKnownSecrets(command, execSecrets?.secrets || []);
+  }
+
+  function publicSecretEnvRefs(execSecrets) {
+    const refs = execSecrets?.refs && typeof execSecrets.refs === 'object' ? execSecrets.refs : {};
+    return Object.keys(refs).length > 0 ? refs : undefined;
+  }
+
+  function formatAuditCommand(command, execSecrets) {
+    const safe = safeExecCommand(command, execSecrets);
+    const refs = publicSecretEnvRefs(execSecrets);
+    if (!refs) return safe;
+    const summary = Object.entries(refs).map(([key, ref]) => `${key}=${ref}`).join(', ');
+    return `${safe}\n[secretEnv] ${summary}`;
+  }
+
+  function redactExecResult(result, execSecrets) {
+    if (!result || typeof result !== 'object') return result;
+    const secrets = execSecrets?.secrets || [];
+    return {
+      ...result,
+      stdout: redactKnownSecrets(result.stdout || '', secrets),
+      stderr: redactKnownSecrets(result.stderr || '', secrets),
+    };
+  }
+
+  function redactOutputHandler(onOutput, execSecrets) {
+    if (typeof onOutput !== 'function') return undefined;
+    const secrets = execSecrets?.secrets || [];
+    return (chunk = {}) => {
+      try {
+        onOutput({ ...chunk, text: redactKnownSecrets(chunk.text || '', secrets) });
+      } catch { /* ignore */ }
+    };
+  }
+
+  function publicExecInput(hostId, command, execSecrets) {
+    return {
+      hostId,
+      command: safeExecCommand(command, execSecrets),
+      ...(publicSecretEnvRefs(execSecrets) ? { secretEnv: publicSecretEnvRefs(execSecrets) } : {}),
+      ...(execSecrets?.sensitiveCount ? { sensitiveValues: ['[REDACTED]'] } : {}),
+    };
+  }
+
   function isToolExposed(name, target) {
     const tool = toolMap.get(name);
     if (!tool || !tool.targets.includes(target)) return false;
@@ -786,6 +889,7 @@ function createOneShellCoreTools(deps = {}) {
       status: run.status,
       hostId: run.hostId,
       command: run.command,
+      secretEnv: run.secretEnv || null,
       timeout: run.timeout,
       startedAt: run.startedAt,
       updatedAt: run.updatedAt,
@@ -828,7 +932,7 @@ function createOneShellCoreTools(deps = {}) {
     }
   }
 
-  function startHostExecRun({ hostId, command, timeout }, context = {}) {
+  function startHostExecRun({ hostId, command, timeout, execSecrets }, context = {}) {
     pruneHostExecRuns();
     const runId = createRuntimeId('host-exec');
     const now = new Date().toISOString();
@@ -836,7 +940,8 @@ function createOneShellCoreTools(deps = {}) {
       runId,
       status: 'running',
       hostId,
-      command,
+      command: safeExecCommand(command, execSecrets),
+      secretEnv: publicSecretEnvRefs(execSecrets) || null,
       timeout,
       stdout: '',
       stderr: '',
@@ -862,7 +967,7 @@ function createOneShellCoreTools(deps = {}) {
       allowApproval: false,
     };
 
-    void executeHostCommand({ hostId, command, timeout }, detachedContext)
+    void executeHostCommand({ hostId, command, timeout, execSecrets }, detachedContext)
       .then((result) => {
         const parsed = parseStructuredExecResult(result);
         const data = parsed.data || {};
@@ -897,11 +1002,17 @@ function createOneShellCoreTools(deps = {}) {
     const timeout = normalizeHostExecTimeout(input, background);
     if (commandHasTruncationMarker(command)) return err('命令疑似被摘要截断（包含省略号或 [truncated] 标记），请重新生成完整命令后再执行。');
     if (!hostId || !command) return err('hostId 和 command 为必填');
+    let execSecrets;
+    try {
+      execSecrets = await buildExecSecretContext(input);
+    } catch (e) {
+      return err(e.message);
+    }
     if (background) {
-      const run = startHostExecRun({ hostId, command, timeout }, context);
+      const run = startHostExecRun({ hostId, command, timeout, execSecrets }, context);
       return structured(true, 'host_exec started in background', publicHostExecRun(run));
     }
-    return executeHostCommand({ hostId, command, timeout }, context);
+    return executeHostCommand({ hostId, command, timeout, execSecrets }, context);
   }
 
   function handleGetHostExecRun(input) {
@@ -919,7 +1030,19 @@ function createOneShellCoreTools(deps = {}) {
     const timeout = Number(input.timeout) > 0 ? Number(input.timeout) : 30000;
     if (commandHasTruncationMarker(command)) return err('命令疑似被摘要截断（包含省略号或 [truncated] 标记），请重新生成完整命令后再执行。');
     if (!hostId || !command) return err('hostId 和 command 为必填');
-    const onOutput = typeof context.onToolDelta === 'function' ? context.onToolDelta : context.onOutput;
+    let execSecrets = input.execSecrets || null;
+    if (!execSecrets) {
+      try {
+        execSecrets = await buildExecSecretContext(input);
+      } catch (e) {
+        return err(e.message);
+      }
+    }
+    const safeCommand = safeExecCommand(command, execSecrets);
+    const publicInput = publicExecInput(hostId, command, execSecrets);
+    const auditCommand = formatAuditCommand(command, execSecrets);
+    const rawOnOutput = typeof context.onToolDelta === 'function' ? context.onToolDelta : context.onOutput;
+    const onOutput = redactOutputHandler(rawOnOutput, execSecrets);
 
     // 经 harness 统一边界执行：guard → 人审 gate → 执行 → 打码 → 轨迹。
     // IDE 是人在场路径，risk-rules 的 approval 动作接入 IDE 审批弹窗；外部 Agent 路径保持无人审。
@@ -936,19 +1059,28 @@ function createOneShellCoreTools(deps = {}) {
           runId: context.runId,
           sessionId: context.sessionId,
           signal: context.signal,
+          env: execSecrets.env,
+          secrets: mergeSecrets(context.secrets || [], execSecrets.secrets || []),
+          auditCommand,
           onOutput,
         });
-        const dispatched = await deps.harness.dispatch('execute_command', { command, hostId, timeout }, ctx);
+        const dispatched = await deps.harness.dispatch('execute_command', {
+          command,
+          hostId,
+          timeout,
+          ...(publicSecretEnvRefs(execSecrets) ? { secretEnv: publicSecretEnvRefs(execSecrets) } : {}),
+        }, ctx);
         if (!dispatched.raw) {
           // 被 harness 拦截（无底层结果）
-          emitTool(context, 'execute_command', { hostId, command }, { stdout: '', stderr: dispatched.content, exitCode: 126, durationMs: 0 });
+          emitTool(context, 'execute_command', publicInput, { stdout: '', stderr: dispatched.content, exitCode: 126, durationMs: 0 });
           return err(dispatched.content);
         }
         const r = withOutputDiagnostics(withReadonlyMountHint(hostId, dispatched.raw), { timeout });
-        emitTool(context, 'execute_command', { hostId, command }, r);
+        emitTool(context, 'execute_command', publicInput, r);
         const okRun = r.exitCode === 0;
         return structured(okRun, okRun ? '命令执行成功' : `命令执行失败，exitCode=${r.exitCode}`, {
-          hostId, command, timeout,
+          hostId, command: safeCommand, timeout,
+          ...(publicSecretEnvRefs(execSecrets) ? { secretEnv: publicSecretEnvRefs(execSecrets) } : {}),
           stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode, durationMs: r.durationMs || 0,
           outputDiagnostics: r.outputDiagnostics,
           ...(r.errorCode ? { errorCode: r.errorCode } : {}),
@@ -957,17 +1089,18 @@ function createOneShellCoreTools(deps = {}) {
       } catch (e) {
         if (e?.name === 'AbortError' || e?.code === 'CANCELLED') throw e;
         if (hasExecutionErrorContext(e)) {
-          const r = withOutputDiagnostics(withReadonlyMountHint(hostId, executionErrorToResult(e)), { timeout });
-          emitTool(context, 'execute_command', { hostId, command }, r);
+          const r = withOutputDiagnostics(withReadonlyMountHint(hostId, redactExecResult(executionErrorToResult(e), execSecrets)), { timeout });
+          emitTool(context, 'execute_command', publicInput, r);
           return structured(false, `命令执行失败：${e.message || 'execution failed'}`, {
-            hostId, command, timeout,
+            hostId, command: safeCommand, timeout,
+            ...(publicSecretEnvRefs(execSecrets) ? { secretEnv: publicSecretEnvRefs(execSecrets) } : {}),
             stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode, durationMs: r.durationMs || 0,
             outputDiagnostics: r.outputDiagnostics,
             ...(r.errorCode ? { errorCode: r.errorCode } : {}),
             ...(r.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
           }, true);
         }
-        return err(e.message);
+        return err(redactKnownSecrets(e.message, execSecrets.secrets));
       }
     }
 
@@ -975,14 +1108,15 @@ function createOneShellCoreTools(deps = {}) {
     try {
       if (hostId !== 'local' && !deps.bridgeService) return err('bridgeService 未初始化');
       const rawResult = hostId === 'local'
-        ? await execLocal(command, timeout, { signal: context.signal, onOutput })
-        : await deps.bridgeService.execOnHost(hostId, command, timeout, { source: context.source || 'core_tools', signal: context.signal, onOutput });
-      const result = withOutputDiagnostics(withReadonlyMountHint(hostId, rawResult), { timeout });
-      emitTool(context, 'execute_command', { hostId, command }, result);
+        ? await execLocal(command, timeout, { signal: context.signal, onOutput, env: execSecrets.env })
+        : await deps.bridgeService.execOnHost(hostId, command, timeout, { source: context.source || 'core_tools', signal: context.signal, onOutput, env: execSecrets.env, secrets: execSecrets.secrets, auditCommand });
+      const result = withOutputDiagnostics(withReadonlyMountHint(hostId, redactExecResult(rawResult, execSecrets)), { timeout });
+      emitTool(context, 'execute_command', publicInput, result);
       const okRun = result.exitCode === 0;
       return structured(okRun, okRun ? '命令执行成功' : `命令执行失败，exitCode=${result.exitCode}`, {
         hostId,
-        command,
+        command: safeCommand,
+        ...(publicSecretEnvRefs(execSecrets) ? { secretEnv: publicSecretEnvRefs(execSecrets) } : {}),
         timeout,
         stdout: result.stdout || '',
         stderr: result.stderr || '',
@@ -995,11 +1129,12 @@ function createOneShellCoreTools(deps = {}) {
     } catch (e) {
       if (e?.name === 'AbortError' || e?.code === 'CANCELLED') throw e;
       if (hasExecutionErrorContext(e)) {
-        const result = withOutputDiagnostics(withReadonlyMountHint(hostId, executionErrorToResult(e)), { timeout });
-        emitTool(context, 'execute_command', { hostId, command }, result);
+        const result = withOutputDiagnostics(withReadonlyMountHint(hostId, redactExecResult(executionErrorToResult(e), execSecrets)), { timeout });
+        emitTool(context, 'execute_command', publicInput, result);
         return structured(false, `命令执行失败：${e.message || 'execution failed'}`, {
           hostId,
-          command,
+          command: safeCommand,
+          ...(publicSecretEnvRefs(execSecrets) ? { secretEnv: publicSecretEnvRefs(execSecrets) } : {}),
           timeout,
           stdout: result.stdout || '',
           stderr: result.stderr || '',
@@ -1010,7 +1145,7 @@ function createOneShellCoreTools(deps = {}) {
           ...(result.interactivePromptDetected === true ? { interactivePromptDetected: true } : {}),
         }, true);
       }
-      return err(e.message);
+      return err(redactKnownSecrets(e.message, execSecrets.secrets));
     }
   }
 
@@ -2275,8 +2410,8 @@ function makeAbortError() {
   return err;
 }
 
-function execLocal(command, timeout, { cwd = ROOT_DIR, signal, onOutput } = {}) {
-  return execLocalCommand(command, { timeout, cwd, signal, onOutput });
+function execLocal(command, timeout, { cwd = ROOT_DIR, signal, onOutput, env } = {}) {
+  return execLocalCommand(command, { timeout, cwd, signal, onOutput, env });
 }
 
 function hasExecutionErrorContext(err) {

@@ -4,14 +4,27 @@
 // 占左栏 aside 内 flex:5 块 (HostListSidebar 之下),自身容器内滚动,不外溢
 import { computed, onBeforeUnmount, onMounted, toRef } from 'vue';
 
-import { useFileBrowser, type DirItem } from '@/composables/useFileBrowser';
+import AppIcon from '@/components/AppIcon.vue';
+import { isSupportedArchiveName, useFileBrowser, type DirItem } from '@/composables/useFileBrowser';
+
+interface FileBrowserHostOption {
+  id: string;
+  name: string;
+  meta?: string;
+}
 
 const props = withDefaults(defineProps<{
   hostId?: string | null;
   title?: string;
+  hostOptions?: FileBrowserHostOption[];
 }>(), {
   title: '文件浏览',
+  hostOptions: () => [],
 });
+
+const emit = defineEmits<{
+  hostChange: [hostId: string];
+}>();
 
 const fb = props.hostId === undefined
   ? useFileBrowser()
@@ -29,6 +42,18 @@ const visibleItems = computed<DirItem[]>(() => {
 });
 const dirCount = computed(() => visibleItems.value.filter((i) => i.isDir).length);
 const fileCount = computed(() => visibleItems.value.length - dirCount.value);
+const selectedHostName = computed(() => props.hostOptions.find((host) => host.id === props.hostId)?.name || props.hostId || '当前主机');
+const syncStatus = computed(() => {
+  if (fb.operationLabel.value) return fb.operationLabel.value;
+  if (fb.loading.value) return '进入中';
+  if (fb.refreshing.value) return '更新中';
+  if (fb.cacheStale.value) return '缓存';
+  return '';
+});
+const syncTitle = computed(() => {
+  if (!fb.lastLoadedAt.value) return '';
+  return `上次加载 ${new Date(fb.lastLoadedAt.value).toLocaleString()}`;
+});
 
 // 面包屑分段（Windows / Linux 分别处理）
 interface Crumb {
@@ -78,18 +103,43 @@ const crumbs = computed<Crumb[]>(() => {
   return list;
 });
 
-function fileIcon(name: string, isDir: boolean): string {
-  if (isDir) return '📁';
+function fileExtension(name: string): string {
   const ext = (name.split('.').pop() || '').toLowerCase();
-  const map: Record<string, string> = {
-    js: '🟨', ts: '🔷', json: '📋', md: '📝', txt: '📄',
-    sh: '⚙️', bash: '⚙️', py: '🐍', html: '🌐', css: '🎨',
-    yml: '📦', yaml: '📦', xml: '📰', sql: '🗃️',
-    png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', svg: '🖼️',
-    zip: '📦', gz: '📦', tar: '📦',
-    log: '📜', env: '🔒', conf: '⚙️', cfg: '⚙️',
-  };
-  return map[ext] || '📄';
+  return ext && ext !== name.toLowerCase() ? ext : '';
+}
+
+function fileTone(item: DirItem): string {
+  if (item.isDrive) return 'drive';
+  if (item.isDir) return 'folder';
+  const ext = fileExtension(item.name);
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp'].includes(ext)) return 'image';
+  if (['zip', 'gz', 'tgz', 'tar', 'bz2', 'tbz2', 'xz', 'txz', 'rar', '7z'].includes(ext)) return 'archive';
+  if (['env', 'pem', 'key', 'crt'].includes(ext)) return 'secret';
+  if (['conf', 'cfg', 'ini', 'yml', 'yaml', 'json', 'xml'].includes(ext)) return 'config';
+  if (['js', 'ts', 'tsx', 'jsx', 'py', 'sh', 'bash', 'html', 'css', 'sql'].includes(ext)) return 'code';
+  if (['md', 'txt', 'log'].includes(ext)) return 'text';
+  return 'file';
+}
+
+function fileIconName(item: DirItem): string {
+  const tone = fileTone(item);
+  if (tone === 'drive') return 'server';
+  if (tone === 'folder') return 'folder';
+  if (tone === 'image') return 'image';
+  if (tone === 'archive') return 'archive';
+  if (tone === 'secret') return 'lock';
+  return 'file';
+}
+
+function fileIconClass(item: DirItem): string {
+  return `fb-file-icon-${fileTone(item)}`;
+}
+
+function fileBadge(item: DirItem): string {
+  if (item.isDir || item.isDrive) return '';
+  const ext = fileExtension(item.name);
+  if (!ext) return '';
+  return ext.slice(0, 4).toUpperCase();
 }
 
 function formatSize(bytes: number | undefined): string {
@@ -97,6 +147,30 @@ function formatSize(bytes: number | undefined): string {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function formatModified(value: number | undefined): string {
+  if (!value) return '--';
+  const timestamp = value < 10_000_000_000 ? value * 1000 : value;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleString();
+}
+
+function itemType(item: DirItem): string {
+  if (item.isDrive) return '磁盘';
+  if (item.isDir) return '目录';
+  const ext = (item.name.split('.').pop() || '').trim();
+  return ext ? ext.toUpperCase() : '文件';
+}
+
+function canExtract(item: DirItem): boolean {
+  return !item.isDrive && !item.isDir && isSupportedArchiveName(item.name);
+}
+
+function onHostChange(event: Event): void {
+  const hostId = (event.target as HTMLSelectElement).value;
+  if (hostId && hostId !== props.hostId) emit('hostChange', hostId);
 }
 
 function onItemClick(item: DirItem): void {
@@ -122,6 +196,16 @@ function onDeleteClick(event: MouseEvent, item: DirItem): void {
   void fb.deleteItem(item);
 }
 
+function onCompressClick(event: MouseEvent, item: DirItem): void {
+  event.stopPropagation();
+  void fb.compressItem(item);
+}
+
+function onExtractClick(event: MouseEvent, item: DirItem): void {
+  event.stopPropagation();
+  void fb.extractItem(item);
+}
+
 function onMaskClick(event: MouseEvent): void {
   if (event.target === event.currentTarget) fb.closePreview();
 }
@@ -133,10 +217,44 @@ function onSortChange(event: Event): void {
 
 <template>
   <div class="file-browser">
-    <!-- toolbar -->
     <div class="fb-toolbar">
-      <span class="fb-toolbar-title">{{ props.title }}</span>
+      <div class="fb-toolbar-main">
+        <div class="fb-host-picker">
+          <span class="fb-host-label">VPS</span>
+          <select
+            v-if="props.hostOptions.length"
+            class="fb-host-select"
+            :value="props.hostId || ''"
+            @change="onHostChange"
+          >
+            <option v-for="host in props.hostOptions" :key="host.id" :value="host.id">{{ host.name }}</option>
+          </select>
+          <span v-else class="fb-host-current">{{ selectedHostName }}</span>
+        </div>
+
+        <div v-if="fb.currentPath.value" class="fb-breadcrumb">
+          <template v-for="(c, i) in crumbs" :key="i">
+            <span
+              v-if="c.active"
+              class="fb-crumb fb-crumb-active"
+            >{{ c.label }}</span>
+            <button
+              v-else
+              type="button"
+              class="fb-crumb fb-crumb-link"
+              @click="fb.navigate(c.path)"
+            >{{ c.label }}</button>
+            <span v-if="i < crumbs.length - 1" class="fb-crumb-sep">›</span>
+          </template>
+        </div>
+      </div>
       <div class="fb-toolbar-actions">
+        <span
+          v-if="syncStatus"
+          class="fb-sync-status"
+          :class="{ 'fb-sync-status-stale': fb.cacheStale.value && !fb.refreshing.value }"
+          :title="syncTitle"
+        >{{ syncStatus }}</span>
         <select
           class="fb-sort-select"
           title="排序方式"
@@ -168,44 +286,30 @@ function onSortChange(event: Event): void {
         >⟳</button>
         <button
           type="button"
-          class="fb-mini-btn"
+          class="fb-mini-btn fb-action-btn"
           title="新建文件夹"
           @click="fb.createDirectory"
-        >＋📁</button>
+        ><AppIcon name="folder" :size="14" /><span>新建目录</span></button>
         <button
           type="button"
-          class="fb-mini-btn"
+          class="fb-mini-btn fb-action-btn"
           title="新建文件"
           @click="fb.createFile"
-        >＋📄</button>
+        ><AppIcon name="file-plus" :size="14" /><span>新建文件</span></button>
         <button
           type="button"
           class="fb-mini-btn"
           title="上传文件到当前目录"
           @click="fb.showUploadDialog"
-        >↑</button>
+        ><AppIcon name="arrow-up" :size="14" /></button>
       </div>
     </div>
-
-    <!-- breadcrumb -->
-    <div v-if="fb.currentPath.value" class="fb-breadcrumb">
-      <template v-for="(c, i) in crumbs" :key="i">
-        <span
-          v-if="c.active"
-          class="fb-crumb fb-crumb-active"
-        >{{ c.label }}</span>
-        <span
-          v-else
-          class="fb-crumb fb-crumb-link"
-          @click="fb.navigate(c.path)"
-        >{{ c.label }}</span>
-        <span v-if="i < crumbs.length - 1" class="fb-crumb-sep">›</span>
-      </template>
+    <div v-if="fb.loading.value || fb.refreshing.value || fb.operationLabel.value" class="fb-top-progress">
+      <span></span>
     </div>
 
-    <!-- body -->
     <div class="fb-body">
-      <div v-if="fb.loading.value" class="fb-loading">加载中...</div>
+      <div v-if="fb.loading.value && !visibleItems.length" class="fb-loading">加载中...</div>
 
       <template v-else-if="fb.error.value">
         <div class="fb-error">
@@ -235,53 +339,93 @@ function onSortChange(event: Event): void {
       </template>
 
       <template v-else>
-        <!-- 返回上级（非根目录） -->
-        <div
-          v-if="fb.parent.value && fb.parent.value !== fb.currentPath.value"
-          class="fb-item fb-item-up"
-          @click="fb.goBack"
-        >
-          <span class="fb-item-icon">↑</span>
-          <span class="fb-item-name">..</span>
+        <div class="fb-table" :class="{ 'fb-table-refreshing': fb.loading.value || fb.refreshing.value }">
+          <div class="fb-table-head">
+            <span>名称</span>
+            <span>类型</span>
+            <span>大小</span>
+            <span>修改时间</span>
+            <span>操作</span>
+          </div>
+
+          <button
+            v-if="fb.parent.value && fb.parent.value !== fb.currentPath.value"
+            type="button"
+            class="fb-row fb-row-up"
+            @click="fb.goBack"
+          >
+            <span class="fb-cell-name">
+              <span class="fb-file-icon fb-file-icon-up">
+                <AppIcon name="arrow-up" :size="14" />
+              </span>
+              <span class="fb-item-name">..</span>
+            </span>
+            <span class="fb-cell-muted">上级目录</span>
+            <span class="fb-cell-muted">--</span>
+            <span class="fb-cell-muted">--</span>
+            <span></span>
+          </button>
+
+          <div v-if="!visibleItems.length && !fb.parent.value" class="fb-empty">空目录</div>
+
+          <ul class="fb-list">
+            <li v-for="item in visibleItems" :key="item.path">
+              <div
+                class="fb-row"
+                :class="{ 'fb-item-dir': item.isDir || item.isDrive, 'fb-item-file': !item.isDir && !item.isDrive }"
+                @click="onItemClick(item)"
+              >
+                <span class="fb-cell-name">
+                  <span class="fb-file-icon" :class="fileIconClass(item)">
+                    <AppIcon :name="fileIconName(item)" :size="15" />
+                    <span v-if="fileBadge(item)" class="fb-file-badge">{{ fileBadge(item) }}</span>
+                  </span>
+                  <span class="fb-item-name">{{ item.name }}</span>
+                </span>
+                <span class="fb-cell-type">{{ itemType(item) }}</span>
+                <span class="fb-cell-size">{{ item.isDir || item.isDrive ? '--' : formatSize(item.size) }}</span>
+                <span class="fb-cell-time">{{ item.isDrive ? '--' : formatModified(item.mtime) }}</span>
+                <span class="fb-cell-actions">
+                  <button
+                    v-if="!item.isDir && !item.isDrive"
+                    type="button"
+                    class="fb-download-btn"
+                    title="下载"
+                    @click="onDownloadClick($event, item)"
+                  ><AppIcon name="download" :size="13" /></button>
+                  <button
+                    v-if="canExtract(item)"
+                    type="button"
+                    class="fb-download-btn"
+                    title="解压"
+                    @click="onExtractClick($event, item)"
+                  ><AppIcon name="archive-extract" :size="13" /></button>
+                  <button
+                    v-if="!item.isDrive"
+                    type="button"
+                    class="fb-download-btn"
+                    title="压缩"
+                    @click="onCompressClick($event, item)"
+                  ><AppIcon name="archive" :size="13" /></button>
+                  <button
+                    v-if="!item.isDrive"
+                    type="button"
+                    class="fb-download-btn"
+                    title="重命名"
+                    @click="onRenameClick($event, item)"
+                  ><AppIcon name="pen" :size="13" /></button>
+                  <button
+                    v-if="!item.isDrive"
+                    type="button"
+                    class="fb-download-btn fb-delete-btn"
+                    title="删除"
+                    @click="onDeleteClick($event, item)"
+                  ><AppIcon name="trash" :size="13" /></button>
+                </span>
+              </div>
+            </li>
+          </ul>
         </div>
-
-        <div v-if="!visibleItems.length && !fb.parent.value" class="fb-empty">空目录</div>
-
-        <ul class="fb-list">
-          <li v-for="item in visibleItems" :key="item.path">
-            <div
-              class="fb-item"
-              :class="{ 'fb-item-dir': item.isDir || item.isDrive, 'fb-item-file': !item.isDir && !item.isDrive }"
-              @click="onItemClick(item)"
-            >
-              <span class="fb-item-icon">{{ item.isDrive ? '💿' : fileIcon(item.name, item.isDir) }}</span>
-              <span class="fb-item-name">{{ item.name }}</span>
-              <span v-if="item.isDrive" class="fb-item-meta">本地磁盘</span>
-              <span v-else-if="!item.isDir" class="fb-item-size">{{ formatSize(item.size) }}</span>
-              <button
-                v-if="!item.isDir && !item.isDrive"
-                type="button"
-                class="fb-download-btn"
-                title="下载"
-                @click="onDownloadClick($event, item)"
-              >⬇</button>
-              <button
-                v-if="!item.isDrive"
-                type="button"
-                class="fb-download-btn"
-                title="重命名"
-                @click="onRenameClick($event, item)"
-              >✎</button>
-              <button
-                v-if="!item.isDrive"
-                type="button"
-                class="fb-download-btn fb-delete-btn"
-                title="删除"
-                @click="onDeleteClick($event, item)"
-              >✕</button>
-            </div>
-          </li>
-        </ul>
 
         <div class="fb-footer">
           <template v-if="fb.currentPath.value === '此电脑'">
@@ -300,7 +444,9 @@ function onSortChange(event: Event): void {
       <div class="fb-preview-card">
         <div class="fb-preview-header">
           <div class="fb-preview-title">
-            <span class="fb-preview-icon">{{ fb.preview.isImage ? '🖼️' : '📄' }}</span>
+            <span class="fb-preview-icon">
+              <AppIcon :name="fb.preview.isImage ? 'image' : 'file'" :size="16" />
+            </span>
             <span class="fb-preview-name">{{ fb.preview.fileName }}</span>
           </div>
           <div class="fb-preview-actions">

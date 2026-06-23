@@ -265,6 +265,10 @@ function onCustomKeydown(event: KeyboardEvent): void {
 
 <style scoped>
 .ide-approval-card {
+  min-height: 0;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid rgba(148, 163, 184, 0.38);
   border-radius: 8px;
@@ -289,6 +293,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
 }
 
 .ide-approval-head {
+  flex: none;
   display: flex;
   gap: 10px;
   padding: 14px 14px 12px;
@@ -369,6 +374,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
 }
 
 .ide-approval-meta {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -425,6 +431,11 @@ function onCustomKeydown(event: KeyboardEvent): void {
 }
 
 .ide-approval-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   display: grid;
   gap: 8px;
   padding: 12px 14px;
@@ -545,13 +556,21 @@ function onCustomKeydown(event: KeyboardEvent): void {
 }
 
 .ide-approval-actions {
+  flex: none;
   display: grid;
   gap: 8px;
-  padding: 0 14px 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.94), #f8fafc);
+  padding: 10px 14px 14px;
+}
+
+:global(.dark) .ide-approval-actions {
+  border-top-color: rgba(71, 85, 105, 0.75);
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.94), #111827);
 }
 
 .ide-approval-card--compact .ide-approval-actions {
-  padding: 0 12px 12px;
+  padding: 9px 12px 12px;
 }
 
 .ide-approval-decision,

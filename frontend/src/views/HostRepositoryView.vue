@@ -82,6 +82,23 @@ interface ProbeSamplesBulkResponse {
   samples?: Record<string, ProbeSample[]>;
 }
 
+type RepositoryMode = 'hosts' | 'runtime' | 'files';
+type RepositoryTab = 'detail' | 'probe' | 'files';
+
+const props = withDefaults(defineProps<{
+  mode?: RepositoryMode;
+  showTabs?: boolean;
+}>(), {
+  mode: 'hosts',
+  showTabs: false,
+});
+
+function tabForMode(mode: RepositoryMode): RepositoryTab {
+  if (mode === 'runtime') return 'probe';
+  if (mode === 'files') return 'files';
+  return 'detail';
+}
+
 const { requestJson } = useApiClient();
 const notify = useNotifyStore();
 const router = useRouter();
@@ -94,7 +111,7 @@ const search = ref('');
 const roleFilter = ref<'all' | HostRole | 'none'>('all');
 const statusFilter = ref<'all' | 'online' | 'offline' | 'unknown' | 'no-probe' | 'alerts'>('all');
 const archiveFilter = ref<'active' | 'archived' | 'all'>('active');
-const activeTab = ref<'detail' | 'probe' | 'files'>('detail');
+const activeTab = ref<RepositoryTab>(tabForMode(props.mode));
 const tagDraft = ref('');
 const draggingHostId = ref<string | null>(null);
 const draggingFromConsole = ref(false);
@@ -155,7 +172,35 @@ const archiveOptions: { value: typeof archiveFilter.value; label: string }[] = [
   { value: 'all', label: '全部资产' },
 ];
 
-const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value) || hosts.value[0] || null);
+const pageMeta = computed(() => {
+  if (props.mode === 'runtime') {
+    return {
+      title: '详情',
+      subtitle: '按 VPS 查看探针摘要、资源图表、内部体检与带宽趋势',
+      icon: 'chart',
+    };
+  }
+  if (props.mode === 'files') {
+    return {
+      title: '文件',
+      subtitle: '按 VPS 切换远程文件，路径、排序、新建与上传集中在文件工具栏',
+      icon: 'folder',
+    };
+  }
+  return {
+    title: 'VPS 仓库',
+    subtitle: '管理主机分组、主控显示与连接顺序',
+    icon: 'server',
+  };
+});
+
+const panelSelectorHosts = computed(() => hosts.value.slice().sort(sortPanelSelectorHosts));
+const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value) || panelSelectorHosts.value[0] || hosts.value[0] || null);
+const fileHostOptions = computed(() => panelSelectorHosts.value.map((host) => ({
+  id: host.id,
+  name: host.name,
+  meta: hostMeta(host),
+})));
 const consoleHosts = computed(() => hosts.value
   .filter((host) => host.preference.showInConsole && !host.preference.archived)
   .slice()
@@ -163,21 +208,25 @@ const consoleHosts = computed(() => hosts.value
 
 const filteredHosts = computed(() => {
   const kw = search.value.trim().toLowerCase();
-  return hosts.value.filter((host) => {
+  const sourceHosts = props.mode === 'hosts' ? hosts.value : panelSelectorHosts.value;
+  return sourceHosts.filter((host) => {
     if (archiveFilter.value === 'active' && host.preference.archived) return false;
     if (archiveFilter.value === 'archived' && !host.preference.archived) return false;
     if (roleFilter.value === 'none' && host.preference.role) return false;
     if (roleFilter.value !== 'all' && roleFilter.value !== 'none' && host.preference.role !== roleFilter.value) return false;
     if (!matchesStatusFilter(host)) return false;
     if (!kw) return true;
-    const haystack = [
-      host.name,
-      host.host,
-      host.username,
-      host.user,
-      host.preference.role ? roleLabels[host.preference.role] : '',
-      ...host.preference.tags,
-    ].filter(Boolean).join(' ').toLowerCase();
+    const haystack = (props.mode === 'hosts'
+      ? [
+        host.name,
+        host.host,
+        host.username,
+        host.user,
+        host.preference.role ? roleLabels[host.preference.role] : '',
+        ...host.preference.tags,
+      ]
+      : [host.name]
+    ).filter(Boolean).join(' ').toLowerCase();
     return haystack.includes(kw);
   });
 });
@@ -186,6 +235,16 @@ function sortConsoleHosts(a: RepositoryHost, b: RepositoryHost): number {
   if (a.preference.pinned !== b.preference.pinned) return a.preference.pinned ? -1 : 1;
   if (a.preference.consoleOrder !== b.preference.consoleOrder) return a.preference.consoleOrder - b.preference.consoleOrder;
   return a.name.localeCompare(b.name, 'zh-Hans-CN');
+}
+
+function isLocalHost(host: RepositoryHost): boolean {
+  return host.id === LOCAL_HOST_ID || host.type === 'local';
+}
+
+function sortPanelSelectorHosts(a: RepositoryHost, b: RepositoryHost): number {
+  if (isLocalHost(a) !== isLocalHost(b)) return isLocalHost(a) ? -1 : 1;
+  if (a.preference.archived !== b.preference.archived) return a.preference.archived ? 1 : -1;
+  return 0;
 }
 
 function matchesStatusFilter(host: RepositoryHost): boolean {
@@ -226,6 +285,25 @@ function formatLoad(value: number | null | undefined): string {
   return Number(value).toFixed(2);
 }
 
+function finiteNumber(value: number | null | undefined): number | null {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null;
+  return Number(value);
+}
+
+function gaugePercent(value: number | null | undefined, max = 100): number {
+  const numberValue = finiteNumber(value);
+  if (numberValue === null || max <= 0) return 0;
+  return Math.max(0, Math.min(100, (numberValue / max) * 100));
+}
+
+function gaugeStyle(value: number | null | undefined, max = 100): Record<string, string> {
+  const percent = gaugePercent(value, max);
+  const color = percent >= 90 ? '#ef4444' : percent >= 75 ? '#f59e0b' : '#2563eb';
+  return {
+    background: `conic-gradient(${color} ${percent}%, rgba(148, 163, 184, 0.22) 0)`,
+  };
+}
+
 function formatCount(value: number | null | undefined, unit = ''): string {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
   return `${Number(value)}${unit}`;
@@ -245,6 +323,17 @@ function formatTopPorts(values: ListeningPortSummary[] | null | undefined): stri
   return values
     .map((item) => [item.protocol, item.port, item.process].filter(Boolean).join('/'))
     .join('，');
+}
+
+function topPortLabels(values: ListeningPortSummary[] | null | undefined): string[] {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((item) => [item.protocol, item.port, item.process].filter(Boolean).join('/'))
+    .filter(Boolean);
+}
+
+function listValues(values: string[] | null | undefined): string[] {
+  return Array.isArray(values) ? values.filter(Boolean) : [];
 }
 
 function formatBytes(value: number | null | undefined): string {
@@ -298,7 +387,8 @@ async function loadHosts(): Promise<void> {
     const nextHosts = repositoryData.hosts || [];
     hosts.value = nextHosts;
     if (!selectedHostId.value || !hosts.value.some((host) => host.id === selectedHostId.value)) {
-      selectedHostId.value = hosts.value[0]?.id || null;
+      const defaultHost = props.mode === 'hosts' ? hosts.value[0] : panelSelectorHosts.value[0] || hosts.value[0];
+      selectedHostId.value = defaultHost?.id || null;
     }
   } catch (err) {
     notify.error((err as Error).message || '加载 VPS 仓库失败');
@@ -696,6 +786,10 @@ function selectHost(host: RepositoryHost): void {
   selectedHostId.value = host.id;
 }
 
+function selectHostId(hostId: string): void {
+  if (hosts.value.some((host) => host.id === hostId)) selectedHostId.value = hostId;
+}
+
 function isHostExpanded(host: RepositoryHost): boolean {
   return expandedHostIds.value.has(host.id);
 }
@@ -719,6 +813,13 @@ watch(
   },
 );
 
+watch(
+  () => props.mode,
+  (mode) => {
+    activeTab.value = tabForMode(mode);
+  },
+);
+
 onMounted(() => { void loadHosts(); });
 </script>
 
@@ -728,11 +829,11 @@ onMounted(() => { void loadHosts(); });
       <header class="host-repository-header shrink-0 min-h-14 flex items-center px-5 py-2 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
         <div class="flex items-center gap-3 shrink-0">
           <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-            <AppIcon name="server" :size="20" />
+            <AppIcon :name="pageMeta.icon" :size="20" />
           </span>
           <div>
-            <div class="text-base font-bold text-slate-700 dark:text-slate-200">VPS 仓库</div>
-            <div class="text-[11px] text-slate-400">管理主机分组、主控显示与连接顺序</div>
+            <div class="text-base font-bold text-slate-700 dark:text-slate-200">{{ pageMeta.title }}</div>
+            <div class="text-[11px] text-slate-400">{{ pageMeta.subtitle }}</div>
           </div>
         </div>
         <div class="flex-1"></div>
@@ -743,8 +844,11 @@ onMounted(() => { void loadHosts(); });
         >刷新</button>
       </header>
 
-      <main class="host-repository-layout grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[20%_30%_50%] gap-3">
-        <section class="host-repository-section min-w-0 min-h-0 rounded-3xl border border-white/70 bg-white/82 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#0b1324]/86 flex flex-col overflow-hidden">
+      <main
+        class="host-repository-layout grid flex-1 min-h-0 grid-cols-1 gap-3"
+        :class="props.mode === 'hosts' ? 'lg:grid-cols-[20%_30%_50%]' : props.mode === 'files' ? 'lg:grid-cols-1' : 'lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)]'"
+      >
+        <section v-if="props.mode === 'hosts'" class="host-repository-section min-w-0 min-h-0 rounded-3xl border border-white/70 bg-white/82 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#0b1324]/86 flex flex-col overflow-hidden">
           <div class="shrink-0 border-b border-slate-200/70 px-4 py-3 dark:border-white/10">
             <div class="flex items-center justify-between gap-2">
               <div>
@@ -836,6 +940,7 @@ onMounted(() => { void loadHosts(); });
         </section>
 
         <section
+          v-if="props.mode !== 'files'"
           class="host-repository-section min-w-0 min-h-0 rounded-3xl border bg-white/82 shadow-sm backdrop-blur dark:bg-[#0b1324]/86 flex flex-col overflow-hidden transition"
           :class="repositoryDropActive ? 'border-rose-400 ring-2 ring-rose-200 dark:border-rose-400/60 dark:ring-rose-400/20' : 'border-white/70 dark:border-white/10'"
           @dragover="onRepositoryDragOver($event)"
@@ -844,16 +949,18 @@ onMounted(() => { void loadHosts(); });
         >
           <div class="shrink-0 border-b border-slate-200/70 p-3 dark:border-white/10">
             <div class="flex items-center justify-between gap-2">
-              <h2 class="text-base font-semibold">全部 VPS</h2>
+              <h2 class="text-base font-semibold">{{ props.mode === 'hosts' ? '全部 VPS' : 'VPS' }}</h2>
               <span v-if="repositoryDropActive" class="rounded-full bg-rose-50 px-2 py-1 text-[11px] text-rose-600 dark:bg-rose-400/10 dark:text-rose-200">松手取消主控显示</span>
             </div>
-            <div class="mt-3 grid grid-cols-2 gap-2">
+            <div class="mt-3 grid gap-2" :class="props.mode === 'hosts' ? 'grid-cols-2' : 'grid-cols-1'">
               <input
                 v-model="search"
                 type="text"
-                placeholder="搜索名称 / IP / 用户 / 标签"
-                class="col-span-2 min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs outline-none focus:border-blue-400 dark:border-white/10 dark:bg-[#07111f]"
+                :placeholder="props.mode === 'hosts' ? '搜索名称 / IP / 用户 / 标签' : '搜索 VPS 名称'"
+                class="min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs outline-none focus:border-blue-400 dark:border-white/10 dark:bg-[#07111f]"
+                :class="props.mode === 'hosts' ? 'col-span-2' : ''"
               />
+              <template v-if="props.mode === 'hosts'">
               <select
                 v-model="roleFilter"
                 class="rounded-xl border border-slate-200 bg-white px-2 py-2 text-xs outline-none focus:border-blue-400 dark:border-white/10 dark:bg-[#07111f]"
@@ -872,6 +979,7 @@ onMounted(() => { void loadHosts(); });
               >
                 <option v-for="option in archiveOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
               </select>
+              </template>
             </div>
           </div>
           <div class="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
@@ -880,33 +988,37 @@ onMounted(() => { void loadHosts(); });
               <article
                 v-for="host in filteredHosts"
                 :key="host.id"
-                draggable="true"
+                :draggable="props.mode === 'hosts'"
                 role="button"
                 tabindex="0"
-                class="rounded-xl border p-2.5 transition cursor-grab active:cursor-grabbing"
+                class="rounded-xl border transition"
                 :class="[
+                  props.mode === 'hosts' ? 'cursor-grab p-2.5 active:cursor-grabbing' : 'cursor-pointer px-3 py-2.5',
                   host.id === selectedHost?.id ? 'border-blue-400 bg-blue-50/80 dark:border-blue-400/70 dark:bg-blue-400/10' : 'border-slate-200 bg-white/70 hover:border-blue-200 dark:border-white/10 dark:bg-white/[0.03] dark:hover:border-blue-400/40',
                   draggingHostId === host.id ? 'opacity-50' : '',
                   repositoryDragOverHostId === host.id ? 'ring-2 ring-blue-300 dark:ring-blue-400/40' : '',
                 ]"
-                @click="toggleHostCard(host)"
-                @keydown.enter.prevent="toggleHostCard(host)"
-                @keydown.space.prevent="toggleHostCard(host)"
-                @dragstart="onHostDragStart($event, host, false)"
+                @click="props.mode === 'hosts' ? toggleHostCard(host) : selectHost(host)"
+                @keydown.enter.prevent="props.mode === 'hosts' ? toggleHostCard(host) : selectHost(host)"
+                @keydown.space.prevent="props.mode === 'hosts' ? toggleHostCard(host) : selectHost(host)"
+                @dragstart="props.mode === 'hosts' ? onHostDragStart($event, host, false) : undefined"
                 @dragend="onDragEnd"
                 @dragover.stop.prevent="onRepositoryHostDragOver($event, host)"
                 @drop.stop.prevent="onRepositoryHostDrop($event, host)"
               >
                 <div class="flex items-center gap-2">
-                  <span class="h-2 w-2 shrink-0 rounded-full shadow" :class="statusClass(host)" />
+                  <span v-if="props.mode === 'hosts'" class="h-2 w-2 shrink-0 rounded-full shadow" :class="statusClass(host)" />
                   <h3 class="min-w-0 flex-1 truncate text-sm font-semibold">{{ host.name }}</h3>
+                  <template v-if="props.mode === 'hosts'">
                   <span class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium" :class="host.probe?.status === 'online' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200' : host.probe?.status === 'offline' ? 'bg-rose-100 text-rose-700 dark:bg-rose-400/15 dark:text-rose-200' : 'bg-slate-100 text-slate-600 dark:bg-white/8 dark:text-slate-300'">
                     {{ statusLabel(host) }}
                   </span>
                   <span v-if="host.preference.showInConsole" class="shrink-0 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200">主控</span>
                   <span v-if="host.preference.archived" class="shrink-0 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-white/10 dark:text-slate-300">归档</span>
                   <span class="shrink-0 text-[10px] text-slate-400">{{ isHostExpanded(host) ? '收起' : '展开' }}</span>
+                  </template>
                 </div>
+                <template v-if="props.mode === 'hosts'">
                 <p class="mt-1 truncate text-[11px] text-slate-500 dark:text-slate-400">{{ hostMeta(host) }}</p>
                 <div class="mt-2 grid grid-cols-3 gap-1.5 text-[11px]">
                   <div class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/[0.04]">
@@ -938,13 +1050,14 @@ onMounted(() => { void loadHosts(); });
                     <button v-if="host.id !== LOCAL_HOST_ID" type="button" class="rounded-lg border border-rose-200 px-2 py-1 text-rose-600 hover:bg-rose-50 dark:border-rose-400/20 dark:text-rose-200 dark:hover:bg-rose-400/10" @click.stop="deleteHost(host)">删除</button>
                   </div>
                 </div>
+                </template>
               </article>
             </template>
           </div>
         </section>
 
         <section class="host-repository-section host-repository-detail min-w-0 min-h-0 rounded-3xl border border-white/70 bg-white/82 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#0b1324]/86 flex flex-col overflow-hidden">
-          <div v-if="selectedHost" class="shrink-0 border-b border-slate-200/70 p-4 dark:border-white/10">
+          <div v-if="selectedHost && props.mode !== 'files'" class="shrink-0 border-b border-slate-200/70 p-4 dark:border-white/10">
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex items-center gap-2">
@@ -955,14 +1068,14 @@ onMounted(() => { void loadHosts(); });
               </div>
               <button type="button" class="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500" @click="openConsole(selectedHost)">打开主控终端</button>
             </div>
-            <div class="mt-4 flex gap-2 text-sm">
+            <div v-if="props.showTabs" class="mt-4 flex gap-2 text-sm">
               <button type="button" class="rounded-xl px-3 py-1.5" :class="activeTab === 'detail' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/8 dark:text-slate-300'" @click="activeTab = 'detail'">详情</button>
               <button type="button" class="rounded-xl px-3 py-1.5" :class="activeTab === 'probe' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/8 dark:text-slate-300'" @click="activeTab = 'probe'">运行情况</button>
               <button type="button" class="rounded-xl px-3 py-1.5" :class="activeTab === 'files' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/8 dark:text-slate-300'" @click="activeTab = 'files'">文件</button>
             </div>
           </div>
 
-          <div v-if="selectedHost" class="flex-1 min-h-0 overflow-y-auto p-4">
+          <div v-if="selectedHost" class="flex-1 min-h-0 overflow-y-auto" :class="activeTab === 'files' ? 'p-0' : 'p-4'">
             <div v-if="activeTab === 'detail'" class="space-y-4">
               <div class="grid grid-cols-2 gap-3">
                 <div class="rounded-2xl border border-slate-200 bg-white/70 p-3 dark:border-white/10 dark:bg-white/[0.03]"><p class="text-xs text-slate-500">SSH 用户</p><p class="mt-1 font-medium">{{ selectedHost.username || selectedHost.user || '-' }}</p></div>
@@ -1040,22 +1153,41 @@ onMounted(() => { void loadHosts(); });
               </div>
 
               <div class="grid grid-cols-2 gap-3 xl:grid-cols-4">
-                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
-                  <p class="text-xs text-slate-500">CPU</p>
-                  <p class="mt-2 text-2xl font-semibold">{{ formatPercent(selectedHost.probe?.cpu) }}</p>
+                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 text-center dark:border-white/10 dark:bg-white/[0.03]">
+                  <div class="mx-auto flex h-24 w-24 items-center justify-center rounded-full p-2" :style="gaugeStyle(selectedHost.probe?.cpu)">
+                    <div class="flex h-full w-full flex-col items-center justify-center rounded-full bg-white dark:bg-[#0b1324]">
+                      <p class="text-lg font-semibold">{{ formatPercent(selectedHost.probe?.cpu) }}</p>
+                    </div>
+                  </div>
+                  <p class="mt-3 text-sm font-semibold">CPU</p>
                   <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">IO wait {{ formatPercent(selectedHost.probe?.cpuIowait) }} · steal {{ formatPercent(selectedHost.probe?.cpuSteal) }}</p>
                 </div>
-                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
-                  <p class="text-xs text-slate-500">内存</p>
-                  <p class="mt-2 text-2xl font-semibold">{{ formatPercent(selectedHost.probe?.memory) }}</p>
+                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 text-center dark:border-white/10 dark:bg-white/[0.03]">
+                  <div class="mx-auto flex h-24 w-24 items-center justify-center rounded-full p-2" :style="gaugeStyle(selectedHost.probe?.memory)">
+                    <div class="flex h-full w-full flex-col items-center justify-center rounded-full bg-white dark:bg-[#0b1324]">
+                      <p class="text-lg font-semibold">{{ formatPercent(selectedHost.probe?.memory) }}</p>
+                    </div>
+                  </div>
+                  <p class="mt-3 text-sm font-semibold">内存</p>
+                  <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">当前占用</p>
                 </div>
-                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
-                  <p class="text-xs text-slate-500">磁盘</p>
-                  <p class="mt-2 text-2xl font-semibold">{{ formatPercent(selectedHost.probe?.disk) }}</p>
+                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 text-center dark:border-white/10 dark:bg-white/[0.03]">
+                  <div class="mx-auto flex h-24 w-24 items-center justify-center rounded-full p-2" :style="gaugeStyle(selectedHost.probe?.disk)">
+                    <div class="flex h-full w-full flex-col items-center justify-center rounded-full bg-white dark:bg-[#0b1324]">
+                      <p class="text-lg font-semibold">{{ formatPercent(selectedHost.probe?.disk) }}</p>
+                    </div>
+                  </div>
+                  <p class="mt-3 text-sm font-semibold">磁盘</p>
+                  <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">当前占用</p>
                 </div>
-                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
-                  <p class="text-xs text-slate-500">Load 1m</p>
-                  <p class="mt-2 text-2xl font-semibold">{{ formatLoad(selectedHost.probe?.load) }}</p>
+                <div class="rounded-2xl border border-slate-200 bg-white/70 p-4 text-center dark:border-white/10 dark:bg-white/[0.03]">
+                  <div class="mx-auto flex h-24 w-24 items-center justify-center rounded-full p-2" :style="gaugeStyle(selectedHost.probe?.load, 4)">
+                    <div class="flex h-full w-full flex-col items-center justify-center rounded-full bg-white dark:bg-[#0b1324]">
+                      <p class="text-lg font-semibold">{{ formatLoad(selectedHost.probe?.load) }}</p>
+                    </div>
+                  </div>
+                  <p class="mt-3 text-sm font-semibold">Load 1m</p>
+                  <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">负载参考</p>
                 </div>
               </div>
 
@@ -1076,44 +1208,104 @@ onMounted(() => { void loadHosts(); });
                 <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p class="text-sm font-semibold">系统内部体检</p>
-                    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">进程 / 端口 / 服务 / 日志 / 安全态，供内部 AI 与 MCP get_probe 直接读取。</p>
+                    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">端口、服务、进程、安全与日志的只读状态。</p>
                   </div>
                   <span class="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700 dark:bg-violet-400/10 dark:text-violet-200">systemHealth</span>
                 </div>
                 <div v-if="!selectedHost.probe?.systemHealth" class="rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500 dark:border-white/15 dark:text-slate-400">
                   暂无系统内部体检数据。请等待探针刷新；旧版 probe-agent 需要更新后才会上报 systemHealth。
                 </div>
-                <div v-else class="grid grid-cols-2 gap-3 xl:grid-cols-5">
+                <div v-else class="grid grid-cols-1 gap-3 xl:grid-cols-2 2xl:grid-cols-4">
                   <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
-                    <p class="text-[11px] text-slate-500">监听端口</p>
-                    <p class="mt-1 text-lg font-semibold">{{ formatCount(selectedHost.probe?.systemHealth?.network?.listeningPortCount) }}</p>
+                    <div class="flex items-center justify-between gap-3">
+                      <p class="text-sm font-semibold">网络</p>
+                      <span class="text-[11px] text-slate-400">端口 / 连接</span>
+                    </div>
+                    <div class="mt-3 grid grid-cols-2 gap-2">
+                      <div class="rounded-lg bg-white/80 p-2 dark:bg-[#07111f]/60">
+                        <p class="text-[11px] text-slate-500">监听端口</p>
+                        <p class="mt-1 text-lg font-semibold">{{ formatCount(selectedHost.probe?.systemHealth?.network?.listeningPortCount) }}</p>
+                      </div>
+                      <div class="rounded-lg bg-white/80 p-2 dark:bg-[#07111f]/60">
+                        <p class="text-[11px] text-slate-500">TCP 连接</p>
+                        <p class="mt-1 text-lg font-semibold">{{ formatCount(selectedHost.probe?.systemHealth?.network?.tcpConnectionCount) }}</p>
+                      </div>
+                    </div>
+                    <div class="mt-3 min-h-10" :title="formatTopPorts(selectedHost.probe?.systemHealth?.network?.topListeningPorts)">
+                      <p class="text-[11px] text-slate-500">Top 端口</p>
+                      <div v-if="topPortLabels(selectedHost.probe?.systemHealth?.network?.topListeningPorts).length" class="mt-2 flex flex-wrap gap-1.5">
+                        <span
+                          v-for="port in topPortLabels(selectedHost.probe?.systemHealth?.network?.topListeningPorts)"
+                          :key="port"
+                          class="max-w-full truncate rounded-lg bg-blue-50 px-2 py-1 text-[11px] text-blue-700 dark:bg-blue-400/10 dark:text-blue-200"
+                        >{{ port }}</span>
+                      </div>
+                      <p v-else class="mt-2 text-xs text-slate-400">暂无</p>
+                    </div>
                   </div>
                   <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
-                    <p class="text-[11px] text-slate-500">TCP 连接</p>
-                    <p class="mt-1 text-lg font-semibold">{{ formatCount(selectedHost.probe?.systemHealth?.network?.tcpConnectionCount) }}</p>
+                    <div class="flex items-center justify-between gap-3">
+                      <p class="text-sm font-semibold">服务 / 进程</p>
+                      <span class="text-[11px] text-slate-400">服务 / 进程</span>
+                    </div>
+                    <div class="mt-3 grid grid-cols-2 gap-2">
+                      <div class="rounded-lg bg-white/80 p-2 dark:bg-[#07111f]/60">
+                        <p class="text-[11px] text-slate-500">失败服务</p>
+                        <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.service?.failedServiceCount || 0) > 0 ? 'text-rose-600 dark:text-rose-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.service?.failedServiceCount) }}</p>
+                      </div>
+                      <div class="rounded-lg bg-white/80 p-2 dark:bg-[#07111f]/60">
+                        <p class="text-[11px] text-slate-500">僵尸进程</p>
+                        <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.process?.zombieCount || 0) > 0 ? 'text-amber-600 dark:text-amber-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.process?.zombieCount) }}</p>
+                      </div>
+                    </div>
+                    <div class="mt-3" :title="joinList(selectedHost.probe?.systemHealth?.service?.failedServices)">
+                      <p class="text-[11px] text-slate-500">失败服务列表</p>
+                      <div v-if="listValues(selectedHost.probe?.systemHealth?.service?.failedServices).length" class="mt-2 flex flex-wrap gap-1.5">
+                        <span
+                          v-for="service in listValues(selectedHost.probe?.systemHealth?.service?.failedServices)"
+                          :key="service"
+                          class="max-w-full truncate rounded-lg bg-rose-50 px-2 py-1 text-[11px] text-rose-700 dark:bg-rose-400/10 dark:text-rose-200"
+                        >{{ service }}</span>
+                      </div>
+                      <p v-else class="mt-2 text-xs text-slate-400">无</p>
+                    </div>
                   </div>
                   <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
-                    <p class="text-[11px] text-slate-500">僵尸进程</p>
-                    <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.process?.zombieCount || 0) > 0 ? 'text-amber-600 dark:text-amber-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.process?.zombieCount) }}</p>
+                    <div class="flex items-center justify-between gap-3">
+                      <p class="text-sm font-semibold">安全态</p>
+                      <span class="text-[11px] text-slate-400">firewall / SELinux</span>
+                    </div>
+                    <div class="mt-3 space-y-2">
+                      <div class="rounded-lg bg-white/80 p-2 dark:bg-[#07111f]/60">
+                        <p class="text-[11px] text-slate-500">防火墙</p>
+                        <p class="mt-1 break-words text-sm font-semibold">{{ formatState(selectedHost.probe?.systemHealth?.security?.firewallState) }}</p>
+                      </div>
+                      <div class="rounded-lg bg-white/80 p-2 dark:bg-[#07111f]/60">
+                        <p class="text-[11px] text-slate-500">SELinux</p>
+                        <p class="mt-1 break-words text-sm font-semibold">{{ formatState(selectedHost.probe?.systemHealth?.security?.selinuxState) }}</p>
+                      </div>
+                    </div>
                   </div>
                   <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
-                    <p class="text-[11px] text-slate-500">失败服务</p>
-                    <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.service?.failedServiceCount || 0) > 0 ? 'text-rose-600 dark:text-rose-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.service?.failedServiceCount) }}</p>
-                  </div>
-                  <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/[0.04]">
-                    <p class="text-[11px] text-slate-500">近 1h 错误日志</p>
-                    <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.logs?.recentErrorCount || 0) > 0 ? 'text-amber-600 dark:text-amber-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.logs?.recentErrorCount) }}</p>
-                  </div>
-                </div>
-                <div class="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
-                  <div class="rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-white/[0.04] dark:text-slate-300">
-                    <p><span class="text-slate-400">Top 端口：</span>{{ formatTopPorts(selectedHost.probe?.systemHealth?.network?.topListeningPorts) }}</p>
-                    <p class="mt-1"><span class="text-slate-400">失败服务：</span>{{ joinList(selectedHost.probe?.systemHealth?.service?.failedServices) }}</p>
-                  </div>
-                  <div class="rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-white/[0.04] dark:text-slate-300">
-                    <p><span class="text-slate-400">防火墙：</span>{{ formatState(selectedHost.probe?.systemHealth?.security?.firewallState) }}</p>
-                    <p class="mt-1"><span class="text-slate-400">SELinux：</span>{{ formatState(selectedHost.probe?.systemHealth?.security?.selinuxState) }}</p>
-                    <p class="mt-1"><span class="text-slate-400">日志摘要：</span>{{ joinList(selectedHost.probe?.systemHealth?.logs?.recentErrors) }}</p>
+                    <div class="flex items-center justify-between gap-3">
+                      <p class="text-sm font-semibold">日志</p>
+                      <span class="text-[11px] text-slate-400">近 1h</span>
+                    </div>
+                    <div class="mt-3 rounded-lg bg-white/80 p-2 dark:bg-[#07111f]/60">
+                      <p class="text-[11px] text-slate-500">错误日志</p>
+                      <p class="mt-1 text-lg font-semibold" :class="(selectedHost.probe?.systemHealth?.logs?.recentErrorCount || 0) > 0 ? 'text-amber-600 dark:text-amber-300' : ''">{{ formatCount(selectedHost.probe?.systemHealth?.logs?.recentErrorCount) }}</p>
+                    </div>
+                    <div class="mt-3" :title="joinList(selectedHost.probe?.systemHealth?.logs?.recentErrors)">
+                      <p class="text-[11px] text-slate-500">日志摘要</p>
+                      <div v-if="listValues(selectedHost.probe?.systemHealth?.logs?.recentErrors).length" class="mt-2 max-h-32 space-y-1 overflow-y-auto pr-1">
+                        <p
+                          v-for="line in listValues(selectedHost.probe?.systemHealth?.logs?.recentErrors)"
+                          :key="line"
+                          class="break-words rounded-lg bg-amber-50 px-2 py-1 text-[11px] leading-relaxed text-amber-800 dark:bg-amber-400/10 dark:text-amber-100"
+                        >{{ line }}</p>
+                      </div>
+                      <p v-else class="mt-2 text-xs text-slate-400">无</p>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1137,8 +1329,13 @@ onMounted(() => { void loadHosts(); });
               </div>
             </div>
 
-            <div v-else class="h-full min-h-[520px] overflow-hidden rounded-2xl border border-slate-200 bg-white/70 dark:border-white/10 dark:bg-white/[0.03]">
-              <FileBrowserPanel :host-id="selectedHost.id" title="当前 VPS 文件" />
+            <div v-else class="h-full min-h-[520px] overflow-hidden">
+              <FileBrowserPanel
+                :host-id="selectedHost.id"
+                :host-options="fileHostOptions"
+                title="文件"
+                @host-change="selectHostId"
+              />
             </div>
           </div>
 

@@ -193,6 +193,40 @@ function createFileRouter({ fileService }) {
     }
   });
 
+  /**
+   * POST /api/files/archive
+   * Body: { hostId, path, format? }
+   */
+  router.post('/files/archive', express.json(), async (req, res, next) => {
+    try {
+      const { hostId = 'local', path: targetPath, format } = req.body;
+      if (!targetPath) {
+        return res.status(400).json({ error: '缺少 path 参数' });
+      }
+      const result = await fileService.archivePath(hostId, targetPath, { format });
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * POST /api/files/extract
+   * Body: { hostId, path }
+   */
+  router.post('/files/extract', express.json(), async (req, res, next) => {
+    try {
+      const { hostId = 'local', path: targetPath } = req.body;
+      if (!targetPath) {
+        return res.status(400).json({ error: '缺少 path 参数' });
+      }
+      const result = await fileService.extractArchive(hostId, targetPath);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 

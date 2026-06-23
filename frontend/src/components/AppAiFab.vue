@@ -67,6 +67,15 @@ const MODULE_MAP: Record<string, ModuleContext> = {
   audit: { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },
   hosts: { name: '主机', icon: 'server', hint: '当前在主机页面。可查看和管理连接目标。' },
   'cli-setup': { name: 'AI 配置', icon: 'cog', hint: '当前在 AI 引擎配置页面。' },
+  'panel-hosts': { name: '主机', icon: 'server', hint: '当前在主机页面。可查看和管理连接目标。' },
+  'panel-runtime': { name: '详情', icon: 'chart', hint: '当前在详情页面。可按 VPS 查看探针摘要、资源图表、内部体检和带宽趋势。' },
+  'panel-files': { name: '文件', icon: 'folder', hint: '当前在文件页面。可按 VPS 浏览远程文件。' },
+  'panel-probe': { name: '探针监控', icon: 'radio', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
+  'panel-audit': { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },
+  'config-features': { name: '程序配置', icon: 'wrench', hint: '当前在配置 / 程序页面。可管理 AI 任务和纯代码程序。' },
+  'config-skills': { name: '扩展配置', icon: 'package', hint: '当前在配置 / 扩展页面。可管理 Skill、远程 MCP 和本地 MCP。' },
+  'config-mcp': { name: 'MCP 配置', icon: 'plug', hint: '当前在配置 / MCP 页面。可管理 MCP 服务、远程开放与凭证。' },
+  'config-ai': { name: 'AI 配置', icon: 'cog', hint: '当前在配置 / AI 页面。可管理 AI 引擎与模型渠道。' },
 };
 
 watch(

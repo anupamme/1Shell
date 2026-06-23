@@ -7,7 +7,11 @@ import AppSidebar from '@/components/AppSidebar.vue';
   <div class="panel-shell flex h-full">
     <AppSidebar />
     <div class="panel-content flex-1 min-w-0 overflow-hidden">
-      <RouterView />
+      <RouterView v-slot="{ Component, route }">
+        <KeepAlive>
+          <component :is="Component" :key="route.name" />
+        </KeepAlive>
+      </RouterView>
     </div>
   </div>
 </template>

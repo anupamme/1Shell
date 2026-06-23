@@ -199,7 +199,7 @@ function handleTaskSaved(payload: { taskId?: string; task?: unknown; action?: st
   const taskId = String(payload.taskId || task?.id || '').trim();
   if (!taskId) return;
   notify.success(payload.action === 'updated' ? 'AI 任务已更新到任务界面' : 'AI 任务已写入任务界面');
-  void router.push({ path: '/features', query: { tab: 'tasks', task: taskId } });
+  void router.push({ path: '/config/features', query: { tab: 'tasks', task: taskId } });
 }
 
 function parseTaskCommand(value: string): string | null {
@@ -448,7 +448,7 @@ async function saveEmptyTaskDraft(): Promise<void> {
     });
     taskModalOpen.value = false;
     notify.success('任务草稿已创建');
-    void router.push({ path: '/features', query: { tab: 'tasks', task: resp.task.id } });
+    void router.push({ path: '/config/features', query: { tab: 'tasks', task: resp.task.id } });
   } catch (err) {
     notify.error(err instanceof Error ? err.message : String(err), 5000);
   } finally {

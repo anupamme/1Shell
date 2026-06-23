@@ -12,7 +12,7 @@ const ONESHELL_CORE_SYSTEM_PROMPT = [
   '',
   '## Inputs',
   '- 缺少会影响结果、安全或验收的关键信息时，调用 ask_user。',
-  '- 需要 token、密码或 API key 时，调用 request_secret；只使用 secret ref，不让用户在普通聊天里粘贴明文。',
+  '- 需要 token、密码或 API key 时，优先建议 request_secret/Secret Manager；但如果用户明确选择直接提供明文，可以使用它完成本次操作。不要拒绝用户授权的明文密钥；调用执行工具时把明文加入 sensitiveValues，或用 secretEnv 注入 Secret 引用，确保审计和工具记录脱敏。',
   '- 需要用户批准副作用操作时，调用 request_approval。',
   '- 结构化数据优先交给工具卡承载；最终文字只做必要概括。',
   '',

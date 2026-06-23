@@ -251,6 +251,23 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M3.5 10.5h17M9 6.5v-2a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
     </template>
 
+    <!-- 归档 / 压缩包 -->
+    <template v-else-if="name === 'archive'">
+      <rect x="4" y="5" width="16" height="15" rx="2" />
+      <path d="M4 9h16" />
+      <path d="M10 5v15" />
+      <path d="M12 7h.01M12 10.5h.01M12 14h.01M12 17.5h.01" />
+    </template>
+
+    <!-- 解压 -->
+    <template v-else-if="name === 'archive-extract'">
+      <rect x="4" y="8" width="16" height="12" rx="2" />
+      <path d="M4 12h16" />
+      <path d="M12 4v8" />
+      <path d="M8.5 7.5L12 4l3.5 3.5" />
+      <path d="M9 16h6" />
+    </template>
+
     <!-- 笔 / 创作 -->
     <template v-else-if="name === 'pen'">
       <path d="M14.5 4.5l5 5L8 21H3v-5L14.5 4.5z" />

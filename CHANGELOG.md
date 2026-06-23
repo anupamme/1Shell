@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.5.0 - 2026-06-23
+
+4.5.0 把 1Shell 的 Panel 方向从“多 VPS 连接 + AI/CLI 宿主”推进到“多 VPS 服务器面板中枢”。这一版仍然保持 AI 在旁路：面板的发现、查看、操作、反馈和错误返回都走确定性流程，AI 只作为解释入口，不参与主流程。
+
+- 将配置能力从 Panel 中拆出为独立“配置”板块，并按 AI、扩展、程序、MCP 重新组织入口，让 Panel 专注服务器面板能力。
+- 将 Panel 导航调整为详情、主机、文件、探针、审计；详情页改为更接近服务器概览的布局，增加图形化健康与资源展示，并让本机在选择器中优先出现。
+- 重做文件浏览器：VPS 选择移动到顶部工具栏，文件区改为表格化浏览，补足路径、排序、创建、上传、下载、重命名、删除等面板式操作。
+- 优化远程文件浏览体验：加入目录缓存、stale-while-revalidate、顶部加载进度线和路径缓存别名，降低跨区域 VPS 浏览时的“点击后卡住”感。
+- 新增文件压缩与解压能力：文件/目录可生成压缩包，常见归档文件可解压到同目录新文件夹，目标冲突时拒绝覆盖或使用 `.extracted` 目录。
+- 调整密钥与审计边界：用户可以选择直接把密钥交给 AI 处理；审计不记录密钥明文，密码工具保留为可选能力但不强制替代用户意愿。
+- 改善长内容与审批/工具结果显示，补充复制入口，并修复部分亮色/暗色主题下文本不可读的问题。
+
+### Verification
+
+- `npm --prefix frontend run build`
+- `node --check src/services/file.service.js`
+- `node --check src/routes/file.routes.js`
+- Local archive/extract smoke test on Windows
+- `node scripts/repack-release-assets.js`
+
+### Release assets
+
+- Windows x64 updater package: `release/repacked/1shell-4.5.0-windows-x64.zip`
+  - SHA256: `7a7e93d333424220aca6bc8850ffd4f53a9f7ac9ab75ca9e4bfe2fdd60be834d`
+- Linux x64 updater package: `release/repacked/1shell-4.5.0-linux-x64.tar.gz`
+  - SHA256: `feb1d570d85948f42fa9d21a30ecf1dad9bd368654d418a5039e551741031fb3`
+
 ## 4.3.0 - 2026-06-22
 
 4.3.0 把第三方 AI CLI 从一个松散的配置入口，收敛成由 1Shell 托管的本地运行环境。Claude Code、Codex、OpenCode 仍然保持各自官方 Agent 的存在形式；1Shell 负责统一配置、网关转发、MCP 注入、CLI 运行目录隔离，以及 1Shell AI 的 VPS 工作区边界。

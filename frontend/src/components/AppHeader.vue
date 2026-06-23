@@ -18,6 +18,7 @@ const navItems: NavItem[] = [
   { to: '/agent',     label: 'Agent',  matchPrefix: '/agent' },
   { to: '/terminal',  label: '终端',   matchPrefix: '/terminal' },
   { to: '/panel',     label: '面板',   matchPrefix: '/panel' },
+  { to: '/config',    label: '配置',   matchPrefix: '/config' },
 ];
 
 function isActive(item: NavItem): boolean {

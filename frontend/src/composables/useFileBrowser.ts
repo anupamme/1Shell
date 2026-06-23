@@ -36,15 +36,28 @@ interface ReadFileResponse {
   size: number;
 }
 
+interface ArchiveResponse {
+  path: string;
+  filename?: string;
+  format?: string;
+}
+
 interface CacheEntry {
   data: DirListResponse;
   ts: number;
 }
 
-const DIR_CACHE_TTL_MS = 60_000;
-const DIR_CACHE_MAX = 50;
+const DIR_CACHE_TTL_MS = 5 * 60_000;
+const DIR_CACHE_STALE_MS = 30 * 60_000;
+const DIR_CACHE_MAX = 120;
 
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp'];
+const ARCHIVE_SUFFIXES = ['.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz', '.tar', '.zip', '.gz'];
+
+export function isSupportedArchiveName(name: string): boolean {
+  const lower = String(name || '').toLowerCase();
+  return ARCHIVE_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
 
 export interface PreviewState {
   open: boolean;
@@ -68,6 +81,11 @@ export interface FileBrowserApi {
   readonly isRoot: Ref<boolean>;
   readonly isWindows: Ref<boolean>;
   readonly loading: Ref<boolean>;
+  readonly refreshing: Ref<boolean>;
+  readonly operationLabel: Ref<string>;
+  readonly cacheStale: Ref<boolean>;
+  readonly lastLoadedAt: Ref<number>;
+  readonly pendingPath: Ref<string>;
   readonly error: Ref<string>;
   readonly showHidden: Ref<boolean>;
   readonly hiddenCount: Ref<number>;
@@ -89,6 +107,8 @@ export interface FileBrowserApi {
   createFile(): Promise<void>;
   renameItem(item: DirItem): Promise<void>;
   deleteItem(item: DirItem): Promise<void>;
+  compressItem(item: DirItem): Promise<void>;
+  extractItem(item: DirItem): Promise<void>;
   downloadFile(filePath: string): void;
   openPreview(filePath: string): Promise<void>;
   closePreview(): void;
@@ -137,6 +157,11 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
   const isRoot = ref(false);
   const isWindows = ref(false);
   const loading = ref(false);
+  const refreshing = ref(false);
+  const operationLabel = ref('');
+  const cacheStale = ref(false);
+  const lastLoadedAt = ref(0);
+  const pendingPath = ref('');
   const error = ref('');
   const showHidden = ref(true);
   const hiddenCount = ref(0);
@@ -166,25 +191,45 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
   let lastBlobUrl = '';
 
   function cacheKey(hostId: string, path: string): string {
-    return `${hostId}:${path || ''}`;
+    return `${hostId}:${normalizeCachePath(path)}`;
   }
 
-  function getCached(hostId: string, path: string): DirListResponse | null {
+  function normalizeCachePath(value: string | null | undefined): string {
+    const text = String(value || '').trim();
+    if (!text || text === '.' || text === '此电脑' || text === '__drives__') return '';
+    if (/^[A-Za-z]:[\\/]?$/.test(text)) return text.replace(/\//g, '\\');
+    return text.replace(/[\\/]+$/, '') || '/';
+  }
+
+  function getCacheEntry(hostId: string, path: string): CacheEntry | null {
     const entry = dirCache.get(cacheKey(hostId, path));
     if (!entry) return null;
-    if (Date.now() - entry.ts > DIR_CACHE_TTL_MS) {
+    if (Date.now() - entry.ts > DIR_CACHE_STALE_MS) {
       dirCache.delete(cacheKey(hostId, path));
       return null;
     }
-    return entry.data;
+    return entry;
+  }
+
+  function isFresh(entry: CacheEntry): boolean {
+    return Date.now() - entry.ts <= DIR_CACHE_TTL_MS;
   }
 
   function setCached(hostId: string, path: string, data: DirListResponse): void {
-    if (dirCache.size >= DIR_CACHE_MAX) {
-      const oldest = dirCache.keys().next().value;
-      if (oldest) dirCache.delete(oldest);
+    const keys = new Set([
+      cacheKey(hostId, path),
+      cacheKey(hostId, data.path || ''),
+    ]);
+    if (!path && data.path) keys.add(cacheKey(hostId, ''));
+    const entry = { data, ts: Date.now() };
+    for (const key of keys) {
+      while (dirCache.size >= DIR_CACHE_MAX && !dirCache.has(key)) {
+        const oldest = dirCache.keys().next().value;
+        if (oldest) dirCache.delete(oldest);
+        else break;
+      }
+      dirCache.set(key, entry);
     }
-    dirCache.set(cacheKey(hostId, path), { data, ts: Date.now() });
   }
 
   function invalidateHostCache(hostId: string): void {
@@ -216,7 +261,7 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     return true;
   }
 
-  function applyData(data: DirListResponse): void {
+  function applyData(data: DirListResponse, meta: { cachedAt?: number; stale?: boolean } = {}): void {
     const path = data.path || '';
     currentPath.value = path;
     items.value = data.items || [];
@@ -231,6 +276,8 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
       ? total
       : (data.items || []).filter((i) => !i.name.startsWith('.')).length;
     hiddenCount.value = total - visible;
+    lastLoadedAt.value = meta.cachedAt || Date.now();
+    cacheStale.value = Boolean(meta.stale);
     if (currentHostId) hostSnapshots.set(currentHostId, data);
   }
 
@@ -242,16 +289,23 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     const hostId = getHostId();
     const requestPath = dirPath === '此电脑' ? '' : dirPath;
     currentHostId = hostId;
+    pendingPath.value = requestPath || '根目录';
+    const cached = !opts.skipCache && requestPath !== '__drives__'
+      ? getCacheEntry(hostId, requestPath)
+      : null;
 
-    if (!opts.skipCache && requestPath !== '__drives__') {
-      const cached = getCached(hostId, requestPath);
-      if (cached) {
-        applyData(cached);
+    if (cached) {
+      applyData(cached.data, { cachedAt: cached.ts, stale: !isFresh(cached) });
+      pendingPath.value = '';
+      if (isFresh(cached)) {
+        loading.value = false;
+        refreshing.value = false;
         return;
       }
     }
 
-    loading.value = true;
+    loading.value = !cached;
+    refreshing.value = Boolean(cached);
     error.value = '';
 
     try {
@@ -260,12 +314,20 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
       const data = await requestJson<DirListResponse>(`/api/files/list?${params}`);
       if (currentHostId !== hostId) return;
       setCached(hostId, requestPath, data);
-      applyData(data);
+      applyData(data, { cachedAt: Date.now(), stale: false });
     } catch (err) {
       if (currentHostId !== hostId) return;
-      error.value = (err as Error).message || '加载失败';
+      if (cached) {
+        cacheStale.value = true;
+      } else {
+        error.value = (err as Error).message || '加载失败';
+      }
     } finally {
-      if (currentHostId === hostId) loading.value = false;
+      if (currentHostId === hostId) {
+        loading.value = false;
+        refreshing.value = false;
+        pendingPath.value = '';
+      }
     }
   }
 
@@ -295,6 +357,9 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
       isRoot.value = false;
       isWindows.value = false;
       hiddenCount.value = 0;
+      lastLoadedAt.value = 0;
+      cacheStale.value = false;
+      pendingPath.value = '';
       error.value = '';
     }
 
@@ -496,6 +561,60 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     }
   }
 
+  async function compressItem(item: DirItem): Promise<void> {
+    if (item.isDrive) return;
+    const ok = await confirm({
+      title: '压缩确认',
+      message: `将 "${item.name}" 压缩到当前目录，目标压缩包已存在时会拒绝覆盖。`,
+      okText: '压缩',
+    });
+    if (!ok) return;
+    const hostId = getHostId();
+    operationLabel.value = '压缩中';
+    try {
+      const result = await requestJson<ArchiveResponse>('/api/files/archive', {
+        method: 'POST',
+        body: JSON.stringify({ hostId, path: item.path }),
+      });
+      const filename = result.filename || result.path.split(/[\\/]/).pop() || '压缩包';
+      notify.success(`已生成 ${filename}`);
+      reloadCurrentDir(hostId);
+    } catch (err) {
+      notify.error(`压缩失败: ${(err as Error).message}`);
+    } finally {
+      operationLabel.value = '';
+    }
+  }
+
+  async function extractItem(item: DirItem): Promise<void> {
+    if (item.isDrive || item.isDir) return;
+    if (!isSupportedArchiveName(item.name)) {
+      notify.warn('暂不支持该归档格式');
+      return;
+    }
+    const ok = await confirm({
+      title: '解压确认',
+      message: `将 "${item.name}" 解压到同目录的新文件夹；同名目录已存在时会尝试使用 .extracted，仍冲突则拒绝覆盖。`,
+      okText: '解压',
+    });
+    if (!ok) return;
+    const hostId = getHostId();
+    operationLabel.value = '解压中';
+    try {
+      const result = await requestJson<ArchiveResponse>('/api/files/extract', {
+        method: 'POST',
+        body: JSON.stringify({ hostId, path: item.path }),
+      });
+      const dirname = result.path.split(/[\\/]/).pop() || '解压目录';
+      notify.success(`已解压到 ${dirname}`);
+      reloadCurrentDir(hostId);
+    } catch (err) {
+      notify.error(`解压失败: ${(err as Error).message}`);
+    } finally {
+      operationLabel.value = '';
+    }
+  }
+
   function clearBlobUrl(): void {
     if (lastBlobUrl) {
       URL.revokeObjectURL(lastBlobUrl);
@@ -624,6 +743,11 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     isRoot,
     isWindows,
     loading,
+    refreshing,
+    operationLabel,
+    cacheStale,
+    lastLoadedAt,
+    pendingPath,
     error,
     showHidden,
     hiddenCount,
@@ -644,6 +768,8 @@ function create(options: FileBrowserOptions = {}): FileBrowserApi {
     createFile,
     renameItem,
     deleteItem,
+    compressItem,
+    extractItem,
     downloadFile,
     openPreview,
     closePreview,

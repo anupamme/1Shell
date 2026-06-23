@@ -2,6 +2,7 @@
 
 const { BRIDGE_EXEC_TIMEOUT_MS } = require('../config/env');
 const { execLocalScript } = require('../../lib/exec-local');
+const { redactKnownSecrets } = require('../../lib/secret-redaction');
 
 /**
  * Bridge Service
@@ -57,10 +58,13 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
    * @param {string} [options.source] - 调用来源 ('mcp' | 'bridge_api')
    * @returns {Promise<{stdout: string, stderr: string, exitCode: number, durationMs: number}>}
    */
-  async function execOnHost(hostId, command, timeoutMs, { source = 'bridge_api', clientIp, auditCommand, signal, onOutput } = {}) {
+  async function execOnHost(hostId, command, timeoutMs, { source = 'bridge_api', clientIp, auditCommand, signal, onOutput, env, secrets } = {}) {
     throwIfAborted(signal);
 
-    const safeAuditCommand = auditCommand || command;
+    const execEnv = normalizeEnv(env);
+    const redactionSecrets = mergeSecrets(secrets, Object.values(execEnv));
+    const safeAuditCommand = auditCommand || redactKnownSecrets(command, redactionSecrets);
+    const redactingOutput = redactOutputHandler(onOutput, redactionSecrets);
 
     if (typeof commandGuard?.check === 'function') {
       const verdict = await commandGuard.check({ hostId, command, source });
@@ -88,25 +92,25 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
 
     // 本机：直接用 child_process 执行，不走 SSH
     if (host && host.type === 'local') {
-      return execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput });
+      return execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput: redactingOutput, env: execEnv, secrets: redactionSecrets });
     }
 
     // 持久 shell 模式（所有远端调用优先走此路径）
     // 优势：单次 SSH 握手，后续命令写 stdin，无 liveness check，极低延迟
     // 并发安全：sshShellPool 内置队列，同一 host 的并发命令自动排队
     if (sshShellPool) {
-      return execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput });
+      return execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput: redactingOutput, env: execEnv, secrets: redactionSecrets });
     }
 
     // 降级：没有 shell pool 时走 exec 模式（兼容旧配置）
-    return execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput });
+    return execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput: redactingOutput, env: execEnv, secrets: redactionSecrets });
   }
 
   // ─── 本机模式 ───────────────────────────────────────────────────────────
 
-  async function execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand, signal, onOutput }) {
+  async function execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand, signal, onOutput, env, secrets }) {
     const commandForAudit = auditCommand || command;
-    const result = await execLocalScript(command, { timeout, signal, windowsShell: 'cmd', onOutput });
+    const result = await execLocalScript(command, { timeout, signal, windowsShell: 'cmd', onOutput, env });
     auditService?.log({
       action: 'bridge_exec',
       source,
@@ -114,7 +118,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
       hostName,
       command: commandForAudit.substring(0, 2000),
       exitCode: result.exitCode,
-      error: result.exitCode === 0 ? undefined : result.stderr,
+      error: result.exitCode === 0 ? undefined : redactKnownSecrets(result.stderr, secrets),
       durationMs: result.durationMs,
       clientIp,
     });
@@ -123,11 +127,12 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
 
   // ─── 持久 shell 模式 ─────────────────────────────────────────────────────
 
-  async function execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput }) {
+  async function execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput, env, secrets }) {
     const startAt = Date.now();
     const commandForAudit = auditCommand || command;
+    const commandForExecution = withRemoteEnv(command, env);
     try {
-      const result = await sshShellPool.exec(hostId, command, timeout, { signal, onOutput });
+      const result = await sshShellPool.exec(hostId, commandForExecution, timeout, { signal, onOutput });
       auditService?.log({
         action: 'bridge_exec',
         source,
@@ -146,7 +151,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
         hostId,
         hostName,
         command: commandForAudit.substring(0, 2000),
-        error: err.message,
+        error: redactKnownSecrets(err.message, secrets),
         durationMs: Date.now() - startAt,
         clientIp,
       });
@@ -156,11 +161,12 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
 
   // ─── exec 模式（原有逻辑）────────────────────────────────────────────────
 
-  function execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput }) {
+  function execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput, env, secrets }) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(makeAbortError());
       const startAt = Date.now();
       const commandForAudit = auditCommand || command;
+      const commandForExecution = withRemoteEnv(command, env);
       let settled = false;
       let timer = null;
       let targetClient = null;
@@ -225,7 +231,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
           hostId,
           hostName,
           command: commandForAudit.substring(0, 2000),
-          error: err.message,
+          error: redactKnownSecrets(err.message, secrets),
           durationMs: Date.now() - startAt,
           clientIp,
         });
@@ -235,6 +241,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
       timer = setTimeout(() => {
         const err = new Error(`命令执行超时 (${timeout}ms): ${command}`);
         err.code = 'EXEC_TIMEOUT';
+        err.message = redactKnownSecrets(err.message.replace(String(command), String(commandForAudit)), secrets);
         fail(err);
       }, timeout);
       signal?.addEventListener?.('abort', onAbort, { once: true });
@@ -254,7 +261,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
           targetClient = client;
           proxyClientRef = usePool ? null : proxyClient;
 
-          client.exec(command, (err, stream) => {
+          client.exec(commandForExecution, (err, stream) => {
             if (err) {
               const execErr = new Error(`SSH exec 失败: ${err.message}`);
               execErr.code = 'SSH_EXEC_ERROR';
@@ -298,6 +305,48 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
   }
 
   return { execOnHost };
+}
+
+function normalizeEnv(env) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key || value === undefined || value === null) continue;
+    const name = String(key || '').trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) continue;
+    out[name] = String(value);
+  }
+  return out;
+}
+
+function mergeSecrets(...groups) {
+  return [...new Set(groups
+    .flatMap((group) => Array.isArray(group) ? group : [])
+    .map((value) => String(value || ''))
+    .filter((value) => value.length >= 3))]
+    .sort((a, b) => b.length - a.length);
+}
+
+function redactOutputHandler(onOutput, secrets) {
+  if (typeof onOutput !== 'function') return undefined;
+  return (chunk = {}) => {
+    try {
+      onOutput({ ...chunk, text: redactKnownSecrets(chunk.text || '', secrets) });
+    } catch { /* ignore */ }
+  };
+}
+
+function withRemoteEnv(command, env) {
+  const entries = Object.entries(normalizeEnv(env));
+  if (entries.length === 0) return command;
+  const exports = entries
+    .map(([key, value]) => `export ${key}=${shellQuote(value)};`)
+    .join(' ');
+  return `${exports}\n${command}`;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 module.exports = { createBridgeService };

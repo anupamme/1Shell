@@ -4,6 +4,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router';
 import AppIcon from '@/components/AppIcon.vue';
 import HostListToolResult from '@/components/ide/HostListToolResult.vue';
 import ProbeListToolResult from '@/components/ide/ProbeListToolResult.vue';
+import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import AgentSessionRail from '@/components/AgentSessionRail.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
@@ -1547,9 +1548,9 @@ function onKeydown(e: KeyboardEvent): void {
 }
 
 // ── approval ──
-function approveAction(action: 'allow' | 'deny'): void {
-  if (action === 'allow') ide.approveAllow();
-  else ide.approveDeny();
+function onSecretRefSubmit(secretRef: string): void {
+  ide.approveCustomText.value = secretRef;
+  ide.approveCustom();
 }
 </script>
 
@@ -1582,7 +1583,7 @@ function approveAction(action: 'allow' | 'deny'): void {
       @delete="onDeleteSession"
       @select-host="onRailSelectHost"
     />
-    <div class="agent-view-main flex flex-col flex-1 min-w-0 h-full">
+    <div class="agent-view-main flex flex-col flex-1 min-w-0 min-h-0 h-full">
     <!-- ── status bar ── -->
     <header class="agent-view-header shrink-0 flex items-center gap-3 px-6 h-12 border-b border-slate-200/80 dark:border-white/[0.06] bg-white/90 dark:bg-[#0d111b]/95 select-none">
       <button
@@ -1736,26 +1737,17 @@ function approveAction(action: 'allow' | 'deny'): void {
       </div>
 
       <!-- approval sidebar -->
-      <div v-if="ide.approveRequest.value" class="agent-approval-panel w-[380px] shrink-0 border-l border-slate-200 dark:border-white/[0.06] bg-stone-50 dark:bg-[#0f1321] flex flex-col overflow-hidden">
-        <div class="flex items-center gap-2 px-4 py-3 text-sm font-semibold text-amber-600 dark:text-amber-400 border-b border-slate-200 dark:border-white/[0.06]">
-          <AppIcon name="clock" :size="18" />
-          <span>等待确认</span>
-          <span class="ml-auto text-[11px] text-slate-400 dark:text-slate-500">{{ ide.approveRequest.value.countdown }}s</span>
-        </div>
-        <div class="flex-1 overflow-y-auto p-4 space-y-3">
-          <div class="text-xs text-slate-400 dark:text-slate-500 uppercase tracking-wider font-semibold">{{ ide.approveRequest.value.toolName }}</div>
-          <h3 class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ ide.approveRequest.value.title }}</h3>
-          <p v-if="ide.approveRequest.value.detail" class="text-[13px] text-slate-500 dark:text-slate-400 leading-relaxed">{{ ide.approveRequest.value.detail }}</p>
-          <div v-if="ide.approveRequest.value.workNote" class="rounded-lg bg-white dark:bg-[#0b0f19] border border-slate-200 dark:border-white/[0.04] p-3 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-            <span class="text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-600 block mb-1">工作笔记</span>
-            {{ ide.approveRequest.value.workNote }}
-          </div>
-          <pre v-if="ide.approveRequest.value.input" class="text-[11px] text-slate-600 dark:text-slate-300 bg-white dark:bg-[#0b0f19] border border-slate-200 dark:border-white/[0.04] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[200px] overflow-y-auto">{{ fmtVal(ide.approveRequest.value.input, 2000) }}</pre>
-        </div>
-        <div class="shrink-0 flex gap-2 p-4 border-t border-slate-200 dark:border-white/[0.06]">
-          <button class="flex-1 py-2 rounded-lg border border-red-200 dark:border-red-500/15 text-sm text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/5 transition-colors cursor-pointer" @click="approveAction('deny')">拒绝</button>
-          <button class="flex-1 py-2 rounded-lg bg-slate-900 dark:bg-sky-500 border border-slate-900 dark:border-sky-400 text-sm text-white font-medium hover:bg-slate-800 dark:hover:bg-sky-400 transition-colors cursor-pointer" @click="approveAction('allow')">允许</button>
-        </div>
+      <div v-if="ide.approveRequest.value" class="agent-approval-panel w-[380px] shrink-0 min-h-0 h-full border-l border-slate-200 dark:border-white/[0.06] bg-stone-50 dark:bg-[#0f1321] flex flex-col overflow-hidden">
+        <IdeApprovalCard
+          :request="ide.approveRequest.value"
+          :custom-text="ide.approveCustomText.value"
+          density="compact"
+          @update:custom-text="(value) => { ide.approveCustomText.value = value; }"
+          @allow="ide.approveAllow"
+          @deny="ide.approveDeny"
+          @custom="ide.approveCustom"
+          @secret-submit="onSecretRefSubmit"
+        />
       </div>
 
     </div>
@@ -1794,7 +1786,7 @@ function approveAction(action: 'allow' | 'deny'): void {
               </div>
             </button>
             <div v-if="!enabledModelOptions.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
-              暂无启用的渠道 · <RouterLink to="/panel/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
+              暂无启用的渠道 · <RouterLink to="/config/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
             </div>
           </template>
 
@@ -2020,7 +2012,7 @@ function approveAction(action: 'allow' | 'deny'): void {
                   </div>
                 </button>
                 <div v-if="!enabledModelOptions.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
-                  暂无启用的渠道 · <RouterLink to="/panel/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
+                  暂无启用的渠道 · <RouterLink to="/config/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
                 </div>
               </div>
             </div>
@@ -2268,6 +2260,15 @@ function approveAction(action: 'allow' | 'deny'): void {
   display: none;
 }
 
+.agent-approval-panel :deep(.ide-approval-card) {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .agent-view-shell--mobile-rail {
   position: relative;
 }
@@ -2305,18 +2306,22 @@ function approveAction(action: 'allow' | 'deny'): void {
 }
 
 .agent-md :deep(pre) {
-  background: #f5f5f4;
-  border: 1px solid #e7e5e4;
-  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 0;
+  border-radius: 0;
   padding: 12px 14px;
   overflow-x: auto;
   font-size: 12.5px;
   line-height: 1.6;
 }
 :global(.dark) .agent-md :deep(pre) {
-  background: #0b0f19;
-  border-color: rgba(255,255,255,0.04);
+  background: transparent;
   color: #e2e8f0;
+}
+.agent-md :deep(.markdown-code-block) {
+  border-color: rgba(51, 65, 85, 0.92);
+  background: #0f172a;
 }
 .agent-md :deep(code) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;

@@ -558,7 +558,7 @@ onMounted(() => {
       </div>
       <div class="flex-1"></div>
       <RouterLink
-        to="/skills"
+        to="/config/skills"
         class="text-[12px] px-3 h-8 rounded-lg border border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 inline-flex items-center gap-1.5 mr-2"
       >
         <AppIcon name="package" :size="13" />
