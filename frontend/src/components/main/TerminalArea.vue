@@ -12,6 +12,7 @@ import GhostOverlay from '@/components/main/GhostOverlay.vue';
 import ScriptInjectPanel from '@/components/main/ScriptInjectPanel.vue';
 import SuggestionBox from '@/components/main/SuggestionBox.vue';
 import { useCommandSuggestion } from '@/composables/useCommandSuggestion';
+import { useAiChat } from '@/composables/useAiChat';
 import { useScriptInject } from '@/composables/useScriptInject';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useTerminalAi } from '@/composables/useTerminalAi';
@@ -40,6 +41,7 @@ const emit = defineEmits<{
 
 const hosts = useHostsStore();
 const sessionTerminal = useSessionTerminal();
+const aiChat = useAiChat();
 const terminalAi = useTerminalAi();
 const commandSuggestion = useCommandSuggestion();
 const scriptInject = useScriptInject();
@@ -49,10 +51,8 @@ const terminalEl = ref<HTMLElement | null>(null);
 const isFullscreen = ref(false);
 const showSuggestionBox = ref(true);
 
-const activeHost = computed(() => hosts.hostMap.get(sessionTerminal.activeHostId.value) || hosts.hostMap.get(LOCAL_HOST_ID) || null);
 const statusDotClass = computed(() => sessionTerminal.statusKind.value);
 const sessionsList = computed(() => [...sessionTerminal.sessions.value.values()].filter((s) => s.status !== 'closed'));
-const aiContextText = computed(() => activeHost.value ? `当前上下文：${activeHost.value.name}` : '当前上下文：本机');
 
 function tabName(session: SessionInfo): string {
   return hosts.hostMap.get(session.hostId)?.name || session.hostName || session.hostId;
@@ -102,6 +102,7 @@ function closeSuggestion(): void {
 onMounted(() => {
   sessionTerminal.resumeUserInput(0);
   if (terminalEl.value) sessionTerminal.mount(terminalEl.value);
+  aiChat.initialize();
   terminalAi.initialize();
   commandSuggestion.initialize();
   scriptInject.initialize();
@@ -161,9 +162,21 @@ onBeforeUnmount(() => {
           class="terminal-inline-preview"
           :class="{ hidden: !terminalAi.inlinePreviewText.value }"
         >{{ terminalAi.inlinePreviewText.value }}</span>
-        <span id="ai-context-text" class="ai-context-text" :class="{ hidden: !activeHost }">
-          {{ aiContextText }}
-        </span>
+        <label id="ai-context-text" class="ai-context-control">
+          <span>AI</span>
+          <select
+            v-model="aiChat.activeScopeKey.value"
+            class="ai-context-select"
+            :disabled="aiChat.isStreaming.value"
+            title="切换 1Shell AI 范围"
+          >
+            <option
+              v-for="scope in aiChat.scopeOptions.value"
+              :key="scope.key"
+              :value="scope.key"
+            >{{ scope.label }}</option>
+          </select>
+        </label>
       </div>
       <div class="terminal-probe-strip" aria-label="主机简况">
         <span class="terminal-probe-host">{{ props.hostName }}</span>

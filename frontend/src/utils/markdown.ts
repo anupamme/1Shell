@@ -8,11 +8,17 @@ const markdownOptions = {
 
 const md = new MarkdownIt(markdownOptions);
 const mdNoTables = new MarkdownIt(markdownOptions).disable('table');
+const mdLiteralInlineCode = new MarkdownIt(markdownOptions).disable('backticks');
+const mdNoTablesLiteralInlineCode = new MarkdownIt(markdownOptions)
+  .disable('table')
+  .disable('backticks');
 
 export type MarkdownTableMode = 'enabled' | 'disabled' | 'safe';
+export type MarkdownInlineCodeMode = 'enabled' | 'disabled' | 'safe';
 
 export interface RenderMarkdownOptions {
   tables?: MarkdownTableMode | boolean;
+  inlineCode?: MarkdownInlineCodeMode | boolean;
 }
 
 const ALLOWED_TAGS = new Set([
@@ -98,11 +104,21 @@ md.renderer.rules.fence = renderCodeBlock;
 md.renderer.rules.code_block = renderCodeBlock;
 mdNoTables.renderer.rules.fence = renderCodeBlock;
 mdNoTables.renderer.rules.code_block = renderCodeBlock;
+mdLiteralInlineCode.renderer.rules.fence = renderCodeBlock;
+mdLiteralInlineCode.renderer.rules.code_block = renderCodeBlock;
+mdNoTablesLiteralInlineCode.renderer.rules.fence = renderCodeBlock;
+mdNoTablesLiteralInlineCode.renderer.rules.code_block = renderCodeBlock;
 
 function normalizeTableMode(value: RenderMarkdownOptions['tables']): MarkdownTableMode {
   if (value === false) return 'disabled';
   if (value === true || value === undefined) return 'enabled';
   return value;
+}
+
+function normalizeInlineCodeMode(value: RenderMarkdownOptions['inlineCode']): MarkdownInlineCodeMode {
+  if (value === false) return 'disabled';
+  if (value === true) return 'enabled';
+  return value || 'safe';
 }
 
 function isEscaped(text: string, index: number): boolean {
@@ -181,6 +197,43 @@ function fencePlainTextBlock(lines: string[]): string[] {
   return [fence, block, fence];
 }
 
+function textOutsideFences(source: string): string {
+  const lines = String(source || '').split(/\r?\n/);
+  const out: string[] = [];
+  let fence: { marker: '`' | '~'; length: number } | null = null;
+  for (const line of lines) {
+    const fenceLine = isFenceLine(line);
+    if (fence) {
+      if (canCloseFence(line, fence)) fence = null;
+      continue;
+    }
+    if (fenceLine) {
+      fence = fenceLine;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+function hasSuspiciousInlineCode(source: string): boolean {
+  const text = textOutsideFences(source);
+  if (hasUnbalancedBackticks(text)) return true;
+  if (/(^|[^\\])`[^`\n]{1,32}`\.[A-Za-z0-9_-]+/.test(text)) return true;
+  return /(^|[^\\])`[\p{Script=Han}\s，。！？、：；]{1,12}`/u.test(text);
+}
+
+function shouldRenderInlineCode(source: string, mode: MarkdownInlineCodeMode): boolean {
+  if (mode === 'disabled') return false;
+  if (mode === 'enabled') return true;
+  return !hasSuspiciousInlineCode(source);
+}
+
+function rendererFor(tableMode: MarkdownTableMode, inlineCode: boolean): MarkdownIt {
+  if (tableMode === 'disabled') return inlineCode ? mdNoTables : mdNoTablesLiteralInlineCode;
+  return inlineCode ? md : mdLiteralInlineCode;
+}
+
 function isUnsafeTableBlock(lines: string[]): boolean {
   if (lines.length < 2) return true;
   const header = splitTableLine(lines[0]);
@@ -239,8 +292,9 @@ function protectUnsafeMarkdownTables(source: string): string {
 
 export function renderMarkdown(text: string, options: RenderMarkdownOptions = {}): string {
   const mode = normalizeTableMode(options.tables);
+  const inlineCodeMode = normalizeInlineCodeMode(options.inlineCode);
   const source = mode === 'safe' ? protectUnsafeMarkdownTables(String(text || '')) : String(text || '');
-  const renderer = mode === 'disabled' ? mdNoTables : md;
+  const renderer = rendererFor(mode, shouldRenderInlineCode(source, inlineCodeMode));
   return sanitizeHtml(renderer.render(source));
 }
 

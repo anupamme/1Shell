@@ -17,6 +17,7 @@
  */
 
 const crypto = require('crypto');
+const { StringDecoder } = require('string_decoder');
 
 const IDLE_TIMEOUT_MS = 120000;  // 空闲 2 分钟后断开
 const CONNECT_TIMEOUT_MS = 15000;
@@ -78,6 +79,7 @@ function createSshShellPool({ hostService }) {
     const closeError = reason || new Error('shell connection closed');
     const entry = pool.get(hostId);
     if (!entry) return;
+    flushEntryDecoder(entry);
     pool.delete(hostId);
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     if (entry.pendingCmd) {
@@ -92,6 +94,13 @@ function createSshShellPool({ hostService }) {
     try { entry.shell?.close(); } catch { /* ignore */ }
     try { entry.client?.end(); } catch { /* ignore */ }
     try { entry.proxyClient?.end(); } catch { /* ignore */ }
+  }
+
+  function flushEntryDecoder(entry) {
+    if (!entry?.decoder) return;
+    const tail = entry.decoder.end();
+    if (tail) entry.buffer += tail;
+    entry.decoder = new StringDecoder('utf8');
   }
 
   function resetIdleTimer(hostId) {
@@ -132,7 +141,7 @@ function createSshShellPool({ hostService }) {
     const entry = pool.get(hostId);
     if (!entry || !entry.pendingCmd) return;
 
-    entry.buffer += chunk.toString('utf8');
+    entry.buffer += entry.decoder.write(chunk);
     emitPendingOutput(entry);
 
     const { endMarker } = entry.pendingCmd;
@@ -217,6 +226,7 @@ function createSshShellPool({ hostService }) {
       idleTimer: null,
       busy: false,
       buffer: '',
+      decoder: new StringDecoder('utf8'),
       pendingCmd: null,
       queue: [],    // 并发请求排队
     };
@@ -235,12 +245,14 @@ function createSshShellPool({ hostService }) {
     await new Promise((r) => setTimeout(r, 200));
     // 清空初始 banner/prompt
     entry.buffer = '';
+    entry.decoder = new StringDecoder('utf8');
 
     // 设置 shell 环境：关闭 prompt、echo，让输出更干净
     shell.write('export PS1="" PS2="" PROMPT_COMMAND=""\n');
     shell.write('stty -echo 2>/dev/null\n');
     await new Promise((r) => setTimeout(r, 100));
     entry.buffer = '';
+    entry.decoder = new StringDecoder('utf8');
 
     resetIdleTimer(hostId);
     return entry;
@@ -308,6 +320,7 @@ function createSshShellPool({ hostService }) {
     return new Promise((resolve, reject) => {
       entry.busy = true;
       entry.buffer = '';
+      entry.decoder = new StringDecoder('utf8');
 
       const onAbort = () => {
         if (!entry.pendingCmd) return;

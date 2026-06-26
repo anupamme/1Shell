@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
+const { StringDecoder } = require('string_decoder');
 const fetch = require('node-fetch');
 const { emitIdeEvent } = require('./ide.events');
 const {
@@ -31,7 +32,7 @@ const {
 } = require('./ide.agent-kernel');
 
 function emitToSession(session, fallbackSocket, event, payload) {
-  const target = session ? session.socket : fallbackSocket;
+  const target = session?.socket || fallbackSocket;
   try { emitIdeEvent(target, event, payload); } catch { /* ignore */ }
 }
 
@@ -100,6 +101,7 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
     let modelId = '';
     let inputTokens = 0, outputTokens = 0;
     let emittedTextDelta = false;
+    const decoder = new StringDecoder('utf8');
     let buffer = '';
     let resolved = false;
 
@@ -237,7 +239,7 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
 
     stream.on('data', (chunk) => {
       if (resolved) return;
-      buffer += chunk.toString();
+      buffer += decoder.write(chunk);
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) {
@@ -247,6 +249,8 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
     });
 
     stream.on('end', () => {
+      buffer += decoder.end();
+      if (buffer && !resolved) processLine(buffer);
       abortController.signal.removeEventListener('abort', onAbort);
       finish();
     });
@@ -345,9 +349,12 @@ function isProviderProtocolError(err) {
   return /No tool call found for function call output|invalid_request_error|Provider (?:返回|杩斿洖) 400|HTTP 400|status 400/i.test(message);
 }
 
+const EXACT_MODEL_TOOL_RESULTS = new Set(['read_remote_file']);
+
 function compactToolResultForModel(toolName, content) {
   const text = toolContentPreview(content);
   if (!text) return content;
+  if (EXACT_MODEL_TOOL_RESULTS.has(String(toolName || '').trim())) return content;
   const compacted = compactTerminalOutputForModel(text, 5000, 160);
   return compacted === text && text.length <= 5000 ? content : compacted;
 }
@@ -3484,18 +3491,24 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return Boolean(sessionId) && !String(sessionId).startsWith('mcp-ai-');
   }
 
-  function sessionTextFromContent(content) {
-    if (typeof content === 'string') return content.trim();
+  function sessionTextFromContent(content, options = {}) {
+    const preserveWhitespace = options.preserveWhitespace === true;
+    if (typeof content === 'string') {
+      const raw = content;
+      if (isCompactSummaryText(raw)) return raw;
+      if (isDetachedToolResultText(raw)) return '';
+      return preserveWhitespace ? raw : raw.replace(/\s+/g, ' ').trim();
+    }
     if (!Array.isArray(content)) return '';
     const parts = [];
     for (const blk of content) {
       if (typeof blk === 'string') parts.push(blk);
       else if (blk && blk.type === 'text' && blk.text) parts.push(blk.text);
     }
-    const raw = parts.join('\n').trim();
+    const raw = parts.join('');
     if (isCompactSummaryText(raw)) return raw;
     if (isDetachedToolResultText(raw)) return '';
-    return raw.replace(/\s+/g, ' ').trim();
+    return preserveWhitespace ? raw : raw.replace(/\s+/g, ' ').trim();
   }
 
   function stringifyToolResultContent(content) {
@@ -3566,6 +3579,11 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     const toolIndex = new Map();
     let seq = 0;
     const nextId = (prefix) => `${prefix}-${seq++}`;
+    const pushTextItem = (kind, role, rawText) => {
+      const text = sessionTextFromContent(String(rawText || ''), { preserveWhitespace: true });
+      if (!text || !text.trim()) return;
+      items.push({ id: nextId(kind), kind, role, text, status: role === 'assistant' ? 'done' : undefined });
+    };
     for (const msg of (Array.isArray(messages) ? messages : [])) {
       const { role, content } = msg || {};
       if (role === 'user') {
@@ -3579,22 +3597,36 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
             item.status = blk.is_error ? 'error' : 'done';
           }
         }
-        const text = sessionTextFromContent(content);
+        const text = sessionTextFromContent(content, { preserveWhitespace: true });
         if (text && isCompactSummaryText(text)) {
           items.push({ id: nextId('system'), kind: 'system', title: '/compact', text: compactSummaryTimelineText(text), tone: 'success' });
-        } else if (text) {
+        } else if (text && text.trim()) {
           items.push({ id: nextId('user'), kind: 'user', role: 'user', text });
         }
       } else if (role === 'assistant') {
         const blocks = Array.isArray(content) ? content : [{ type: 'text', text: String(content || '') }];
-        const text = sessionTextFromContent(blocks);
-        if (text) items.push({ id: nextId('assistant'), kind: 'assistant', role: 'assistant', text, status: 'done' });
+        let pendingText = '';
+        const flushText = () => {
+          if (!pendingText) return;
+          pushTextItem('assistant', 'assistant', pendingText);
+          pendingText = '';
+        };
         for (const blk of blocks) {
+          if (typeof blk === 'string') {
+            pendingText += blk;
+            continue;
+          }
+          if (blk?.type === 'text' && blk.text) {
+            pendingText += blk.text;
+            continue;
+          }
           if (blk?.type !== 'tool_use') continue;
+          flushText();
           const item = { id: `tool-${blk.id}`, kind: 'tool', toolUseId: blk.id, name: blk.name || 'unknown', status: 'done', startedAt: 0, input: blk.input, logs: [] };
           items.push(item);
           toolIndex.set(blk.id, item);
         }
+        flushText();
       }
     }
     return items;
@@ -4148,7 +4180,9 @@ module.exports = {
     AGENT_ATTACHMENT_MAX_TEXT_BYTES,
     assistantTraceSummary,
     buildAgentUserContent,
+    compactToolResultForModel,
     expandExactTextReferences,
     normalizeAgentAttachments,
+    streamAnthropicSSE,
   },
 };

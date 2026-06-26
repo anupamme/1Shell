@@ -27,6 +27,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 const fetch = require('node-fetch');
 
 const { parseFrontmatter } = require('./registry');
@@ -439,6 +440,7 @@ function parseAnthropicSSE(stream, signal) {
     let stopSeq = null;
     let modelId = '';
     let inputTokens = 0, outputTokens = 0;
+    const decoder = new StringDecoder('utf8');
     let buffer = '';
     let settled = false;
 
@@ -545,13 +547,15 @@ function parseAnthropicSSE(stream, signal) {
 
     stream.on('data', (chunk) => {
       if (settled) return;
-      buffer += chunk.toString();
+      buffer += decoder.write(chunk);
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) processLine(line);
     });
 
     stream.on('end', () => {
+      buffer += decoder.end();
+      if (buffer && !settled) processLine(buffer);
       settle(resolve, buildMessage());
     });
 

@@ -4,6 +4,7 @@
 import { nextTick, onMounted, ref, watch } from 'vue';
 
 import { useAiChat } from '@/composables/useAiChat';
+import type { AiChatSession } from '@/composables/useAiChat';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 
 const chat = useAiChat();
@@ -34,19 +35,70 @@ function onKeydown(event: KeyboardEvent): void {
     void chat.sendMessage();
   }
 }
+
+function sessionOptionText(session: AiChatSession): string {
+  const title = session.title || '新对话';
+  const scope = chat.scopeLabel(session.scope);
+  return `${title} · ${scope}`;
+}
 </script>
 
 <template>
   <div class="ai-chat-panel">
     <!-- header -->
     <div class="ai-chat-header">
-      <span class="ai-chat-title">AI 运维助手</span>
-      <button
-        type="button"
-        class="ai-chat-clear-btn"
-        :disabled="chat.isStreaming.value"
-        @click="chat.resetCurrentChat"
-      >清空</button>
+      <div class="ai-chat-header-main">
+        <span class="ai-chat-title">1Shell AI</span>
+        <button
+          type="button"
+          class="ai-chat-action-btn primary"
+          :disabled="chat.isStreaming.value"
+          @click="chat.startNewChat()"
+        >新对话</button>
+      </div>
+      <div class="ai-chat-session-controls">
+        <label class="ai-chat-control">
+          <span>范围</span>
+          <select
+            v-model="chat.activeScopeKey.value"
+            class="ai-chat-select"
+            :disabled="chat.isStreaming.value"
+          >
+            <option
+              v-for="scope in chat.scopeOptions.value"
+              :key="scope.key"
+              :value="scope.key"
+            >{{ scope.label }}</option>
+          </select>
+        </label>
+        <label class="ai-chat-control grow">
+          <span>历史</span>
+          <select
+            v-model="chat.activeSessionId.value"
+            class="ai-chat-select"
+          >
+            <option
+              v-for="session in chat.sessionsList.value"
+              :key="session.id"
+              :value="session.id"
+            >{{ sessionOptionText(session) }}</option>
+          </select>
+        </label>
+      </div>
+      <div class="ai-chat-header-actions">
+        <button
+          type="button"
+          class="ai-chat-action-btn"
+          :disabled="chat.isStreaming.value"
+          @click="chat.resetCurrentChat"
+        >清空</button>
+        <button
+          type="button"
+          class="ai-chat-action-btn danger"
+          :disabled="chat.isStreaming.value || chat.sessionsList.value.length <= 1"
+          @click="chat.deleteCurrentChat"
+        >删除</button>
+      </div>
     </div>
 
     <!-- messages -->

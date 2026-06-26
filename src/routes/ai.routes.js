@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const { StringDecoder } = require('string_decoder');
 const log = require('../../lib/logger');
 const {
   validateChatRequestBody,
@@ -44,27 +45,35 @@ function createAiRouter(aiService) {
         return res.end();
       }
 
+      const decoder = new StringDecoder('utf8');
       let buffer = '';
+      const processLine = (line) => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) return false;
+
+        const raw = trimmed.slice(5).trim();
+        if (raw === '[DONE]') {
+          done(res);
+          return true;
+        }
+
+        res.write(`data: ${raw}\n\n`);
+        return false;
+      };
+
       upstream.body.on('data', (chunk) => {
-        buffer += chunk.toString('utf8');
+        buffer += decoder.write(chunk);
         const lines = buffer.split('\n');
-        buffer = lines.pop();
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-
-          const raw = trimmed.slice(5).trim();
-          if (raw === '[DONE]') {
-            done(res);
-            return;
-          }
-
-          res.write(`data: ${raw}\n\n`);
+          if (processLine(line)) return;
         }
       });
 
       upstream.body.on('end', () => {
+        buffer += decoder.end();
+        if (buffer && processLine(buffer)) return;
         done(res);
       });
 

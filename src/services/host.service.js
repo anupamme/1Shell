@@ -192,11 +192,17 @@ function createHostService({ hostRepository }) {
     return new Promise((resolve, reject) => {
       client.exec(command, { pty: false }, (err, stream) => {
         if (err) return reject(err);
-        let stdout = '';
-        let stderr = '';
-        stream.on('data', (data) => { stdout += data.toString('utf8'); });
-        stream.stderr?.on('data', (data) => { stderr += data.toString('utf8'); });
-        stream.on('close', (code) => resolve({ stdout, stderr, exitCode: typeof code === 'number' ? code : 0 }));
+        const stdoutChunks = [];
+        const stderrChunks = [];
+        stream.on('data', (data) => { stdoutChunks.push(data); });
+        stream.stderr?.on('data', (data) => { stderrChunks.push(data); });
+        stream.on('close', (code) => {
+          resolve({
+            stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+            stderr: Buffer.concat(stderrChunks).toString('utf8'),
+            exitCode: typeof code === 'number' ? code : 0,
+          });
+        });
         stream.on('error', reject);
       });
     });

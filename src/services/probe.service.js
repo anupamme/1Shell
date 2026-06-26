@@ -544,18 +544,20 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
               return;
             }
 
-            let stdout = '';
-            let stderr = '';
+            const stdoutChunks = [];
+            const stderrChunks = [];
 
             stream.on('data', (chunk) => {
-              stdout += chunk.toString('utf8');
+              stdoutChunks.push(chunk);
             });
 
             stream.stderr?.on('data', (chunk) => {
-              stderr += chunk.toString('utf8');
+              stderrChunks.push(chunk);
             });
 
             stream.on('close', () => {
+              const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+              const stderr = Buffer.concat(stderrChunks).toString('utf8');
               if (stderr.trim() && !stdout.trim()) {
                 finish({
                   online: false,

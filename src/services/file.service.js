@@ -12,6 +12,26 @@ const { pipeline } = require('stream/promises');
 const { DATA_DIR } = require('../config/env');
 
 const execFileAsync = promisify(execFile);
+const READ_FILE_DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+const READ_FILE_MIN_PREVIEW_BYTES = 2 * 1024 * 1024;
+const READ_FILE_HARD_MAX_BYTES = 8 * 1024 * 1024;
+
+function normalizeReadFileMaxBytes(maxBytes) {
+  const requested = Number(maxBytes);
+  if (!Number.isFinite(requested) || requested <= 0) return READ_FILE_DEFAULT_MAX_BYTES;
+  return Math.min(READ_FILE_HARD_MAX_BYTES, Math.max(READ_FILE_MIN_PREVIEW_BYTES, Math.floor(requested)));
+}
+
+function formatReadFileBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} bytes`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}KB`;
+  return `${(value / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function createFileTooLargeError(size, maxBytes) {
+  return new Error(`文件过大 (${formatReadFileBytes(size)})，最大支持 ${formatReadFileBytes(maxBytes)} 预览`);
+}
 
 /**
  * 文件浏览服务
@@ -300,12 +320,14 @@ function createFileService({ hostService, probeAgentService = null }) {
           closeConnection();
           return reject(new Error(`${action}失败: ${err.message}`));
         }
-        let stdout = '';
-        let stderr = '';
-        stream.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
-        stream.stderr?.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+        const stdoutChunks = [];
+        const stderrChunks = [];
+        stream.on('data', (chunk) => { stdoutChunks.push(chunk); });
+        stream.stderr?.on('data', (chunk) => { stderrChunks.push(chunk); });
         stream.on('close', (code) => {
           closeConnection();
+          const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+          const stderr = Buffer.concat(stderrChunks).toString('utf8');
           if (code !== 0) {
             const detail = (stderr || stdout || `exit ${code}`).trim();
             reject(new Error(`${action}失败: ${detail}`));
@@ -630,8 +652,9 @@ function createFileService({ hostService, probeAgentService = null }) {
   /**
    * 读取远程文件内容（文本预览，限制大小）
    */
-  async function readRemoteFile(hostId, filePath, maxBytes = 512 * 1024) {
+  async function readRemoteFile(hostId, filePath, maxBytes = READ_FILE_DEFAULT_MAX_BYTES) {
     assertSafeFilePath(filePath, '读取');
+    const effectiveMaxBytes = normalizeReadFileMaxBytes(maxBytes);
     const entry = await acquireSftp(hostId);
     const { sftp } = entry;
 
@@ -640,12 +663,12 @@ function createFileService({ hostService, probeAgentService = null }) {
         sftp.stat(filePath, (statErr, stats) => {
           if (statErr) return reject(new Error(`文件不存在: ${statErr.message}`));
 
-          if (stats.size > maxBytes) {
-            return reject(new Error(`文件过大 (${(stats.size / 1024 / 1024).toFixed(1)}MB)，最大支持 ${(maxBytes / 1024 / 1024).toFixed(1)}MB 预览`));
+          if (stats.size > effectiveMaxBytes) {
+            return reject(createFileTooLargeError(stats.size, effectiveMaxBytes));
           }
 
           const chunks = [];
-          const stream = sftp.createReadStream(filePath, { end: maxBytes });
+          const stream = sftp.createReadStream(filePath, { end: effectiveMaxBytes });
 
           stream.on('data', (chunk) => chunks.push(chunk));
           stream.on('end', () => {
@@ -671,14 +694,15 @@ function createFileService({ hostService, probeAgentService = null }) {
   /**
    * 读取本机文件内容
    */
-  async function readLocalFile(filePath, maxBytes = 512 * 1024) {
+  async function readLocalFile(filePath, maxBytes = READ_FILE_DEFAULT_MAX_BYTES) {
     assertSafeFilePath(filePath, '读取');
+    const effectiveMaxBytes = normalizeReadFileMaxBytes(maxBytes);
     const resolved = path.resolve(filePath);
 
     const stat = await fs.promises.stat(resolved);
 
-    if (stat.size > maxBytes) {
-      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)}MB)，最大支持 ${(maxBytes / 1024 / 1024).toFixed(1)}MB 预览`);
+    if (stat.size > effectiveMaxBytes) {
+      throw createFileTooLargeError(stat.size, effectiveMaxBytes);
     }
 
     const content = await fs.promises.readFile(resolved, 'utf8');
@@ -758,11 +782,13 @@ function createFileService({ hostService, probeAgentService = null }) {
     return new Promise((resolve, reject) => {
       client.exec(command, { pty: false }, (err, stream) => {
         if (err) return reject(err);
-        let stdout = '';
-        let stderr = '';
-        stream.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
-        stream.stderr?.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+        const stdoutChunks = [];
+        const stderrChunks = [];
+        stream.on('data', (chunk) => { stdoutChunks.push(chunk); });
+        stream.stderr?.on('data', (chunk) => { stderrChunks.push(chunk); });
         stream.on('close', (code) => {
+          const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+          const stderr = Buffer.concat(stderrChunks).toString('utf8');
           if (code !== 0) {
             const reason = stderr.trim() || `exit ${code}`;
             if (reason === 'DIR') return reject(new Error('不能下载目录'));

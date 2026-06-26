@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.6.3 - 2026-06-27
+
+4.6.3 修复 1Shell AI 面板在真实运维对话中的文本保真、代理信息展示和文件预览边界问题。
+
+- 修复 AI 工具调用前后的文字丢失/隐藏问题，历史回放与实时流式输出保持同一条文本链路。
+- 修复代理搭建结果的结构化展示，避免把 `verification passed` 误解析成 `密码 ed`，并在有账号密码时生成带认证信息的 `curl -x` 示例。
+- 提高 `read_remote_file`/本机读文件的默认与最低有效预览上限到 2MB，保留 8MB 硬上限；错误提示改为 KB/MB 自适应，避免 `0.0MB`。
+- 补充文本保真、代理流、代理 summary 和文件预览上限回归测试。
+
+### Verification
+
+- `node scripts/test-structured-tool-results.js`
+- `node scripts/test-file-service.js`
+- `npm --prefix frontend run typecheck`
+- `npm --prefix frontend run build`
+- `node --check src/services/file.service.js`
+- `node --check src/tools/oneshell-core.tools.js`
+- `node scripts/repack-release-assets.js`
+
+### Release assets
+
+- Windows x64 updater package: `release/repacked/1shell-4.6.3-windows-x64.zip`
+  - SHA256: `a4f6c5cdd77751156776af383cc57040f28832d44e940efaf8e466d3e05aeb2c`
+- Linux x64 updater package: `release/repacked/1shell-4.6.3-linux-x64.tar.gz`
+  - SHA256: `b9bae13c1a345bec773932bc0934e052fa06f4b04c03564332037fa7677717b9`
+
 ## 4.6.2 - 2026-06-26
 
 4.6.2 修复“运行”页面在长期运行的 VPS 上反复进入时重复采集所有主机的问题。

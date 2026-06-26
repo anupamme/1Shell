@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
+const { StringDecoder } = require('string_decoder');
 const pty = require('node-pty');
 
 const {
@@ -230,25 +231,28 @@ function createSessionService({ hostService }) {
           session.status = 'ready';
           emitSessionStatus(socket, session, proxy ? { proxy: true } : {});
 
-          stream.on('data', (data) => {
-            if (session.isFinalized) return;
+          const stdoutDecoder = new StringDecoder('utf8');
+          const stderrDecoder = new StringDecoder('utf8');
+          const emitOutput = (data) => {
+            if (session.isFinalized || !data) return;
             socket.emit('session:output', {
               sessionId: session.id,
               hostId: session.hostId,
-              data: data.toString('utf8'),
+              data,
             });
+          };
+
+          stream.on('data', (data) => {
+            emitOutput(stdoutDecoder.write(data));
           });
 
           stream.stderr?.on('data', (data) => {
-            if (session.isFinalized) return;
-            socket.emit('session:output', {
-              sessionId: session.id,
-              hostId: session.hostId,
-              data: data.toString('utf8'),
-            });
+            emitOutput(stderrDecoder.write(data));
           });
 
           stream.on('close', () => {
+            emitOutput(stdoutDecoder.end());
+            emitOutput(stderrDecoder.end());
             finalizeSession(socket, session, 'closed');
           });
         });

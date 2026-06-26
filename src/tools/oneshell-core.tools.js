@@ -183,13 +183,13 @@ const TOOL_DEFS = [
   {
     name: 'read_remote_file',
     targets: ['mcp', 'ide'],
-    description: '读取指定主机上的文本文件内容。默认最大 512KB，可用 maxBytes 调整。',
+    description: '读取指定主机上的文本文件内容。默认/最低有效上限 2MB，可用 maxBytes 调高，服务端硬上限 8MB。',
     schema: {
       type: 'object',
       properties: {
         hostId: { type: 'string', description: '目标主机 ID，local 表示本机' },
         path: { type: 'string', description: '文件路径' },
-        maxBytes: { type: 'number', description: '最大读取字节数，默认 524288' },
+        maxBytes: { type: 'number', description: '最大读取字节数；小于 2097152 会按 2097152 处理，大于 8388608 会按 8388608 处理' },
       },
       required: ['hostId', 'path'],
     },

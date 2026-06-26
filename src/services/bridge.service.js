@@ -1,5 +1,7 @@
 'use strict';
 
+const { StringDecoder } = require('string_decoder');
+
 const { BRIDGE_EXEC_TIMEOUT_MS } = require('../config/env');
 const { execLocalScript } = require('../../lib/exec-local');
 const { redactKnownSecrets } = require('../../lib/secret-redaction');
@@ -268,20 +270,25 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
               return fail(execErr);
             }
 
+            const stdoutDecoder = new StringDecoder('utf8');
+            const stderrDecoder = new StringDecoder('utf8');
+            const emitOutput = (streamName, text) => {
+              if (!text || typeof onOutput !== 'function') return;
+              try { onOutput({ stream: streamName, text }); } catch { /* ignore */ }
+            };
+
             stream.on('data', (chunk) => {
               stdoutChunks.push(chunk);
-              if (typeof onOutput === 'function') {
-                try { onOutput({ stream: 'stdout', text: chunk.toString('utf8') }); } catch { /* ignore */ }
-              }
+              emitOutput('stdout', stdoutDecoder.write(chunk));
             });
             stream.stderr.on('data', (chunk) => {
               stderrChunks.push(chunk);
-              if (typeof onOutput === 'function') {
-                try { onOutput({ stream: 'stderr', text: chunk.toString('utf8') }); } catch { /* ignore */ }
-              }
+              emitOutput('stderr', stderrDecoder.write(chunk));
             });
 
             stream.on('close', (code) => {
+              emitOutput('stdout', stdoutDecoder.end());
+              emitOutput('stderr', stderrDecoder.end());
               settle({
                 stdout: Buffer.concat(stdoutChunks).toString('utf8'),
                 stderr: Buffer.concat(stderrChunks).toString('utf8'),

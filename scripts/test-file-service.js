@@ -29,11 +29,30 @@ async function main() {
 
     const hidden = await service.readFile('local', path.join(tmpRoot, '.hidden-file'));
     assert.strictEqual(hidden.content, 'hidden', 'local readFile must read dot files');
+
+    const tinyCapPath = path.join(tmpRoot, 'tiny-cap.txt');
+    const tinyCapContent = 'x'.repeat(6000);
+    await fs.promises.writeFile(tinyCapPath, tinyCapContent, 'utf8');
+
+    const tinyCapRead = await service.readFile('local', tinyCapPath, 5);
+    assert.strictEqual(tinyCapRead.content, tinyCapContent, 'tiny maxBytes hints must not shrink previews below the service minimum');
+
+    const tooLargePreviewPath = path.join(tmpRoot, 'too-large-preview.txt');
+    await fs.promises.writeFile(tooLargePreviewPath, Buffer.alloc((2 * 1024 * 1024) + 1, 'x'));
+
+    await assert.rejects(
+      () => service.readFile('local', tooLargePreviewPath, 5),
+      (error) => {
+        assert.match(error.message, /2\.0MB/, 'preview limit should be formatted in useful units');
+        assert.strictEqual(/0\.0MB/.test(error.message), false, 'preview limit error must not show 0.0MB');
+        return true;
+      },
+    );
   } finally {
     await fs.promises.rm(tmpRoot, { recursive: true, force: true });
   }
 
-  console.log('file-service: dot file checks passed');
+  console.log('file-service: dot file and preview limit checks passed');
 }
 
 main().catch((error) => {

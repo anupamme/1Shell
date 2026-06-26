@@ -3,6 +3,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const { EventEmitter } = require('events');
+const { StringDecoder } = require('string_decoder');
 
 /**
  * Local MCP Service — 本地 MCP Server 进程管理 + stdio JSON-RPC 客户端
@@ -36,6 +37,8 @@ function createLocalMcpService({ logger }) {
       error: null,
       buffer: '',
       stderrTail: '',
+      stdoutDecoder: new StringDecoder('utf8'),
+      stderrDecoder: new StringDecoder('utf8'),
       pending: new Map(),
     };
     instances.set(mcpId, inst);
@@ -62,13 +65,14 @@ function createLocalMcpService({ logger }) {
       inst.process = child;
 
       child.stderr.on('data', (chunk) => {
-        const text = chunk.toString();
+        const text = inst.stderrDecoder.write(chunk);
+        if (!text) return;
         inst.stderrTail = `${inst.stderrTail}${text}`.slice(-4000);
         logger?.debug?.(`[local-mcp:${mcpId}] stderr: ${text.slice(0, 200)}`);
       });
 
       child.stdout.on('data', (chunk) => {
-        inst.buffer += chunk.toString();
+        inst.buffer += inst.stdoutDecoder.write(chunk);
         drainBuffer(inst);
       });
 
@@ -79,6 +83,13 @@ function createLocalMcpService({ logger }) {
       });
 
       child.on('exit', (code) => {
+        const stderrTail = inst.stderrDecoder.end();
+        if (stderrTail) inst.stderrTail = `${inst.stderrTail}${stderrTail}`.slice(-4000);
+        const stdoutTail = inst.stdoutDecoder.end();
+        if (stdoutTail) {
+          inst.buffer += stdoutTail;
+          drainBuffer(inst);
+        }
         if (inst.status !== 'stopped') {
           inst.status = 'exited';
           inst.error = inst.stderrTail.trim() || `进程退出 code=${code}`;

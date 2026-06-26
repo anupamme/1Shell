@@ -16,6 +16,7 @@
 
 const crypto = require('crypto');
 const net = require('net');
+const { StringDecoder } = require('string_decoder');
 const { Router } = require('express');
 const fetch = require('node-fetch');
 const {
@@ -523,89 +524,97 @@ function streamOpenAIToAnthropic(res, stream, requestModel, cleanupRequest) {
   });
 
   let outputTokens = 0, buffer = '';
+  const decoder = new StringDecoder('utf8');
   let textBlockStarted = false;
   let nextBlockIndex = 0;
   // Map<openaiToolIndex, { id, name, anthropicIndex, started }>
   const toolBlocks = new Map();
   let finishReason = null;
 
+  function processLine(line) {
+    if (!line.startsWith('data: ')) return false;
+    const data = line.slice(6).trim();
+    if (data === '[DONE]') {
+      cleanupClose();
+      flushAndFinishAnthropic(res, outputTokens, textBlockStarted, toolBlocks, finishReason);
+      return true;
+    }
+    try {
+      const parsed = JSON.parse(data);
+      const choice = parsed.choices?.[0];
+      if (!choice) return false;
+      finishReason = choice.finish_reason || finishReason;
+      const delta = choice.delta || {};
+
+      // 文本内容
+      if (delta.content) {
+        if (!textBlockStarted) {
+          sendSSE(res, 'content_block_start', {
+            type: 'content_block_start', index: nextBlockIndex,
+            content_block: { type: 'text', text: '' },
+          });
+          textBlockStarted = true;
+          nextBlockIndex++;
+        }
+        outputTokens++;
+        sendSSE(res, 'content_block_delta', {
+          type: 'content_block_delta', index: nextBlockIndex - 1,
+          delta: { type: 'text_delta', text: delta.content },
+        });
+      }
+
+      // 工具调用
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const tcIdx = tc.index ?? 0;
+          if (!toolBlocks.has(tcIdx)) {
+            const anthropicIdx = nextBlockIndex++;
+            toolBlocks.set(tcIdx, {
+              id: tc.id || `toolu_${Date.now().toString(36)}_${tcIdx}`,
+              name: tc.function?.name || '',
+              anthropicIndex: anthropicIdx,
+              started: false,
+            });
+          }
+          const block = toolBlocks.get(tcIdx);
+          if (tc.id) block.id = tc.id;
+          if (tc.function?.name) {
+            block.name = mergeOpenAIToolName(block.name, tc.function.name);
+          }
+
+          // 拿到 name 之后才能发 content_block_start
+          if (!block.started && block.name) {
+            block.started = true;
+            sendSSE(res, 'content_block_start', {
+              type: 'content_block_start', index: block.anthropicIndex,
+              content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} },
+            });
+          }
+
+          if (tc.function?.arguments && block.started) {
+            outputTokens++;
+            sendSSE(res, 'content_block_delta', {
+              type: 'content_block_delta', index: block.anthropicIndex,
+              delta: { type: 'input_json_delta', partial_json: tc.function.arguments },
+            });
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    return false;
+  }
+
   stream.on('data', (chunk) => {
-    buffer += chunk.toString();
+    buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
     for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6).trim();
-      if (data === '[DONE]') {
-        cleanupClose();
-        flushAndFinishAnthropic(res, outputTokens, textBlockStarted, toolBlocks, finishReason);
-        return;
-      }
-      try {
-        const parsed = JSON.parse(data);
-        const choice = parsed.choices?.[0];
-        if (!choice) continue;
-        finishReason = choice.finish_reason || finishReason;
-        const delta = choice.delta || {};
-
-        // 文本内容
-        if (delta.content) {
-          if (!textBlockStarted) {
-            sendSSE(res, 'content_block_start', {
-              type: 'content_block_start', index: nextBlockIndex,
-              content_block: { type: 'text', text: '' },
-            });
-            textBlockStarted = true;
-            nextBlockIndex++;
-          }
-          outputTokens++;
-          sendSSE(res, 'content_block_delta', {
-            type: 'content_block_delta', index: nextBlockIndex - 1,
-            delta: { type: 'text_delta', text: delta.content },
-          });
-        }
-
-        // 工具调用
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            const tcIdx = tc.index ?? 0;
-            if (!toolBlocks.has(tcIdx)) {
-              const anthropicIdx = nextBlockIndex++;
-              toolBlocks.set(tcIdx, {
-                id: tc.id || `toolu_${Date.now().toString(36)}_${tcIdx}`,
-                name: tc.function?.name || '',
-                anthropicIndex: anthropicIdx,
-                started: false,
-              });
-            }
-            const block = toolBlocks.get(tcIdx);
-            if (tc.id) block.id = tc.id;
-            if (tc.function?.name) {
-              block.name = mergeOpenAIToolName(block.name, tc.function.name);
-            }
-
-            // 拿到 name 之后才能发 content_block_start
-            if (!block.started && block.name) {
-              block.started = true;
-              sendSSE(res, 'content_block_start', {
-                type: 'content_block_start', index: block.anthropicIndex,
-                content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} },
-              });
-            }
-
-            if (tc.function?.arguments && block.started) {
-              outputTokens++;
-              sendSSE(res, 'content_block_delta', {
-                type: 'content_block_delta', index: block.anthropicIndex,
-                delta: { type: 'input_json_delta', partial_json: tc.function.arguments },
-              });
-            }
-          }
-        }
-      } catch { /* ignore */ }
+      if (processLine(line)) return;
     }
   });
   stream.on('end', () => {
+    buffer += decoder.end();
+    if (buffer && processLine(buffer)) return;
     cleanupClose();
     if (!res.writableEnded) flushAndFinishAnthropic(res, outputTokens, textBlockStarted, toolBlocks, finishReason);
   });
@@ -1095,68 +1104,76 @@ function streamAnthropicToOpenAI(res, stream, cleanupRequest) {
   res.setHeader('Connection', 'keep-alive');
 
   let buffer = '';
+  const decoder = new StringDecoder('utf8');
   // Map<anthropicBlockIndex, { id, name, openaiIndex }>
   const toolBlocks = new Map();
   let nextToolCallIndex = 0;
 
+  function processLine(line) {
+    if (!line.startsWith('data: ')) return false;
+    const data = line.slice(6).trim();
+    if (!data) return false;
+    try {
+      const parsed = JSON.parse(data);
+
+      if (parsed.type === 'content_block_start' && parsed.content_block?.type === 'tool_use') {
+        const cb = parsed.content_block;
+        const openaiIdx = nextToolCallIndex++;
+        toolBlocks.set(parsed.index, { id: cb.id, name: cb.name, openaiIndex: openaiIdx });
+        res.write(`data: ${JSON.stringify({
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta: {
+            tool_calls: [{ index: openaiIdx, id: cb.id, type: 'function', function: { name: cb.name, arguments: '' } }],
+          }, finish_reason: null }],
+        })}\n\n`);
+
+      } else if (parsed.type === 'content_block_delta') {
+        if (parsed.delta?.type === 'text_delta' && parsed.delta.text) {
+          res.write(`data: ${JSON.stringify({
+            object: 'chat.completion.chunk',
+            choices: [{ index: 0, delta: { content: parsed.delta.text }, finish_reason: null }],
+          })}\n\n`);
+        } else if (parsed.delta?.type === 'input_json_delta') {
+          const block = toolBlocks.get(parsed.index);
+          if (block) {
+            res.write(`data: ${JSON.stringify({
+              object: 'chat.completion.chunk',
+              choices: [{ index: 0, delta: {
+                tool_calls: [{ index: block.openaiIndex, function: { arguments: parsed.delta.partial_json || '' } }],
+              }, finish_reason: null }],
+            })}\n\n`);
+          }
+        }
+
+      } else if (parsed.type === 'message_delta' && parsed.delta?.stop_reason) {
+        const fr = parsed.delta.stop_reason === 'tool_use' ? 'tool_calls'
+          : parsed.delta.stop_reason === 'max_tokens' ? 'length' : 'stop';
+        res.write(`data: ${JSON.stringify({
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta: {}, finish_reason: fr }],
+        })}\n\n`);
+
+      } else if (parsed.type === 'message_stop') {
+        cleanupClose();
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return true;
+      }
+    } catch { /* ignore */ }
+    return false;
+  }
+
   stream.on('data', (chunk) => {
-    buffer += chunk.toString();
+    buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
     for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6).trim();
-      if (!data) continue;
-      try {
-        const parsed = JSON.parse(data);
-
-        if (parsed.type === 'content_block_start' && parsed.content_block?.type === 'tool_use') {
-          const cb = parsed.content_block;
-          const openaiIdx = nextToolCallIndex++;
-          toolBlocks.set(parsed.index, { id: cb.id, name: cb.name, openaiIndex: openaiIdx });
-          res.write(`data: ${JSON.stringify({
-            object: 'chat.completion.chunk',
-            choices: [{ index: 0, delta: {
-              tool_calls: [{ index: openaiIdx, id: cb.id, type: 'function', function: { name: cb.name, arguments: '' } }],
-            }, finish_reason: null }],
-          })}\n\n`);
-
-        } else if (parsed.type === 'content_block_delta') {
-          if (parsed.delta?.type === 'text_delta' && parsed.delta.text) {
-            res.write(`data: ${JSON.stringify({
-              object: 'chat.completion.chunk',
-              choices: [{ index: 0, delta: { content: parsed.delta.text }, finish_reason: null }],
-            })}\n\n`);
-          } else if (parsed.delta?.type === 'input_json_delta') {
-            const block = toolBlocks.get(parsed.index);
-            if (block) {
-              res.write(`data: ${JSON.stringify({
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: {
-                  tool_calls: [{ index: block.openaiIndex, function: { arguments: parsed.delta.partial_json || '' } }],
-                }, finish_reason: null }],
-              })}\n\n`);
-            }
-          }
-
-        } else if (parsed.type === 'message_delta' && parsed.delta?.stop_reason) {
-          const fr = parsed.delta.stop_reason === 'tool_use' ? 'tool_calls'
-            : parsed.delta.stop_reason === 'max_tokens' ? 'length' : 'stop';
-          res.write(`data: ${JSON.stringify({
-            object: 'chat.completion.chunk',
-            choices: [{ index: 0, delta: {}, finish_reason: fr }],
-          })}\n\n`);
-
-        } else if (parsed.type === 'message_stop') {
-          cleanupClose();
-          res.write('data: [DONE]\n\n');
-          res.end();
-          return;
-        }
-      } catch { /* ignore */ }
+      if (processLine(line)) return;
     }
   });
   stream.on('end', () => {
+    buffer += decoder.end();
+    if (buffer && processLine(buffer)) return;
     cleanupClose();
     if (!res.writableEnded) { res.write('data: [DONE]\n\n'); res.end(); }
   });
@@ -1691,4 +1708,8 @@ module.exports = {
   createProxyConfigStore,
   buildAnthropicProxyModelList,
   buildOpenAIProxyModelList,
+  __private: {
+    streamAnthropicToOpenAI,
+    streamOpenAIToAnthropic,
+  },
 };
