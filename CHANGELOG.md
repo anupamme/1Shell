@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.6.2 - 2026-06-26
+
+4.6.2 修复“运行”页面在长期运行的 VPS 上反复进入时重复采集所有主机的问题。
+
+- 后端为每台主机保留运行项快照；普通进入页面优先返回缓存，不再重复 SSH/本机采集。
+- “刷新全部”“刷新当前主机”和操作后的状态回读会带 `refresh=1`，明确触发真实重新采集并更新缓存。
+- `KeepAlive` 继续保留页面状态；后端缓存负责跨页面重建、浏览器刷新和多客户端访问时的秒开体验。
+- 增加运行项缓存测试，覆盖单主机和汇总入口。
+
+### Verification
+
+- `node scripts/test-panel-workloads.js`
+- `npm --prefix frontend run typecheck`
+- `node -c src/services/panel-workloads.service.js`
+- `node -c src/routes/panel-workloads.routes.js`
+
 ## 4.6.1 - 2026-06-26
 
 4.6.1 修复 4.6.0 发布包中“运行”页面代码已包含但前端入口未注册的问题。

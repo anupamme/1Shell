@@ -9,6 +9,7 @@ function createPanelWorkloadsRouter({ panelWorkloadsService }) {
     try {
       const result = await panelWorkloadsService.getWorkloadsSummary({
         includeArchived: req.query.includeArchived === '1',
+        forceRefresh: req.query.refresh === '1',
       });
       res.json(result);
     } catch (error) {
@@ -18,7 +19,9 @@ function createPanelWorkloadsRouter({ panelWorkloadsService }) {
 
   router.get('/panel/hosts/:hostId/workloads', async (req, res, next) => {
     try {
-      const result = await panelWorkloadsService.getHostWorkloads(req.params.hostId);
+      const result = await panelWorkloadsService.getHostWorkloads(req.params.hostId, {
+        forceRefresh: req.query.refresh === '1',
+      });
       res.json(result);
     } catch (error) {
       next(error);
@@ -47,6 +50,7 @@ function createPanelWorkloadsRouter({ panelWorkloadsService }) {
     try {
       const result = await panelWorkloadsService.getWorkloadsSummary({
         includeArchived: req.query.includeArchived === '1',
+        forceRefresh: req.query.refresh === '1',
       });
       res.json(result);
     } catch (error) {
@@ -56,7 +60,9 @@ function createPanelWorkloadsRouter({ panelWorkloadsService }) {
 
   router.get('/panel/hosts/:hostId/containers', async (req, res, next) => {
     try {
-      const result = await panelWorkloadsService.getHostWorkloads(req.params.hostId);
+      const result = await panelWorkloadsService.getHostWorkloads(req.params.hostId, {
+        forceRefresh: req.query.refresh === '1',
+      });
       res.json(result);
     } catch (error) {
       next(error);

@@ -344,6 +344,46 @@ async function testSummary() {
   assert.strictEqual(summary.hosts[0].primaryWorkloadCount, 3);
 }
 
+async function testDiscoveryCache() {
+  let execCount = 0;
+  const service = createPanelWorkloadsService({
+    hostService: {
+      findHost(id) {
+        return { id, type: 'ssh', name: 'Alpha' };
+      },
+      listHostsWithPreferences() {
+        return [{ id: 'h1', type: 'ssh', name: 'Alpha', preference: { archived: false } }];
+      },
+    },
+    bridgeService: {
+      async execOnHost(hostId) {
+        assert.strictEqual(hostId, 'h1');
+        execCount += 1;
+        return { stdout: sampleOutput, stderr: '', exitCode: 0, durationMs: 12 };
+      },
+    },
+  });
+
+  const first = await service.getHostWorkloads('h1');
+  assert.strictEqual(first.cached, false);
+  assert.strictEqual(execCount, 1);
+
+  const cached = await service.getHostWorkloads('h1');
+  assert.strictEqual(cached.cached, true);
+  assert.strictEqual(execCount, 1);
+
+  const cachedSummary = await service.getWorkloadsSummary();
+  assert.strictEqual(cachedSummary.hosts[0].cached, true);
+  assert.strictEqual(execCount, 1);
+
+  const refreshed = await service.getHostWorkloads('h1', { forceRefresh: true });
+  assert.strictEqual(refreshed.cached, false);
+  assert.strictEqual(execCount, 2);
+
+  await service.getWorkloadsSummary({ forceRefresh: true });
+  assert.strictEqual(execCount, 3);
+}
+
 async function testWorkloadActions() {
   const calls = [];
   const service = createPanelWorkloadsService({
@@ -494,6 +534,7 @@ async function testWorkloadActions() {
 
 async function main() {
   await testSummary();
+  await testDiscoveryCache();
   await testWorkloadActions();
   console.log('test-panel-workloads ok');
 }

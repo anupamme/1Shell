@@ -96,6 +96,7 @@ interface HostWorkloadSummary {
   warnings?: string[];
   error?: string | null;
   loading?: boolean;
+  cached?: boolean;
   sortIndex?: number;
   items?: WorkloadItem[];
 }
@@ -158,6 +159,7 @@ interface HostWorkloadDetailResponse {
   dockerReachable?: boolean;
   dockerError?: string | null;
   engineVersion?: string | null;
+  cached?: boolean;
   items?: WorkloadItem[];
   warnings?: string[];
   error?: string | null;
@@ -457,6 +459,7 @@ function createHostSummary(result: HostWorkloadDetailResponse, host: HostInfo, s
     warnings: Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [],
     error: result.error || null,
     loading: false,
+    cached: result.cached === true,
     sortIndex,
     items,
   };
@@ -642,11 +645,16 @@ function workloadActionTitle(item: WorkloadItem, action: WorkloadAction): string
   return `${workloadActionLabel(action)} ${workloadTitle(item)}`;
 }
 
-async function refreshHostWorkload(hostId: string, options: { notifySuccess?: boolean } = {}): Promise<void> {
+function hostWorkloadsUrl(hostId: string, forceRefresh = false): string {
+  const suffix = forceRefresh ? '?refresh=1' : '';
+  return `/api/panel/hosts/${encodeURIComponent(hostId)}/workloads${suffix}`;
+}
+
+async function refreshHostWorkload(hostId: string, options: { notifySuccess?: boolean; forceRefresh?: boolean } = {}): Promise<void> {
   const collectedAt = summary.value?.collectedAt || new Date().toISOString();
   const currentHost = summary.value?.hosts?.find((host) => host.hostId === hostId);
   if (!currentHost) {
-    await loadWorkloads();
+    await loadWorkloads({ forceRefresh: options.forceRefresh === true });
     return;
   }
   if (isHostRefreshing(hostId)) return;
@@ -657,7 +665,7 @@ async function refreshHostWorkload(hostId: string, options: { notifySuccess?: bo
     error: null,
   }, collectedAt);
   try {
-    const result = await requestJson<HostWorkloadDetailResponse>(`/api/panel/hosts/${encodeURIComponent(hostId)}/workloads`);
+    const result = await requestJson<HostWorkloadDetailResponse>(hostWorkloadsUrl(hostId, options.forceRefresh === true));
     replaceHostSummary(createHostSummary(result, {
       id: currentHost.hostId,
       name: currentHost.hostName,
@@ -681,7 +689,7 @@ async function refreshSelectedHost(): Promise<void> {
   const host = selectedHostSummary.value;
   if (!host || isHostRefreshing(host.hostId)) return;
   try {
-    await refreshHostWorkload(host.hostId, { notifySuccess: true });
+    await refreshHostWorkload(host.hostId, { notifySuccess: true, forceRefresh: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     notify.error(message || `${host.hostName} 刷新失败`);
@@ -691,7 +699,7 @@ async function refreshSelectedHost(): Promise<void> {
 async function refreshHostFromList(host: HostWorkloadSummary): Promise<void> {
   if (!host || isHostRefreshing(host.hostId)) return;
   try {
-    await refreshHostWorkload(host.hostId, { notifySuccess: true });
+    await refreshHostWorkload(host.hostId, { notifySuccess: true, forceRefresh: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     notify.error(message || `${host.hostName} 刷新失败`);
@@ -744,7 +752,7 @@ async function runWorkloadAction(item: WorkloadItem, action: WorkloadAction): Pr
     }
     notify.success(`${actionLabel}已提交`);
     try {
-      await refreshHostWorkload(item.hostId);
+      await refreshHostWorkload(item.hostId, { forceRefresh: true });
       closeActionRow(item);
     } catch (refreshError) {
       const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
@@ -772,7 +780,7 @@ async function mapLimit<T>(items: T[], limit: number, iteratee: (item: T, index:
   }));
 }
 
-async function loadWorkloads(): Promise<void> {
+async function loadWorkloads(options: { forceRefresh?: boolean } = {}): Promise<void> {
   const token = ++loadSequence;
   activeAbortController?.abort();
   const abortController = new AbortController();
@@ -793,7 +801,7 @@ async function loadWorkloads(): Promise<void> {
     await mapLimit(hosts, HOST_LOAD_CONCURRENCY, async (host, index) => {
       if (token !== loadSequence) return;
       try {
-        const result = await requestJson<HostWorkloadDetailResponse>(`/api/panel/hosts/${encodeURIComponent(host.id)}/workloads`, {
+        const result = await requestJson<HostWorkloadDetailResponse>(hostWorkloadsUrl(host.id, options.forceRefresh === true), {
           signal: abortController.signal,
         });
         if (token !== loadSequence) return;
@@ -821,6 +829,10 @@ async function loadWorkloads(): Promise<void> {
       loading.value = false;
     }
   }
+}
+
+async function refreshAllWorkloads(): Promise<void> {
+  await loadWorkloads({ forceRefresh: true });
 }
 
 function selectHost(hostId: string): void {
@@ -1100,7 +1112,7 @@ onBeforeUnmount(() => {
             type="button"
             class="inline-flex items-center gap-2 rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
             :disabled="loading"
-            @click="loadWorkloads"
+            @click="refreshAllWorkloads"
           >
             <AppIcon name="radio" :size="15" />
             <span>{{ loading ? '刷新中' : '刷新' }}</span>

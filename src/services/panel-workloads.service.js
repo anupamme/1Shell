@@ -13,6 +13,7 @@ const WORKLOAD_ACTIONS = new Set(['start', 'stop', 'restart', 'delete', 'recreat
 function createPanelWorkloadsService({ hostService, bridgeService, auditService = null }) {
   if (!hostService) throw new Error('panel-workloads.service: hostService required');
   if (!bridgeService) throw new Error('panel-workloads.service: bridgeService required');
+  const hostCache = new Map();
 
   async function getHostWorkloads(hostId, options = {}) {
     const host = hostService.findHost(hostId);
@@ -21,7 +22,7 @@ function createPanelWorkloadsService({ hostService, bridgeService, auditService 
       error.status = 404;
       throw error;
     }
-    return collectHostWorkloads(host, options);
+    return collectCachedHostWorkloads(host, options);
   }
 
   async function runWorkloadAction(hostId, workloadId, action, options = {}) {
@@ -101,7 +102,7 @@ function createPanelWorkloadsService({ hostService, bridgeService, auditService 
       : hostService.listHosts();
     const hosts = allHosts.filter((host) => includeArchived || !host.preference?.archived);
     const collectedAt = new Date().toISOString();
-    const results = await mapLimit(hosts, DEFAULT_CONCURRENCY, (host) => collectHostWorkloads(host, options));
+    const results = await mapLimit(hosts, DEFAULT_CONCURRENCY, (host) => collectCachedHostWorkloads(host, options));
     const items = results.flatMap((result) => result.items || []);
     const okResults = results.filter((result) => result.ok);
 
@@ -136,6 +137,24 @@ function createPanelWorkloadsService({ hostService, bridgeService, auditService 
       hosts: results.map(toHostSummary),
       items,
       warnings: results.flatMap((result) => result.warnings || []),
+    };
+  }
+
+  async function collectCachedHostWorkloads(host, options = {}) {
+    const cacheKey = String(host.id || '');
+    const cached = hostCache.get(cacheKey);
+    if (cached && options.forceRefresh !== true) {
+      return {
+        ...cloneJson(cached),
+        cached: true,
+      };
+    }
+
+    const result = await collectHostWorkloads(host, options);
+    hostCache.set(cacheKey, cloneJson(result));
+    return {
+      ...result,
+      cached: false,
     };
   }
 
@@ -221,7 +240,12 @@ function createPanelWorkloadsService({ hostService, bridgeService, auditService 
     getHostWorkloads,
     getWorkloadsSummary,
     runWorkloadAction,
+    _cache: hostCache,
   };
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function detectHostPlatform(host) {
@@ -1532,6 +1556,7 @@ function toHostSummary(result) {
     ok: Boolean(result.ok),
     collectedAt: result.collectedAt,
     durationMs: result.durationMs,
+    cached: result.cached === true,
     platformSupported: result.platformSupported,
     platform: result.platform || 'linux',
     dockerInstalled: result.dockerInstalled,
