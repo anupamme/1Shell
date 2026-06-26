@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.6.1 - 2026-06-26
+
+4.6.1 修复 4.6.0 发布包中“运行”页面代码已包含但前端入口未注册的问题。
+
+- 将 `WorkloadsView` 正式挂载到 `/panel/workloads`，并补上 `/workloads` 兼容重定向。
+- 在 Panel 侧边栏加入“运行”入口，更新 1Shell AI 浮窗的页面上下文。
+- 增加 route/nav 注册测试，避免以后再次出现页面文件存在但入口不可见的发布事故。
+
+### Verification
+
+- `npm test`
+- `npm --prefix frontend run typecheck`
+- `npm --prefix frontend run build`
+
 ## 4.6.0 - 2026-06-26
 
 4.6.0 继续补齐 Panel 的确定性运维能力，同时修正 1Shell AI 在精确文本、停止/抢占和托管审批上的边界。

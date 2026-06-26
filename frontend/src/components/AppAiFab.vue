@@ -69,6 +69,7 @@ const MODULE_MAP: Record<string, ModuleContext> = {
   'cli-setup': { name: 'AI 配置', icon: 'cog', hint: '当前在 AI 引擎配置页面。' },
   'panel-hosts': { name: '主机', icon: 'server', hint: '当前在主机页面。可查看和管理连接目标。' },
   'panel-runtime': { name: '详情', icon: 'chart', hint: '当前在详情页面。可按 VPS 查看探针摘要、资源图表、内部体检和带宽趋势。' },
+  'panel-workloads': { name: '运行', icon: 'play-square', hint: '当前在运行页面。可查看并操作容器、系统服务、Windows Service 和监听端口。' },
   'panel-files': { name: '文件', icon: 'folder', hint: '当前在文件页面。可按 VPS 浏览远程文件。' },
   'panel-probe': { name: '探针监控', icon: 'radio', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
   'panel-audit': { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },

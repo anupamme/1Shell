@@ -12,6 +12,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { to: '/panel/runtime',  label: '详情', icon: 'chart',       title: '详情' },
   { to: '/panel/hosts',    label: '主机', icon: 'server',      title: 'VPS 仓库' },
+  { to: '/panel/workloads', label: '运行', icon: 'play-square', title: '运行' },
   { to: '/panel/files',    label: '文件', icon: 'folder',      title: '文件' },
   { to: '/panel/probe',    label: '探针', icon: 'radio',       title: '探针' },
   { to: '/panel/audit',    label: '审计', icon: 'clipboard',   title: '审计日志' },

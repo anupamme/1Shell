@@ -13,6 +13,7 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: 'hosts',     name: 'panel-hosts',     component: () => import('@/views/HostRepositoryView.vue'), props: { mode: 'hosts' } },
       { path: 'runtime',   name: 'panel-runtime',   component: () => import('@/views/HostRepositoryView.vue'), props: { mode: 'runtime' } },
+      { path: 'workloads', name: 'panel-workloads', component: () => import('@/views/WorkloadsView.vue') },
       { path: 'files',     name: 'panel-files',     component: () => import('@/views/HostRepositoryView.vue'), props: { mode: 'files' } },
       { path: 'probe',     name: 'panel-probe',     component: () => import('@/views/ProbeView.vue') },
       { path: 'audit',     name: 'panel-audit',     component: () => import('@/views/AuditView.vue') },
@@ -39,6 +40,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/ide',       redirect: '/terminal' },
   { path: '/hosts',     redirect: '/panel/hosts' },
   { path: '/runtime',   redirect: '/panel/runtime' },
+  { path: '/workloads', redirect: '/panel/workloads' },
   { path: '/files',     redirect: '/panel/files' },
   { path: '/probe',     redirect: '/panel/probe' },
   { path: '/audit',     redirect: '/panel/audit' },
