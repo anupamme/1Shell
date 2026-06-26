@@ -4,6 +4,7 @@ const LEGACY_EVENT_TYPES = {
   'ide:thinking': 'thinking',
   'ide:text': 'text',
   'ide:text-delta': 'text_delta',
+  'ide:text-replace': 'text_replace',
   'ide:tool-start': 'tool_start',
   'ide:tool-end': 'tool_end',
   'ide:tool-delta': 'tool_delta',

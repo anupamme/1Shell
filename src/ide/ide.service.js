@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const fetch = require('node-fetch');
 const { emitIdeEvent } = require('./ide.events');
@@ -678,7 +679,8 @@ function promptForEntry(entry) {
 
 const AGENT_ATTACHMENT_MAX_COUNT = 8;
 const AGENT_ATTACHMENT_MAX_BINARY_BYTES = 6 * 1024 * 1024;
-const AGENT_ATTACHMENT_MAX_TEXT_CHARS = 80_000;
+const AGENT_ATTACHMENT_MAX_TEXT_BYTES = 800 * 1024;
+const EXACT_TEXT_REF_PATTERN = /\[\[1shell-exact-attachment:([A-Za-z0-9_-]+)\]\]/g;
 
 function cleanAttachmentName(name) {
   return String(name || 'attachment').replace(/[\\/\r\n\t]/g, ' ').trim().slice(0, 160) || 'attachment';
@@ -698,9 +700,21 @@ function byteLengthFromBase64(value) {
   }
 }
 
+function utf8ByteLength(value) {
+  return Buffer.byteLength(String(value || ''), 'utf8');
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+function exactAttachmentHandle(index, sha256) {
+  return `att_${Math.max(0, Number(index) || 0)}_${String(sha256 || '').slice(0, 16)}`;
+}
+
 function normalizeAgentAttachments(value) {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, AGENT_ATTACHMENT_MAX_COUNT).map((raw) => {
+  return value.slice(0, AGENT_ATTACHMENT_MAX_COUNT).map((raw, index) => {
     const item = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     const mime = cleanMime(item.mime || item.type);
     const kind = ['image', 'text', 'document', 'file'].includes(String(item.kind || ''))
@@ -708,8 +722,16 @@ function normalizeAgentAttachments(value) {
       : (mime.startsWith('image/') ? 'image' : (mime === 'application/pdf' ? 'document' : 'file'));
     const base64 = String(item.base64 || '').replace(/^data:[^,]+,/i, '').replace(/\s+/g, '');
     const binaryBytes = byteLengthFromBase64(base64);
-    const text = typeof item.text === 'string' ? item.text.slice(0, AGENT_ATTACHMENT_MAX_TEXT_CHARS) : '';
+    const rawText = typeof item.text === 'string' ? item.text : '';
+    const textBytes = utf8ByteLength(rawText);
+    const textTooLarge = rawText && textBytes > AGENT_ATTACHMENT_MAX_TEXT_BYTES;
+    const text = textTooLarge ? '' : rawText;
+    const textSha256 = text ? sha256Hex(text) : '';
     const declaredSize = Number(item.size);
+    const error = [
+      String(item.error || '').trim(),
+      textTooLarge ? `Text attachment exceeds exact-text limit (${attachmentSizeLabel(textBytes)} > ${attachmentSizeLabel(AGENT_ATTACHMENT_MAX_TEXT_BYTES)}).` : '',
+    ].filter(Boolean).join(' ');
     return {
       name: cleanAttachmentName(item.name),
       mime,
@@ -717,7 +739,10 @@ function normalizeAgentAttachments(value) {
       size: Number.isFinite(declaredSize) && declaredSize >= 0 ? declaredSize : binaryBytes,
       base64: binaryBytes > 0 && binaryBytes <= AGENT_ATTACHMENT_MAX_BINARY_BYTES ? base64 : '',
       text,
-      error: String(item.error || '').trim().slice(0, 240),
+      textBytes,
+      textSha256,
+      exactHandle: text ? exactAttachmentHandle(index, textSha256) : '',
+      error: error.slice(0, 240),
       binaryBytes,
     };
   });
@@ -733,6 +758,101 @@ function attachmentSizeLabel(bytes) {
 function attachmentSummaryLine(att) {
   const type = att.kind === 'image' ? '图片' : att.kind === 'text' ? '文本' : att.kind === 'document' ? '文档' : '文件';
   return `- ${att.name} (${type}, ${att.mime}, ${attachmentSizeLabel(att.size || att.binaryBytes)})${att.error ? `: ${att.error}` : ''}`;
+}
+
+function registerExactTextAttachment(registry, att) {
+  if (!(registry instanceof Map) || !att?.text || !att.exactHandle) return '';
+  registry.set(att.exactHandle, {
+    handle: att.exactHandle,
+    name: att.name,
+    mime: att.mime,
+    text: att.text,
+    bytes: att.textBytes,
+    sha256: att.textSha256,
+  });
+  return att.exactHandle;
+}
+
+function exactAttachmentTextBlock(att) {
+  const handle = att.exactHandle;
+  return [
+    `<attachment name=${JSON.stringify(att.name)} mime=${JSON.stringify(att.mime)} exactHandle=${JSON.stringify(handle)} bytes=${att.textBytes} sha256=${att.textSha256}>`,
+    `For verbatim output, output exactly [[1shell-exact-attachment:${handle}]]. 1Shell will expand that handle deterministically from the original attachment bytes.`,
+    `<<<1shell-exact-content:${handle}`,
+    att.text,
+    `1shell-exact-content:${handle}>>>`,
+    '</attachment>',
+  ].join('\n');
+}
+
+function expandExactTextReferences(text, session = {}) {
+  const source = String(text || '');
+  const registry = session?.exactTextAttachments;
+  if (!(registry instanceof Map) || !source.includes('[[1shell-exact-attachment:')) {
+    return { text: source, expanded: false, refs: [], missing: [] };
+  }
+  const refs = [];
+  const missing = [];
+  let expanded = false;
+  const next = source.replace(EXACT_TEXT_REF_PATTERN, (match, handle) => {
+    const record = registry.get(handle);
+    if (!record) {
+      missing.push(handle);
+      return match;
+    }
+    const bytes = utf8ByteLength(record.text);
+    const sha256 = sha256Hex(record.text);
+    if (bytes !== record.bytes || sha256 !== record.sha256) {
+      missing.push(handle);
+      return match;
+    }
+    expanded = true;
+    refs.push({ handle, bytes, sha256, name: record.name, mime: record.mime });
+    return record.text;
+  });
+  return { text: next, expanded, refs, missing };
+}
+
+function expandExactTextReferencesInBlocks(content = [], session = {}) {
+  if (!Array.isArray(content)) return { content, expanded: false, refs: [], missing: [] };
+  let expanded = false;
+  const refs = [];
+  const missing = [];
+  const next = content.map((block) => {
+    if (block?.type !== 'text') return block;
+    const result = expandExactTextReferences(block.text || '', session);
+    if (result.expanded) expanded = true;
+    refs.push(...result.refs);
+    missing.push(...result.missing);
+    return result.expanded ? { ...block, text: result.text } : block;
+  });
+  return { content: next, expanded, refs, missing };
+}
+
+function exactExpansionTraceData(exactExpansion = {}) {
+  if (!exactExpansion?.expanded) return {};
+  return {
+    exactExpanded: true,
+    exactRefs: Array.isArray(exactExpansion.refs)
+      ? exactExpansion.refs.map((ref) => ({
+        handle: String(ref.handle || ''),
+        name: String(ref.name || ''),
+        mime: String(ref.mime || ''),
+        bytes: Number(ref.bytes) || 0,
+        sha256: String(ref.sha256 || ''),
+      }))
+      : [],
+  };
+}
+
+function assistantTraceSummary(visibleText = '', exactExpansion = {}) {
+  if (!exactExpansion?.expanded) return redactCredentialPatterns(visibleText);
+  const refs = exactExpansionTraceData(exactExpansion).exactRefs || [];
+  const refText = refs.map((ref) => {
+    const name = ref.name ? `${ref.name} ` : '';
+    return `${name}${ref.bytes} bytes sha256=${ref.sha256}`;
+  }).join('; ');
+  return `Assistant response expanded ${refs.length || 0} exact attachment reference(s); visible text omitted from trace. ${refText}`.trim();
 }
 
 function normalizeGoalStatus(value) {
@@ -772,7 +892,7 @@ function buildRunContextBlock(context = null) {
   ].filter(Boolean).join('\n') + '\n\n';
 }
 
-function buildAgentUserContent({ firstContextBlock = '', runContextBlock = '', message = '', attachments = [] }) {
+function buildAgentUserContent({ firstContextBlock = '', runContextBlock = '', message = '', attachments = [], exactTextRegistry = null }) {
   const normalized = normalizeAgentAttachments(attachments);
   const text = `${firstContextBlock || ''}${runContextBlock || ''}${message || ''}`.trim();
   if (!normalized.length) return text;
@@ -783,9 +903,10 @@ function buildAgentUserContent({ firstContextBlock = '', runContextBlock = '', m
 
   for (const att of normalized) {
     if (att.kind === 'text' && att.text) {
+      registerExactTextAttachment(exactTextRegistry, att);
       blocks.push({
         type: 'text',
-        text: `\n\n<attachment name="${att.name}" mime="${att.mime}">\n${att.text}\n</attachment>`,
+        text: `\n\n${exactAttachmentTextBlock(att)}`,
       });
       continue;
     }
@@ -2585,23 +2706,37 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       }
       rememberToolWorkNotes(session, runId, data.content);
       const fullText = textParts.join('');
-      if (fullText.trim().length > 0) {
-        if (!data._emittedTextDelta) emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: fullText });
-        emitToSession(session, socket, 'ide:text', { sessionId, runId, text: fullText });
+      const exactExpansion = expandExactTextReferences(fullText, session);
+      const visibleText = exactExpansion.text;
+      if (visibleText.trim().length > 0) {
+        if (!data._emittedTextDelta) {
+          emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: visibleText });
+        } else if (exactExpansion.expanded) {
+          emitToSession(session, socket, 'ide:text-replace', {
+            sessionId,
+            runId,
+            text: visibleText,
+            exactExpanded: true,
+            exactRefs: exactExpansion.refs,
+          });
+        }
+        emitToSession(session, socket, 'ide:text', { sessionId, runId, text: visibleText, exactExpanded: exactExpansion.expanded, exactRefs: exactExpansion.refs });
         recordTraceEvent('reasoning', toolCalls.length > 0 ? 'tool_decision' : 'reasoning_summary', {
           source: 'ide',
           runId,
           sessionId,
           hostId: session.hostId,
           toolName: toolCalls.length > 0 ? 'ai_tool_decision' : 'ai_response',
-          summary: redactCredentialPatterns(fullText),
+          summary: assistantTraceSummary(visibleText, exactExpansion),
+          data: exactExpansionTraceData(exactExpansion),
         });
       }
       if (hasProviderAssistantContent(data.content)) {
-        session.messages.push({ role: 'assistant', content: data.content });
+        const expandedBlocks = expandExactTextReferencesInBlocks(data.content, session);
+        session.messages.push({ role: 'assistant', content: expandedBlocks.expanded ? expandedBlocks.content : data.content });
       }
       return {
-        text: fullText,
+        text: visibleText,
         toolCalls: toolCalls.map((tc) => {
           const executionInput = cloneToolInputForExecution(tc.input || {});
           return {
@@ -3612,6 +3747,10 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     const effectiveApprovalMode = normalizeIdeApprovalMode(approvalMode || contextApprovalMode, { entry: effectiveEntry });
     const session = getOrCreateSession(sessionId, context, effectiveEntry, effectiveApprovalMode);
     ensureSessionCancellation(session);
+    if (session.currentRunId && !session.cancelled) {
+      cancelSession(sessionId, 'superseded by new user message');
+      ensureSessionCancellation(session);
+    }
     const runId = newRunId();
     session.currentRunId = runId;
     session.cancelled = false;
@@ -3675,7 +3814,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
     const firstContextBlock = session.messages.length === 0 && session.contextBlock ? session.contextBlock : '';
     const runContextBlock = buildRunContextBlock(runContext);
-    const userContent = buildAgentUserContent({ firstContextBlock, runContextBlock, message, attachments });
+    if (!(session.exactTextAttachments instanceof Map)) session.exactTextAttachments = new Map();
+    const userContent = buildAgentUserContent({ firstContextBlock, runContextBlock, message, attachments, exactTextRegistry: session.exactTextAttachments });
 
     session.messages.push({ role: 'user', content: userContent });
     if (!session.firstUserMessage) session.firstUserMessage = String(message || '').trim();
@@ -3688,7 +3828,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       sessionId,
       hostId: session.hostId,
       toolName: 'ide_message',
-      summary: message,
+      summary: redactPotentialSecrets(String(message || '')).substring(0, 1000),
     });
 
     const providerConfig = resolveIdeProviderConfig();
@@ -3702,7 +3842,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
     emitToSession(session, socket, 'ide:thinking', { sessionId, runId });
 
-    auditService?.log?.({ action: 'ide_message', sessionId, message: message.substring(0, 500) });
+    const safeAuditMessage = redactPotentialSecrets(String(message || '')).substring(0, 500);
+    auditService?.log?.({ action: 'ide_message', source: 'ide', command: safeAuditMessage, details: JSON.stringify({ sessionId }) });
 
     logger?.debug?.(`[ide] Agent tool catalog exposed (${agentTools.length}/${allTools.length} allowed by policy)`);
 
@@ -3911,13 +4052,14 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     for (const handler of [...session.cancelHandlers]) {
       try { handler(); } catch { /* ignore */ }
     }
+    session.cancelHandlers.clear();
     if (session.activeChildProcess) {
       try { session.activeChildProcess.kill(); } catch { /* ignore */ }
       session.activeChildProcess = null;
     }
     cancelIdeAgentRun(runId, reason);
     if (session.currentRunId === runId) session.currentRunId = null;
-    emitCancelledOnce(session, sessionId);
+    emitCancelledOnce(session, sessionId, session.socket, runId);
     return true;
   }
 
@@ -4000,4 +4142,13 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
   return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord };
 }
 
-module.exports = { createIdeService };
+module.exports = {
+  createIdeService,
+  __private: {
+    AGENT_ATTACHMENT_MAX_TEXT_BYTES,
+    assistantTraceSummary,
+    buildAgentUserContent,
+    expandExactTextReferences,
+    normalizeAgentAttachments,
+  },
+};

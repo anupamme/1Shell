@@ -64,6 +64,10 @@ assert.ok(!ideServiceSource.includes('requireTaskAuthoringEvidence'), '/task aut
 assert.ok(!ideServiceSource.includes('createTaskPackagingRequiredObservation'), '/task authoring must not force packaging via synthetic observations');
 assert.ok(useIdeChatSource.includes('buildOutgoingMessagePayload'), 'IDE frontend must snapshot entry/context before socket connection latency can reset /task state');
 assert.ok(useIdeChatSource.includes('const payload = buildOutgoingMessagePayload()'), 'IDE sendMessage must capture outgoing payload at send time');
+assert.ok(ideServiceSource.includes("cancelSession(sessionId, 'superseded by new user message')"), 'new IDE messages must cancel any still-running previous run before starting a replacement');
+assert.ok(ideServiceSource.includes('emitCancelledOnce(session, sessionId, session.socket, runId)'), 'cancelSession must emit cancellation with the cancelled runId');
+assert.ok(ideServiceSource.includes('const safeAuditMessage = redactPotentialSecrets'), 'IDE user message audit entries must be redacted before logging');
+assert.ok(!ideServiceSource.includes("auditService?.log?.({ action: 'ide_message', sessionId, message"), 'IDE user message audit must not log raw message text');
 
 function makeStore() {
   const runs = new Map();
@@ -130,8 +134,8 @@ async function runRuntimeApprovalProbe(mode, guardVerdict) {
     approvalRequired: false,
     risk: { risky: true },
   });
-  assert.strictEqual(probe.called, true, 'delegated mode should execute needApproval-only operations without interactive approval');
-  assert.strictEqual(probe.result.is_error, false, 'delegated needApproval-only operations should succeed');
+  assert.strictEqual(probe.called, false, 'delegated mode should reject needApproval-only operations instead of auto-approving them');
+  assert.strictEqual(probe.result.is_error, true, 'delegated needApproval-only operations should fail closed');
 
   probe = await runRuntimeApprovalProbe('delegated', {
     allow: true,

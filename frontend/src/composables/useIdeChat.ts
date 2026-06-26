@@ -546,6 +546,14 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     deltaBuffer.push(text);
   }
 
+  function replaceAssistantText(text: string): void {
+    deltaBuffer.flushNow();
+    const assistant = ensureAssistant();
+    assistant.text = text;
+    assistant.status = 'streaming';
+    touchTimeline();
+  }
+
   function appendAssistantLine(text: string, status: IdeChatStatus = 'error'): void {
     deltaBuffer.flushNow();
     const assistant = ensureAssistant();
@@ -798,6 +806,13 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         currentTextHadDelta = true;
         setStatus('生成中...');
         appendAssistantText(msg.delta);
+      }],
+      ['ide:text-replace', (raw: unknown) => {
+        const msg = raw as StreamMessage & { text?: string };
+        if (!matchesCurrentRun(msg) || typeof msg.text !== 'string') return;
+        currentTextHadDelta = true;
+        setStatus('生成中...');
+        replaceAssistantText(msg.text);
       }],
       ['ide:text', (raw: unknown) => {
         const msg = raw as StreamMessage & { text?: string };

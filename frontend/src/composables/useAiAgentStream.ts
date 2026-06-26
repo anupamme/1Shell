@@ -64,6 +64,7 @@ export interface AiAgentStreamCallbacks {
   finalize(): void;
   appendLine?: (kind: AiLineKind, text: string) => void;
   appendDelta?: (text: string) => void;
+  replaceText?: (text: string) => void;
   flushDelta?: () => void;
   ensureAssistant?: () => AiAssistantTurn;
   getAssistant?: () => AiAssistantTurn | null;
@@ -177,6 +178,26 @@ export function bindAiAgentStreamHandlers(
       controller.setCurrentTextHadDelta(true);
       callbacks.setStatus('生成中...');
       callbacks.appendDelta?.(m.delta);
+    }],
+    ['ide:text-replace', (msg: unknown) => {
+      const m = msg as AiAgentSocketMessage & { text?: string };
+      if (!controller.matchesCurrentRun(m) || typeof m.text !== 'string') return;
+      controller.setCurrentTextHadDelta(true);
+      callbacks.setStatus('生成中...');
+      if (callbacks.replaceText) callbacks.replaceText(m.text);
+      else if (callbacks.ensureAssistant && callbacks.touchAssistant) {
+        flushDelta();
+        const assistant = callbacks.ensureAssistant();
+        const line = { kind: 'stream' as AiLineKind, text: m.text };
+        assistant.lines = [line];
+        assistant.events = [{ type: 'line', line }, ...assistant.events.filter((event) => event.type !== 'line')];
+        assistant.status = 'streaming';
+        callbacks.touchAssistant();
+      }
+      else {
+        flushDelta();
+        callbacks.appendDelta?.(m.text);
+      }
     }],
     ['ide:tool-start', (msg: unknown) => {
       const m = msg as AiAgentSocketMessage & { name?: string; toolUseId?: string; input?: unknown; phase?: string };

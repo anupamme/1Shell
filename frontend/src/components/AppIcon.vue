@@ -56,6 +56,17 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M10 8.5l6 3.5-6 3.5z" />
     </template>
 
+    <template v-else-if="name === 'stop-square'">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
+      <rect x="9" y="9" width="6" height="6" rx="1" />
+    </template>
+
+    <template v-else-if="name === 'restart'">
+      <path d="M20 12a8 8 0 1 1-2.3-5.7" />
+      <path d="M20 4v5h-5" />
+      <path d="M12 8v4l2.5 1.5" />
+    </template>
+
     <!-- 脚本：终端 / 命令行 -->
     <template v-else-if="name === 'terminal'">
       <rect x="3" y="4" width="18" height="16" rx="2" />

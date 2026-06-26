@@ -53,6 +53,7 @@ const { createProbeRelayAdminRouter, createProbeRelayPublicRouter } = require('.
 const { createProbeTrafficRouter } = require('./src/routes/probe-traffic.routes');
 const { createProbeAlertRouter } = require('./src/routes/probe-alert.routes');
 const { createProbeDiagRouter } = require('./src/routes/probe-diag.routes');
+const { createPanelWorkloadsRouter } = require('./src/routes/panel-workloads.routes');
 const { createAiTaskRouter } = require('./src/routes/ai-task.routes');
 const { createIdeSessionRouter } = require('./src/routes/ide-session.routes');
 const { createScriptRouter } = require('./src/routes/script.routes');
@@ -92,6 +93,7 @@ const { createProbeTrafficService } = require('./src/services/probe-traffic.serv
 const { createProbeAlertService } = require('./src/services/probe-alert.service');
 const { createProbeDiagService } = require('./src/services/probe-diag.service');
 const { createProbeAggregatorService } = require('./src/services/probe-aggregator.service');
+const { createPanelWorkloadsService } = require('./src/services/panel-workloads.service');
 const { createSessionService } = require('./src/services/session.service');
 const { createFileService } = require('./src/services/file.service');
 const { createIpFilterService } = require('./src/services/ip-filter.service');
@@ -153,6 +155,7 @@ const probeAlertService = createProbeAlertService({ db, hostService, logger: log
 const probeAggregatorService = createProbeAggregatorService({ db, logger: log });
 probeService.refreshSnapshot().catch((error) => log.warn?.(`[probe] initial refresh failed: ${error.message}`));
 const bridgeService = createBridgeService({ hostService, auditService, sshPool, sshShellPool, commandGuard: createCommandGuard() });
+const panelWorkloadsService = createPanelWorkloadsService({ hostService, bridgeService, auditService });
 const securitySettingsService = createSecuritySettingsService({ dataDir, auditService, logger: log });
 // ─── Harness — AI 与外部世界的统一边界层 ────────────────────────────────
 const harness = createHarness({ bridgeService, hostService, auditService, db, logger: log, securitySettingsService });
@@ -239,6 +242,7 @@ const mcpService = createMcpService({
   probeAlertService,
   probeDiagService,
   probeAgentInstallerService,
+  panelWorkloadsService,
   remoteMcpService,
   ideService,
   harness,
@@ -290,6 +294,7 @@ app.use('/api', createProbeRelayAdminRouter({ probeRelayService, probeRelayInsta
 app.use('/api', createProbeTrafficRouter({ trafficService: probeTrafficService, hostService }));
 app.use('/api', createProbeAlertRouter({ alertService: probeAlertService }));
 app.use('/api', createProbeDiagRouter({ diagService: probeDiagService }));
+app.use('/api', createPanelWorkloadsRouter({ panelWorkloadsService }));
 app.use('/api', createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }));
 app.use('/api', createRemoteMcpRouter({ remoteMcpService, mcpService }));
 app.use('/api', createSecuritySettingsRouter({ securitySettingsService, bridgeService, hostService, auditService }));

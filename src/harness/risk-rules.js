@@ -78,6 +78,23 @@ function hasUnsafeOverwriteRedirect(text) {
   return /(?<![0-9>])>(?!>)/.test(withoutNullRedirects);
 }
 
+function hasDockerMutationIntent(text) {
+  return /\b(?:docker|podman)\s+compose\b[^|;&\n]*\b(?:up|down|pull|build|restart|stop|start|rm|create)\b/i.test(text)
+    || /\b(?:docker|podman)\b[^|;&\n]*\b(?:run|rm|rmi|stop|start|restart|pull|build)\b/i.test(text)
+    || /\b(?:docker|podman)\b[^|;&\n]*\b(?:volume\s+(?:rm|prune)|system\s+prune|container\s+(?:rm|prune)|image\s+(?:rm|prune))\b/i.test(text)
+    || /\bxargs\b[^|;&\n]*\b(?:docker|podman)\b[^|;&\n]*\b(?:rm|rmi|stop|restart)\b/i.test(text);
+}
+
+function hasOperationalStateFile(text) {
+  return /(?:^|[\/\s])(?:data\.key|usage\.sqlite|[^\/\s]+\.(?:sqlite|sqlite3|db)|config\.ya?ml|docker-compose\.ya?ml|\.env)(?:[\s;&|>]|$)/i.test(text)
+    || /(?:secret|credential|api[-_]?key|auth)[^\/\s]*\.(?:txt|json|ya?ml|env|key|sqlite|db)(?:[\s;&|>]|$)/i.test(text);
+}
+
+function hasOperationalStateMutationIntent(text) {
+  return /\b(rm|mv|cp|sed|tee|truncate|install|touch|chmod|chown|chgrp)\b/i.test(text)
+    || hasUnsafeOverwriteRedirect(text);
+}
+
 const COMMAND_RISK_RULES = Object.freeze([
   {
     id: 'chmod-world-writable-sensitive',
@@ -126,6 +143,18 @@ const COMMAND_RISK_RULES = Object.freeze([
     level: 'high',
     label: '修改安全敏感配置文件',
     test: (text) => hasSensitiveConfig(text) && /\b(chmod|chown|chgrp|rm|mv|cp|sed|tee|truncate|install|printf|echo|cat)\b|>/.test(text),
+  },
+  {
+    id: 'docker-service-mutation',
+    level: 'high',
+    label: 'Docker/Compose service or image mutation',
+    test: hasDockerMutationIntent,
+  },
+  {
+    id: 'operational-state-file-change',
+    level: 'high',
+    label: 'Operational config, database, key, or secret file mutation',
+    test: (text) => hasOperationalStateFile(text) && hasOperationalStateMutationIntent(text),
   },
   {
     id: 'service-stop',

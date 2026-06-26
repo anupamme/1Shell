@@ -8,7 +8,7 @@
 
 给人和 AI Agent 共用的本地优先多主机运维平台。人可以把它当作 WebSSH / VPS 控制台使用；AI Agent 可以通过 MCP、1Shell AI 和受控工具层调用它，让多台 VPS 成为可观察、可操作、可审计、可协作的运维对象。
 
-[![version](https://img.shields.io/badge/version-4.5.0-4f8cff?style=flat-square)](https://github.com/weidu12123/1Shell/releases)
+[![version](https://img.shields.io/badge/version-4.6.0-4f8cff?style=flat-square)](https://github.com/weidu12123/1Shell/releases)
 [![node](https://img.shields.io/badge/node-20%20%2F%2022%20%2F%2024-43a047?style=flat-square&logo=node.js)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-f9a825?style=flat-square)](LICENSE)
 [![docker](https://img.shields.io/badge/docker-ready-2496ed?style=flat-square&logo=docker)](https://hub.docker.com)
@@ -40,6 +40,10 @@ Harness 安全边界 -> 执行与观察 -> 验证结果 -> 审计留痕
 
 在 4.2 中，1Shell AI 的核心执行单元收敛为 **AgentRun**：一次用户目标对应一次可追踪、可中断、可审计、可验证的运行过程。旧版重型 Program / Task runtime 不再作为默认产品路径；可复用能力会围绕真实成功的 AgentRun、Skill、Script 和轻量 AI Task 逐步沉淀。
 
+4.5 完成了 Panel 与配置的拆分：配置能力独立为“配置”板块，Panel 回到详情、主机、文件、探针、审计等服务器面板主线。下一阶段开始补全 1Shell 还缺少的确定性面板能力，优先从 systemd、Docker / Compose、端口 / 进程、日志、证书、站点 / 反代和主机健康概览做资源发现与只读状态，再逐步加入可审计操作。详见 [Panel 补全计划](docs/oneshell-panel-completion-plan.md)。
+
+下一步路线再强调一次：证书管理不要照抄 1Panel 的常驻证书中心和大 CRUD 面板，优先做“发现 -> 到期预警 -> 任务化签发/续期 -> 验证/审计”的确定性链路。低频、重操作、需要证书密钥参与的部分，交给任务模块和 1Shell AI 编排，尽量不把负担留在受控 VPS 上。
+
 本次同步补齐了几处 agent 体验细节：
 
 - `/compact` 会压缩历史消息，并在前端显示独立的“正在压缩...”状态。
@@ -60,11 +64,15 @@ Harness 安全边界 -> 执行与观察 -> 验证结果 -> 审计留痕
 | 多机 SSH 终端 | 统一管理本机 Shell 与远程 SSH 会话 |
 | SFTP 文件管理 | 浏览、预览、编辑、上传、下载、新建、重命名和删除远程文件 |
 | 主机仓库 | 管理主机、角色、标签、排序、归档与连接信息 |
+| 服务器详情 | 查看单机详情和跨 VPS 健康概览 |
+| 服务面板 | 后续补全 systemd、Docker / Compose、端口 / 进程、日志、证书状态与任务化签发/续期、站点 / 反代等确定性能力 |
 | 脚本库 | 创建、编辑、执行和复用参数化运维脚本 |
 | 探针监控 | Agentless SSH 探针、probe-agent、relay-agent 与流量统计 |
 | 审计日志 | 记录关键命令、脚本执行、Bridge/MCP 调用和高风险操作 |
 
 1Shell 的目标不是替代所有专业运维系统，而是给个人开发者和小团队提供一个足够完整、足够可控、足够易扩展的 VPS 运维入口。
+
+Panel 的补全遵循“两层视角”：单机下钻提供接近传统服务器面板的查看和操作能力；全局视角负责跨 VPS 汇总、筛选、对比和异常定位。这也是 1Shell 区别于单 VPS 面板的核心产品形态。
 
 ### 2. 1Shell AI 与 AgentRun
 

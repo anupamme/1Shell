@@ -913,17 +913,6 @@ function mergeToolApprovalVerdict(policyVerdict = {}, guardVerdict = null, toolN
   const guardRequiresApproval = guardVerdict
     && guardVerdict.allow !== false
     && guardVerdict.approvalRequired === true;
-  if (
-    approvalMode === 'delegated'
-    && policyVerdict.approvalRequired !== true
-    && guardNeedsApproval
-    && !guardRequiresApproval
-  ) {
-    return {
-      ...policyVerdict,
-      approvalPolicy: policyVerdict.approvalPolicy || 'delegated_auto',
-    };
-  }
   if (policyVerdict.approvalRequired !== true && !guardNeedsApproval) return policyVerdict;
 
   if (!guardNeedsApproval) {

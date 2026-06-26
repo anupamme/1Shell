@@ -18,6 +18,7 @@ const TYPE_TO_LEGACY_EVENT: Record<string, string> = {
   thinking: 'ide:thinking',
   text: 'ide:text',
   text_delta: 'ide:text-delta',
+  text_replace: 'ide:text-replace',
   tool_start: 'ide:tool-start',
   tool_end: 'ide:tool-end',
   tool_delta: 'ide:tool-delta',

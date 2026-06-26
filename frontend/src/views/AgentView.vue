@@ -183,7 +183,6 @@ interface ComposerAttachment {
 const ATTACHMENT_MAX_COUNT = 8;
 const ATTACHMENT_MAX_BINARY_BYTES = 6 * 1024 * 1024;
 const ATTACHMENT_MAX_TEXT_BYTES = 800 * 1024;
-const ATTACHMENT_TEXT_PREVIEW_CHARS = 80_000;
 
 const attachmentInput = ref<HTMLInputElement | null>(null);
 const composerAttachments = ref<ComposerAttachment[]>([]);
@@ -1173,9 +1172,7 @@ async function buildAttachment(file: File): Promise<ComposerAttachment> {
     const text = await readAsText(file);
     return {
       ...base,
-      text: text.length > ATTACHMENT_TEXT_PREVIEW_CHARS
-        ? `${text.slice(0, ATTACHMENT_TEXT_PREVIEW_CHARS)}\n\n[1Shell: 文档内容已截断]`
-        : text,
+      text,
     };
   }
 

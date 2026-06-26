@@ -64,6 +64,30 @@ const cases = [
     action: 'warn',
     rule: 'remote-script-pipe-shell',
   },
+  {
+    name: 'docker compose update standard requires approval',
+    command: 'cd /opt/cliproxyapi-stack && docker compose pull && docker compose up -d --force-recreate',
+    mode: 'standard',
+    level: 'high',
+    action: 'approval',
+    rule: 'docker-service-mutation',
+  },
+  {
+    name: 'deleting manager data key standard requires approval',
+    command: 'rm /data/cliproxyapi-stack/cpa-manager-plus/data/data.key',
+    mode: 'standard',
+    level: 'high',
+    action: 'approval',
+    rule: 'operational-state-file-change',
+  },
+  {
+    name: 'rewriting service config standard requires approval',
+    command: 'printf "%s" "$CONFIG" > /data/cliproxyapi-stack/cliproxyapi/config.yaml',
+    mode: 'standard',
+    level: 'high',
+    action: 'approval',
+    rule: 'operational-state-file-change',
+  },
 ];
 
 for (const item of cases) {
@@ -74,6 +98,14 @@ for (const item of cases) {
     assert.ok(verdict.matchedRules.some((rule) => rule.id === item.rule), `${item.name}: missing rule ${item.rule}`);
   }
 }
+
+const readOperationalConfig = classifyCommandRisk('cat /data/cliproxyapi-stack/cliproxyapi/config.yaml', { securityMode: 'standard' });
+assert.strictEqual(readOperationalConfig.level, 'safe', 'reading operational config should not be treated as a mutation');
+assert.strictEqual(readOperationalConfig.action, 'allow', 'reading operational config should remain allowed');
+
+const readonlyOperationalStateCheck = classifyCommandRisk('if test -f /tmp/oneshell-guard-test.sqlite; then echo GUARD_FILE_STILL_EXISTS; else echo GUARD_FILE_MISSING; fi', { securityMode: 'standard' });
+assert.strictEqual(readonlyOperationalStateCheck.level, 'safe', 'checking whether an operational state file exists should remain read-only');
+assert.strictEqual(readonlyOperationalStateCheck.action, 'allow', 'read-only operational state checks should remain allowed');
 
 const rootRm = guard.check('execute_command', { hostId: 'local', command: 'rm -rf /' }, { capabilities: ['exec_command'], securityMode: 'trusted' });
 assert.strictEqual(rootRm.allow, false, 'rm -rf / must be blocked even in trusted mode');

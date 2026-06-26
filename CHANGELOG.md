@@ -1,8 +1,29 @@
 # Changelog
 
+## 4.6.0 - 2026-06-26
+
+4.6.0 继续补齐 Panel 的确定性运维能力，同时修正 1Shell AI 在精确文本、停止/抢占和托管审批上的边界。
+
+- 运行项面板改为按主机渐进加载，离线主机不再拖住全局首屏；支持刷新全部、刷新当前主机和从主机列表单独刷新。
+- 运行项面板新增文本式“操作”展开区，支持 Docker / Compose 容器启动、停止、重启、删除，Compose 容器支持安全重建；systemd / Windows Service 保持启停重启边界。
+- 优化端口发现链路：Linux 端口扫描改为一次 `ss` 采集后按唯一 PID 补元数据，连续端口会压缩展示为端口段，降低 zouter/haproxy 等大量监听端口场景的超时和噪声。
+- Docker 容器端口补齐 ExposedPorts fallback，并合并 cgroup 归属端口，减少容器与宿主进程重复显示。
+- 1Shell AI 文本附件不再按旧 80k 预览截断，800KB 内以原文完整进入模型；需要逐字输出时使用 exact attachment handle，由 1Shell 在服务端按 sha256 校验后展开。
+- exact handle 展开后的审计/trace 摘要只记录 handle、文件名、bytes 和 sha256，不保存展开全文；用户消息 trace 摘要同步脱敏。
+- 新用户消息会抢占并取消仍在运行的旧 run，避免用户停止/追问后系统继续优先执行旧操作。
+- 托管模式不再自动放行 guard 标记为需要审批的副作用操作；Docker/Compose 变更、运行态密钥/配置/数据库文件变更纳入高风险规则。
+
+### Verification
+
+- `npm test`
+- `npm --prefix frontend run typecheck`
+- `npm --prefix frontend run build`
+- `node -c src/ide/ide.service.js`
+- `node -c src/services/panel-workloads.service.js`
+
 ## 4.5.0 - 2026-06-23
 
-4.5.0 把 1Shell 的 Panel 方向从“多 VPS 连接 + AI/CLI 宿主”推进到“多 VPS 服务器面板中枢”。这一版仍然保持 AI 在旁路：面板的发现、查看、操作、反馈和错误返回都走确定性流程，AI 只作为解释入口，不参与主流程。
+4.5.0 把 1Shell 的 Panel 方向从“多 VPS 连接 + AI/CLI 宿主”推进到“多 VPS 服务器面板中枢”。这一版完成了 Panel 与配置的拆分：配置能力独立为“配置”板块，Panel 回到详情、主机、文件、探针、审计等服务器面板主线；同时保持 AI 在旁路，面板的发现、查看、操作、反馈和错误返回都走确定性流程，AI 只作为解释入口，不参与主流程。
 
 - 将配置能力从 Panel 中拆出为独立“配置”板块，并按 AI、扩展、程序、MCP 重新组织入口，让 Panel 专注服务器面板能力。
 - 将 Panel 导航调整为详情、主机、文件、探针、审计；详情页改为更接近服务器概览的布局，增加图形化健康与资源展示，并让本机在选择器中优先出现。
@@ -26,6 +47,10 @@
   - SHA256: `7a7e93d333424220aca6bc8850ffd4f53a9f7ac9ab75ca9e4bfe2fdd60be834d`
 - Linux x64 updater package: `release/repacked/1shell-4.5.0-linux-x64.tar.gz`
   - SHA256: `feb1d570d85948f42fa9d21a30ecf1dad9bd368654d418a5039e551741031fb3`
+
+### Next
+
+4.5 之后进入“补能力”阶段：先补资源发现和只读状态，再补确定、可审计、能返回清晰错误的操作，最后补跨 VPS 汇总、筛选、对比和批量定位问题的中枢能力。后续范围见 [Panel 补全计划](docs/oneshell-panel-completion-plan.md)。
 
 ## 4.3.0 - 2026-06-22
 
