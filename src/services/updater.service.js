@@ -27,6 +27,37 @@ const GITHUB_REPO = '1Shell';
 const RELEASES_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases`;
 const RATELIMIT_API = 'https://api.github.com/rate_limit';
 const MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024; // node app 含 node_modules，留 500MB 上限
+const FRONTEND_BUILD_MARKER = path.join('frontend', 'dist', '.1shell-build.json');
+
+function normalizePackageVersion(v) {
+  return String(v || '').trim().replace(/^v/i, '');
+}
+
+function readJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function assertReleaseFrontendBundle(packageDir) {
+  const pkg = readJsonFile(path.join(packageDir, 'package.json'));
+  const packageVersion = normalizePackageVersion(pkg.version);
+  const indexPath = path.join(packageDir, 'frontend', 'dist', 'index.html');
+  const markerPath = path.join(packageDir, FRONTEND_BUILD_MARKER);
+
+  if (!fs.existsSync(indexPath)) {
+    throw new Error('Release package is missing frontend/dist/index.html. Rebuild frontend before publishing.');
+  }
+  if (!fs.existsSync(markerPath)) {
+    throw new Error('Release package is missing frontend/dist/.1shell-build.json. Repack release assets before publishing.');
+  }
+
+  const marker = readJsonFile(markerPath);
+  const frontendVersion = normalizePackageVersion(marker.version);
+  if (!packageVersion || frontendVersion !== packageVersion) {
+    throw new Error(`Release frontend bundle version mismatch: package=${packageVersion || 'unknown'}, frontend=${frontendVersion || 'unknown'}.`);
+  }
+
+  return { packageVersion, frontendVersion };
+}
 
 function createUpdaterService({ rootDir, dataDir, logger = console } = {}) {
   const appRoot = rootDir || path.resolve(__dirname, '..', '..');
@@ -385,6 +416,10 @@ function createUpdaterService({ rootDir, dataDir, logger = console } = {}) {
       const archive = await downloadAndVerify(latest.asset, token);
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), '1shell-update-'));
       const pkgDir = await extractArchive(archive, latest.asset.name, tmpDir);
+      const releaseBundle = assertReleaseFrontendBundle(pkgDir);
+      if (normalizeVersion(releaseBundle.packageVersion) !== latest.version) {
+        throw new Error(`Release package version mismatch: latest=${latest.version}, package=${releaseBundle.packageVersion}.`);
+      }
       swapInPlace(pkgDir);
 
       writeConfig({
@@ -557,4 +592,4 @@ function createUpdaterService({ rootDir, dataDir, logger = console } = {}) {
   };
 }
 
-module.exports = { createUpdaterService };
+module.exports = { createUpdaterService, assertReleaseFrontendBundle };

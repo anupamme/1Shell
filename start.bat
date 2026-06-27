@@ -5,13 +5,6 @@ title 1Shell - One Shell to rule them all
 set "NODE_EXE=node"
 if exist "%~dp0runtime\node\node.exe" set "NODE_EXE=%~dp0runtime\node\node.exe"
 
-echo.
-echo  +================================================+
-echo  ^|         1Shell v4.3.0                          ^|
-echo  ^|     One Shell to rule them all.                ^|
-echo  +================================================+
-echo.
-
 :: Check Node.js
 "%NODE_EXE%" -v >nul 2>&1
 if %errorlevel% neq 0 (
@@ -35,6 +28,17 @@ if %NODE_MAJOR% GEQ 25 (
     pause
     exit /b 1
 )
+
+set "APP_ROOT=%~dp0"
+set "APP_VERSION=unknown"
+for /f "usebackq delims=" %%i in (`"%NODE_EXE%" -e "const path=require('path');try{process.stdout.write(String(require(path.join(process.env.APP_ROOT,'package.json')).version||'unknown'))}catch{process.stdout.write('unknown')}"`) do set "APP_VERSION=%%i"
+
+echo.
+echo  +================================================+
+echo  ^|         1Shell v%APP_VERSION%                          ^|
+echo  ^|     One Shell to rule them all.                ^|
+echo  +================================================+
+echo.
 echo [1Shell] Node.js %NODE_MAJOR% detected
 
 :: Check backend dependencies

@@ -270,6 +270,10 @@ function parseProxyUrl(urlText: string): Partial<ProxyAccessResult> | null {
   }
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function parseProxyAccessResult(value: unknown): ProxyAccessResult | null {
   const text = typeof value === 'string' ? value : (() => {
     try { return JSON.stringify(value); } catch { return String(value || ''); }
@@ -321,12 +325,38 @@ function previousProxyResult(items: readonly unknown[], index: number): ProxyAcc
   let inspectedTools = 0;
   for (let i = index - 1; i >= 0 && inspectedTools < 12; i -= 1) {
     const item = items[i];
+    if (hasKind(item, 'user')) break;
     if (!hasKind(item, 'tool')) continue;
     inspectedTools += 1;
     const parsed = parseProxyAccessResult(toolResultText(item));
     if (parsed) return parsed;
   }
   return null;
+}
+
+function hasExplicitProxyIntent(text: string): boolean {
+  return /(GOST|SOCKS5?|curl\s+-x|\bproxy\b|HTTP\s*代理|代理服务|用户名|密码|\busername\b|\buser\b|\bpassword\b|\bpasswd\b|\bpass\b)/i.test(text);
+}
+
+function sameProxyEndpointInText(text: string, proxy: ProxyAccessResult): boolean {
+  const host = proxy.host.trim();
+  if (!host) return false;
+  const ports = [proxy.httpPort, proxy.socks5Port].filter(Boolean);
+  return ports.some((port) => {
+    const endpointPattern = new RegExp(`(^|[^A-Za-z0-9.-])${escapeRegExp(host)}\\s*[:：]\\s*${escapeRegExp(port)}(?!\\d)`, 'i');
+    return endpointPattern.test(text);
+  });
+}
+
+function sameProxyUrlInText(text: string, proxy: ProxyAccessResult): boolean {
+  const urlMatches = text.match(/\b(?:https?|socks5):\/\/[^\s`'"<>]+/gi) || [];
+  const proxyHost = proxy.host.toLowerCase();
+  return urlMatches.some((rawUrl) => {
+    const parsed = parseProxyUrl(rawUrl.replace(/[)\]，,。.;；]+$/g, ''));
+    if (!parsed?.host || parsed.host.toLowerCase() !== proxyHost) return false;
+    return (parsed.httpPort && parsed.httpPort === proxy.httpPort)
+      || (parsed.socks5Port && parsed.socks5Port === proxy.socks5Port);
+  });
 }
 
 function mergeProxyResult(toolProxy: ProxyAccessResult | null, textProxy: ProxyAccessResult | null): ProxyAccessResult | null {
@@ -371,11 +401,8 @@ function previousToolResult(items: readonly unknown[], index: number): { kind: '
 function looksLikeProxyRestatement(text: string, proxy: ProxyAccessResult): boolean {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized) return false;
-  if (!/(GOST|SOCKS5?|\bHTTP\b|curl\s+-x|代理|浏览器|端口|密码|用户|\busername\b|\buser\b|\bpassword\b|\bpasswd\b|\bpass\b)/i.test(normalized)) return false;
-  return [proxy.host, proxy.httpPort, proxy.socks5Port, proxy.username]
-    .filter(Boolean)
-    .some((part) => normalized.includes(part))
-    || /\b(?:https?|socks5):\/\//i.test(normalized);
+  if (!hasExplicitProxyIntent(normalized)) return false;
+  return sameProxyEndpointInText(text, proxy) || sameProxyUrlInText(text, proxy);
 }
 
 function proxyAuthPrefix(proxy: ProxyAccessResult): string {

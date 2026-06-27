@@ -79,4 +79,38 @@ assert.ok(displayedWithAuth.includes('用户   weidu'));
 assert.ok(displayedWithAuth.includes('密码   628785220Jsw'));
 assert.ok(displayedWithAuth.includes('curl -x http://weidu:628785220Jsw@204.136.11.229:18317 https://example.com'));
 
+const proxyToolResult = [
+  'GOST proxy is ready',
+  'SOCKS5 10.88.90.221:12325',
+  'HTTP 10.88.90.221:12324',
+].join('\n');
+const vpsReport = [
+  '| Service | URL | Status |',
+  '| --- | --- | --- |',
+  '| 1Panel HTTP service | https://example.com | running |',
+  '| SSH | 10.88.90.221:22 | running |',
+].join('\n');
+const crossTurnItems = [
+  { kind: 'user', role: 'user', text: '搭建 GOST 代理' },
+  { kind: 'tool', name: 'execute_command', result: proxyToolResult },
+  { kind: 'assistant', role: 'assistant', text: '搭建完成 - GOST 代理服务' },
+  { kind: 'user', role: 'user', text: '探查这台 VPS 的情况' },
+  { kind: 'assistant', role: 'assistant', text: vpsReport },
+];
+assert.strictEqual(
+  displayAssistantTextAfterToolResult(crossTurnItems, 4, vpsReport),
+  vpsReport,
+  'proxy result from a previous user turn must not rewrite a normal VPS report',
+);
+
+const sameTurnOrdinaryReport = [
+  { kind: 'tool', name: 'execute_command', result: proxyToolResult },
+  { kind: 'assistant', role: 'assistant', text: vpsReport },
+];
+assert.strictEqual(
+  displayAssistantTextAfterToolResult(sameTurnOrdinaryReport, 1, vpsReport),
+  vpsReport,
+  'normal HTTP service URLs must not trigger GOST proxy summary rewriting',
+);
+
 console.log('structured-tool-results: proxy parsing checks passed');

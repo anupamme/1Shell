@@ -112,9 +112,22 @@ if [ ! -d "$ROOT_DIR/node_modules" ] || ! "$NODE_EXE" -e "const { createDatabase
   "$NODE_EXE" -e "const { createDatabase } = require('./src/database/db'); const db = createDatabase(':memory:'); if (!db) throw new Error('sqlite unavailable'); db.close?.(); require('node-pty'); console.log('runtime modules ok')"
 fi
 
-if [ ! -f "$ROOT_DIR/frontend/dist/index.html" ]; then
-  log "Frontend bundle missing. Building it now..."
+frontend_bundle_current() {
+  [ -f "$ROOT_DIR/frontend/dist/index.html" ] || return 1
+  [ -f "$ROOT_DIR/frontend/dist/.1shell-build.json" ] || return 1
+  app_version="$("$NODE_EXE" -e "process.stdout.write(String(require('./package.json').version || ''))" 2>/dev/null || true)"
+  bundle_version="$("$NODE_EXE" -e "const fs=require('fs');try{process.stdout.write(String(JSON.parse(fs.readFileSync('./frontend/dist/.1shell-build.json','utf8')).version||''));}catch{}" 2>/dev/null || true)"
+  [ -n "$app_version" ] && [ "$bundle_version" = "$app_version" ]
+}
+
+write_frontend_build_marker() {
+  "$NODE_EXE" -e "const fs=require('fs');const pkg=require('./package.json');fs.writeFileSync('./frontend/dist/.1shell-build.json',JSON.stringify({version:String(pkg.version||''),builtAt:new Date().toISOString()},null,2));"
+}
+
+if ! frontend_bundle_current; then
+  log "Frontend bundle missing or stale. Building it now..."
   (cd "$ROOT_DIR/frontend" && "$NPM_CMD" ci --include=dev --include=optional --no-audit --fund=false && "$NPM_CMD" run build)
+  write_frontend_build_marker
 fi
 
 if [ ! -f "$ROOT_DIR/.env" ] && [ -f "$ROOT_DIR/.env.example" ]; then

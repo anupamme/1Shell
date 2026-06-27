@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.6.4 - 2026-06-28
+
+4.6.4 修复 4.6.3 发布包可能携带旧前端构建产物的问题，并收紧 1Shell AI 代理结果结构化重写边界。
+
+- `scripts/repack-release-assets.js` 在重新打包 Windows/Linux updater 包前强制执行 `npm --prefix frontend run build`，并写入 `frontend/dist/.1shell-build.json` 构建标记。
+- 在线更新在替换目录前校验 release 包里的 `frontend/dist/index.html` 与 `.1shell-build.json`，前端构建版本与包版本不一致时拒绝更新，避免 VPS 安装到“版本号变了、前端没变”的坏包。
+- 便携启动脚本会检测前端 bundle 是否缺失或版本过期，过期时自动重建。
+- `start.bat` 的横幅版本改为读取 `package.json`，不再停留在旧硬编码版本。
+- 修复 GOST/SOCKS5/HTTP 代理结构化摘要跨用户轮次误用旧 tool result 的问题，普通 VPS 探查报告里的 HTTP 服务 URL 不再被替换成 GOST 代理摘要。
+
+### Verification
+
+- `node scripts/test-structured-tool-results.js`
+- `node scripts/test-release-repack-frontend-build.js`
+- `node scripts/test-updater-frontend-bundle-guard.js`
+- `node scripts/test-start-bat-version.js`
+- `npm --prefix frontend run build`
+- `npm test`
+- `node scripts/repack-release-assets.js`
+
+### Release assets
+
+- Windows x64 updater package: `release/repacked/1shell-4.6.4-windows-x64.zip`
+- Linux x64 updater package: `release/repacked/1shell-4.6.4-linux-x64.tar.gz`
+
 ## 4.6.3 - 2026-06-27
 
 4.6.3 修复 1Shell AI 面板在真实运维对话中的文本保真、代理信息展示和文件预览边界问题。

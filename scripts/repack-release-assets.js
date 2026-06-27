@@ -14,6 +14,9 @@ const RELEASE_DIR = path.join(ROOT, 'release');
 const OUTPUT_DIR = process.argv[2] ? path.resolve(process.argv[2]) : path.join(RELEASE_DIR, 'repacked');
 const pkg = require(path.join(ROOT, 'package.json'));
 const VERSION = String(pkg.version || '0.0.0');
+const FRONTEND_DIST_DIR = path.join(ROOT, 'frontend', 'dist');
+const FRONTEND_INDEX = path.join(FRONTEND_DIST_DIR, 'index.html');
+const FRONTEND_BUILD_MARKER = path.join(FRONTEND_DIST_DIR, '.1shell-build.json');
 
 const ASSETS = [
   {
@@ -84,6 +87,46 @@ function posixRel(from, to) {
 
 function rm(target) {
   fs.rmSync(target, { recursive: true, force: true });
+}
+
+function npmCommand() {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+function runNpm(args) {
+  if (process.platform === 'win32') {
+    execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', ['npm', ...args].join(' ')], { cwd: ROOT, stdio: 'inherit' });
+    return;
+  }
+  execFileSync(npmCommand(), args, { cwd: ROOT, stdio: 'inherit' });
+}
+
+function currentGitHead() {
+  try {
+    return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function requireFile(filePath, message) {
+  if (!fs.existsSync(filePath)) throw new Error(message);
+}
+
+function writeFrontendBuildMarker() {
+  fs.writeFileSync(FRONTEND_BUILD_MARKER, JSON.stringify({
+    version: VERSION,
+    gitHead: currentGitHead(),
+    builtAt: new Date().toISOString(),
+  }, null, 2), 'utf8');
+}
+
+function runFrontendBuild() {
+  requireFile(path.join(ROOT, 'frontend', 'package.json'), 'Missing frontend/package.json');
+  console.log(`[repack] Building frontend/dist for 1Shell ${VERSION}...`);
+  runNpm(['--prefix', 'frontend', 'run', 'build']);
+  requireFile(FRONTEND_INDEX, 'frontend/dist/index.html is missing after build');
+  writeFrontendBuildMarker();
 }
 
 function cp(src, dest) {
@@ -398,6 +441,7 @@ async function repack(asset) {
 }
 
 (async () => {
+  runFrontendBuild();
   for (const asset of ASSETS) {
     await repack(asset);
   }
