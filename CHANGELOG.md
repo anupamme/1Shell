@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.6.5 - 2026-06-28
+
+4.6.5 清理旧版 AI Chat 的直连聊天链路，避免它继续和新的 1Shell AI / AI Agent 入口混在一起。
+
+- 移除旧后端 `POST /api/chat`、`createChatUpstream()` 以及只服务该旧接口的 chat validator。
+- 旧 AI Chat 面板保留为暂存壳，但不再向后端发起聊天请求，也不再保留旧 system prompt、流式 SSE 状态或 VPS 范围注入。
+- 移除 AI Chat 面板和终端工具栏里的 VPS/范围选择控件，避免旧 AI Chat 再次伪装成 1Shell AI 工作区选择入口。
+- 保留 `1Shell AI`、`AI Agent`、终端补全、模型列表、选区分析、脚本生成和 Skill 适配能力。
+- 增加 `test-ai-chat-retired-route-guard` 回归测试，防止旧 `/api/chat` 链路和 AI Chat 范围选择残留再次被带回。
+
+### Verification
+
+- `node scripts/test-ai-chat-retired-route-guard.js`
+- `npm --prefix frontend run build`
+- `npm test`
+- `node scripts/repack-release-assets.js`
+
+### Release assets
+
+- Windows x64 updater package: `release/repacked/1shell-4.6.5-windows-x64.zip`
+  - SHA256: `7d7f72b6e6e215ff721bfebbba487baa8f03261fd4d2660336d47fcaea864da1`
+- Linux x64 updater package: `release/repacked/1shell-4.6.5-linux-x64.tar.gz`
+  - SHA256: `8b50dcc3d44fcb8ceb5e8b66e2d808743f9f75002ca92a38312e4cda7ce211ce`
+
 ## 4.6.4 - 2026-06-28
 
 4.6.4 修复 4.6.3 发布包可能携带旧前端构建产物的问题，并收紧 1Shell AI 代理结果结构化重写边界。

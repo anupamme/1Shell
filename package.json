@@ -1,6 +1,6 @@
 {
   "name": "1shell",
-  "version": "4.6.4",
+  "version": "4.6.5",
   "description": "1Shell - AI-assisted VPS and server management console",
   "homepage": "https://github.com/weidu12123/1Shell",
   "repository": {
@@ -23,7 +23,7 @@
     "desktop:build:mac": "electron-builder --mac",
     "build:agent": "node scripts/build-agent.js",
     "package:macos": "node scripts/package-macos-release.js",
-    "test": "node scripts/test-risk-rules.js && node scripts/test-ide-exact-text-handling.js && node scripts/test-ide-session-projection.js && node scripts/test-ide-text-fidelity.js && node scripts/test-proxy-stream-fidelity.js && node scripts/test-structured-tool-results.js && node scripts/test-release-repack-frontend-build.js && node scripts/test-updater-frontend-bundle-guard.js && node scripts/test-start-bat-version.js && node scripts/test-file-service.js && node scripts/test-mcp-core-tools.js && node scripts/test-task-authoring-capability.js && node scripts/test-ai-skill-resolver.js && node scripts/test-ide-empty-response-guard.js && node scripts/test-agent-host-scope.js && node scripts/test-ide-session-copy.js && node scripts/test-claude-code-model-routing.js && node scripts/test-cli-binary-detection.js && node scripts/test-cli-sandbox-snapshot.js && node scripts/test-cli-sandbox-zero-code-manifest.js && node scripts/test-presets-and-reasoning.js && node scripts/test-provider-reasoning-store.js && node scripts/test-codex-reasoning-track1.js && node scripts/test-mcp-preset-apply.js && node scripts/test-panel-workloads.js && node scripts/test-panel-workloads-route.js"
+    "test": "node scripts/test-risk-rules.js && node scripts/test-ide-exact-text-handling.js && node scripts/test-ide-session-projection.js && node scripts/test-ide-text-fidelity.js && node scripts/test-proxy-stream-fidelity.js && node scripts/test-structured-tool-results.js && node scripts/test-release-repack-frontend-build.js && node scripts/test-updater-frontend-bundle-guard.js && node scripts/test-start-bat-version.js && node scripts/test-ai-chat-retired-route-guard.js && node scripts/test-file-service.js && node scripts/test-mcp-core-tools.js && node scripts/test-task-authoring-capability.js && node scripts/test-ai-skill-resolver.js && node scripts/test-ide-empty-response-guard.js && node scripts/test-agent-host-scope.js && node scripts/test-ide-session-copy.js && node scripts/test-claude-code-model-routing.js && node scripts/test-cli-binary-detection.js && node scripts/test-cli-sandbox-snapshot.js && node scripts/test-cli-sandbox-zero-code-manifest.js && node scripts/test-presets-and-reasoning.js && node scripts/test-provider-reasoning-store.js && node scripts/test-codex-reasoning-track1.js && node scripts/test-mcp-preset-apply.js && node scripts/test-panel-workloads.js && node scripts/test-panel-workloads-route.js"
   },
   "keywords": [
     "ssh",

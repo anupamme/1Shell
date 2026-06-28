@@ -37,9 +37,7 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 function sessionOptionText(session: AiChatSession): string {
-  const title = session.title || '新对话';
-  const scope = chat.scopeLabel(session.scope);
-  return `${title} · ${scope}`;
+  return session.title || '新对话';
 }
 </script>
 
@@ -48,7 +46,7 @@ function sessionOptionText(session: AiChatSession): string {
     <!-- header -->
     <div class="ai-chat-header">
       <div class="ai-chat-header-main">
-        <span class="ai-chat-title">1Shell AI</span>
+        <span class="ai-chat-title">AI Chat</span>
         <button
           type="button"
           class="ai-chat-action-btn primary"
@@ -57,20 +55,6 @@ function sessionOptionText(session: AiChatSession): string {
         >新对话</button>
       </div>
       <div class="ai-chat-session-controls">
-        <label class="ai-chat-control">
-          <span>范围</span>
-          <select
-            v-model="chat.activeScopeKey.value"
-            class="ai-chat-select"
-            :disabled="chat.isStreaming.value"
-          >
-            <option
-              v-for="scope in chat.scopeOptions.value"
-              :key="scope.key"
-              :value="scope.key"
-            >{{ scope.label }}</option>
-          </select>
-        </label>
         <label class="ai-chat-control grow">
           <span>历史</span>
           <select

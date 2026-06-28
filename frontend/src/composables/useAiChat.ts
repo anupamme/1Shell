@@ -1,14 +1,9 @@
-import { computed, ref, type ComputedRef, type Ref, type WritableComputedRef } from 'vue';
-import { useRouter } from 'vue-router';
+import { computed, ref, type ComputedRef, type Ref } from 'vue';
 
-import { useHostsStore } from '@/stores/hosts';
-import { useAuthStore } from '@/stores/auth';
-import { useNotifyStore } from '@/stores/notify';
 import { escapeHtml, renderMarkdown } from '@/utils/markdown';
-import { createStreamDeltaBuffer } from '@/utils/streaming';
 
-const SYSTEM_PROMPT = '你是 1Shell AI，一个面向真实服务器运维与自动化的受控 agent。回答要安全、可执行、简洁；涉及真实主机操作时先说明目标范围和风险。';
-const INTRO_MESSAGE = '新对话默认使用全局范围。你也可以在左上角切换到某一台 VPS，让后续问题固定围绕那台主机。';
+const INTRO_MESSAGE = '旧版 AI Chat 的直连聊天入口已移除。请切换到 1Shell AI 使用新的 VPS 探查和自动化能力。';
+const RETIRED_MESSAGE = '旧版 AI Chat 的直连聊天入口已移除。请切换到右侧的 1Shell AI 继续对话。';
 
 const AI_CONFIG_KEY = '1shell-ai-config';
 const AI_CHAT_SESSIONS_KEY = '1shell-ai-chat-sessions-v1';
@@ -22,7 +17,7 @@ export interface AiConfig {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant';
   content: string;
   displayContent?: string;
 }
@@ -33,34 +28,19 @@ export interface DisplayMessage {
   pending?: boolean;
 }
 
-export interface AiChatScope {
-  type: 'global' | 'host';
-  hostId?: string;
-}
-
 export interface AiChatSession {
   id: string;
   title: string;
-  scope: AiChatScope;
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;
 }
 
-export interface AiScopeOption {
-  key: string;
-  label: string;
-  description: string;
-}
-
 export interface AiChatApi {
   readonly displayMessages: ComputedRef<DisplayMessage[]>;
   readonly sessionsList: ComputedRef<AiChatSession[]>;
-  readonly scopeOptions: ComputedRef<AiScopeOption[]>;
   readonly activeSession: ComputedRef<AiChatSession>;
   readonly activeSessionId: Ref<string>;
-  readonly activeScopeKey: WritableComputedRef<string>;
-  readonly activeScopeLabel: ComputedRef<string>;
   readonly isStreaming: Ref<boolean>;
   readonly inputText: Ref<string>;
   readonly config: Ref<AiConfig>;
@@ -70,13 +50,12 @@ export interface AiChatApi {
   sendMessage(): Promise<void>;
   stopStreaming(): void;
   resetCurrentChat(): void;
-  startNewChat(scopeKey?: string): void;
+  startNewChat(): void;
   deleteCurrentChat(): void;
   openConfigModal(): void;
   closeConfigModal(): void;
   saveConfig(next: AiConfig): void;
   fetchModels(apiBase: string, apiKey: string): Promise<string[]>;
-  scopeLabel(scope: AiChatScope): string;
 }
 
 let _instance: AiChatApi | null = null;
@@ -103,100 +82,47 @@ function createId(): string {
   return globalThis.crypto?.randomUUID?.() || `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function defaultMessages(): ChatMessage[] {
-  return [{ role: 'system', content: SYSTEM_PROMPT }];
-}
-
 function cleanTitle(value: string): string {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (!text) return '新对话';
   return text.length > MAX_TITLE_LENGTH ? `${text.slice(0, MAX_TITLE_LENGTH)}...` : text;
 }
 
-function scopeFromKey(key: string): AiChatScope {
-  if (!key || key === 'global') return { type: 'global' };
-  return { type: 'host', hostId: key.replace(/^host:/, '') };
-}
-
-function scopeKey(scope: AiChatScope): string {
-  return scope.type === 'host' && scope.hostId ? `host:${scope.hostId}` : 'global';
-}
-
 function safeMessages(value: unknown): ChatMessage[] {
-  if (!Array.isArray(value)) return defaultMessages();
-  const messages = value
+  if (!Array.isArray(value)) return [];
+  return value
     .filter((item): item is ChatMessage => {
       if (!item || typeof item !== 'object') return false;
       const msg = item as ChatMessage;
-      return ['user', 'assistant', 'system'].includes(msg.role) && typeof msg.content === 'string';
+      return ['user', 'assistant'].includes(msg.role) && typeof msg.content === 'string';
     })
     .map((item) => ({
       role: item.role,
       content: item.content,
       ...(typeof item.displayContent === 'string' ? { displayContent: item.displayContent } : {}),
     }));
-  return messages.some((item) => item.role === 'system') ? messages : [...defaultMessages(), ...messages];
 }
 
-function createSession(scope: AiChatScope = { type: 'global' }): AiChatSession {
+function createSession(): AiChatSession {
   const ts = nowIso();
   return {
     id: createId(),
     title: '新对话',
-    scope,
-    messages: defaultMessages(),
+    messages: [],
     createdAt: ts,
     updatedAt: ts,
   };
 }
 
 function create(): AiChatApi {
-  const router = useRouter();
-  const hosts = useHostsStore();
-  const auth = useAuthStore();
-  const notify = useNotifyStore();
-
   const sessions = ref<AiChatSession[]>([]);
   const activeSessionId = ref('');
-  const streamingSessionId = ref('');
-  const streamingPartial = ref('');
   const isStreaming = ref(false);
   const inputText = ref('');
   const configModalOpen = ref(false);
   const config = ref<AiConfig>({ apiBase: '', apiKey: '', model: '' });
 
-  let currentAbortController: AbortController | null = null;
-  let streamingReply = '';
-  let sessionsLoaded = false;
-  const deltaBuffer = createStreamDeltaBuffer((delta) => {
-    streamingReply += delta;
-    streamingPartial.value = streamingReply;
-  });
-
-  const scopeOptions = computed<AiScopeOption[]>(() => [
-    { key: 'global', label: '全局', description: '不限定单台主机' },
-    ...hosts.items.map((host) => ({
-      key: `host:${host.id}`,
-      label: host.name || host.id,
-      description: host.type === 'local' ? '本机' : `${host.username || 'root'}@${host.host || host.id}`,
-    })),
-  ]);
-
-  function scopeLabel(scope: AiChatScope): string {
-    if (scope.type !== 'host' || !scope.hostId) return '全局';
-    const host = hosts.hostMap.get(scope.hostId);
-    return host?.name || scope.hostId;
-  }
-
   const activeSession = computed<AiChatSession>(() => ensureActiveSession());
-  const activeScopeLabel = computed(() => scopeLabel(activeSession.value.scope));
-  const activeScopeKey = computed<string>({
-    get: () => scopeKey(activeSession.value.scope),
-    set: (key) => {
-      const session = activeSession.value;
-      replaceSession({ ...session, scope: scopeFromKey(key), updatedAt: nowIso() });
-    },
-  });
 
   const sessionsList = computed<AiChatSession[]>(() => {
     return [...sessions.value].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
@@ -204,15 +130,14 @@ function create(): AiChatApi {
 
   const displayMessages = computed<DisplayMessage[]>(() => {
     const session = activeSession.value;
-    const visible = session.messages.filter((m) => m.role !== 'system');
     const list: DisplayMessage[] = [];
 
-    if (!visible.length && !(isStreaming.value && streamingSessionId.value === session.id)) {
+    if (!session.messages.length) {
       list.push({ role: 'assistant', html: escapeHtml(INTRO_MESSAGE) });
       return list;
     }
 
-    for (const m of visible) {
+    for (const m of session.messages) {
       if (m.role === 'user') {
         list.push({ role: 'user', html: escapeHtml(m.displayContent || m.content) });
       } else if (m.role === 'assistant') {
@@ -220,17 +145,10 @@ function create(): AiChatApi {
       }
     }
 
-    if (isStreaming.value && streamingSessionId.value === session.id) {
-      const partial = streamingPartial.value;
-      list.push({
-        role: 'assistant',
-        html: partial ? renderMarkdown(partial) : escapeHtml('思考中...'),
-        pending: true,
-      });
-    }
-
     return list;
   });
+
+  let sessionsLoaded = false;
 
   function persistSessions(): void {
     if (!sessionsLoaded) return;
@@ -276,19 +194,17 @@ function create(): AiChatApi {
 
   function resetCurrentChat(): void {
     const session = activeSession.value;
-    deltaBuffer.clear();
-    streamingReply = '';
     replaceSession({
       ...session,
       title: '新对话',
-      messages: defaultMessages(),
+      messages: [],
       updatedAt: nowIso(),
     });
   }
 
-  function startNewChat(scopeKeyValue = 'global'): void {
+  function startNewChat(): void {
     if (isStreaming.value) return;
-    const session = createSession(scopeFromKey(scopeKeyValue));
+    const session = createSession();
     sessions.value = [session, ...sessions.value].slice(0, MAX_STORED_SESSIONS);
     activeSessionId.value = session.id;
     persistSessions();
@@ -303,132 +219,21 @@ function create(): AiChatApi {
     persistSessions();
   }
 
-  function scopePrompt(scope: AiChatScope): string {
-    if (scope.type !== 'host' || !scope.hostId) return '[AI 范围: 全局，不限定单台主机]';
-    const host = hosts.hostMap.get(scope.hostId);
-    const label = host?.name || scope.hostId;
-    const endpoint = host && host.type !== 'local' ? `${host.username || 'root'}@${host.host}:${host.port || 22}` : '本机';
-    return `[AI 范围: ${label} / ${endpoint} / hostId=${scope.hostId}]`;
-  }
-
-  function handleAuthExpired(message: string): void {
-    auth.setAuthenticated(false);
-    notify.error(message || '登录已失效，请重新登录');
-    router.push('/').catch(() => { /* ignore */ });
-  }
-
   async function sendMessage(): Promise<void> {
     const userContent = inputText.value.trim();
     if (!userContent || isStreaming.value) return;
 
     const session = activeSession.value;
-    const sessionId = session.id;
-    const userMessage: ChatMessage = {
-      role: 'user',
-      content: `${scopePrompt(session.scope)}\n${userContent}`,
-      displayContent: userContent,
-    };
-    const requestMessages = [...session.messages, userMessage];
-    updateSessionMessages(sessionId, requestMessages);
+    const userMessage: ChatMessage = { role: 'user', content: userContent, displayContent: userContent };
+    updateSessionMessages(session.id, [
+      ...session.messages,
+      userMessage,
+      { role: 'assistant', content: RETIRED_MESSAGE },
+    ]);
     inputText.value = '';
-
-    streamingSessionId.value = sessionId;
-    streamingPartial.value = '';
-    streamingReply = '';
-    deltaBuffer.clear();
-    isStreaming.value = true;
-    currentAbortController = new AbortController();
-
-    try {
-      const requestBody: Record<string, unknown> = {
-        messages: requestMessages.map(({ role, content }) => ({ role, content })),
-      };
-      const customConfig = window.__aiApiConfig || config.value;
-      if (customConfig.apiBase) requestBody.apiBase = customConfig.apiBase;
-      if (customConfig.apiKey) requestBody.apiKey = customConfig.apiKey;
-      if (customConfig.model) requestBody.model = customConfig.model;
-
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-csrf-token': getCsrfToken() },
-        body: JSON.stringify(requestBody),
-        signal: currentAbortController!.signal,
-      });
-
-      if (response.status === 401) {
-        const data = await response.json().catch(() => ({}));
-        const msg = (data as { error?: string }).error || '登录已失效，请重新登录';
-        handleAuthExpired(msg);
-        throw new Error(msg);
-      }
-      if (!response.ok || !response.body) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error((data as { error?: string }).error || '聊天请求失败');
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const raw = trimmed.slice(5).trim();
-          if (!raw || raw === '[DONE]') continue;
-          let parsed: { error?: string; choices?: Array<{ delta?: { content?: string } }> };
-          try {
-            parsed = JSON.parse(raw);
-          } catch {
-            continue;
-          }
-          if (parsed.error) throw new Error(parsed.error);
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) deltaBuffer.push(delta);
-        }
-      }
-
-      buffer += decoder.decode();
-      if (buffer.trim()) {
-        const raw = buffer.trim().startsWith('data:') ? buffer.trim().slice(5).trim() : '';
-        if (raw && raw !== '[DONE]') {
-          const parsed = JSON.parse(raw) as { error?: string; choices?: Array<{ delta?: { content?: string } }> };
-          if (parsed.error) throw new Error(parsed.error);
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) deltaBuffer.push(delta);
-        }
-      }
-      deltaBuffer.flushNow();
-      updateSessionMessages(sessionId, [
-        ...requestMessages,
-        { role: 'assistant', content: streamingReply || '(无文字回复)' },
-      ]);
-    } catch (err) {
-      const isAbort = (err as Error).name === 'AbortError';
-      deltaBuffer.flushNow();
-      updateSessionMessages(sessionId, [
-        ...requestMessages,
-        { role: 'assistant', content: isAbort ? (streamingReply || '(已停止)') : `请求失败：${(err as Error).message || '请求失败'}` },
-      ]);
-    } finally {
-      currentAbortController = null;
-      streamingSessionId.value = '';
-      streamingPartial.value = '';
-      streamingReply = '';
-      deltaBuffer.clear();
-      isStreaming.value = false;
-    }
   }
 
-  function stopStreaming(): void {
-    currentAbortController?.abort();
-  }
+  function stopStreaming(): void {}
 
   function loadConfig(): void {
     try {
@@ -458,7 +263,6 @@ function create(): AiChatApi {
           return {
             id: raw.id || createId(),
             title: cleanTitle(raw.title || ''),
-            scope: raw.scope?.type === 'host' ? { type: 'host', hostId: raw.scope.hostId } : { type: 'global' },
             messages: safeMessages(raw.messages),
             createdAt: raw.createdAt || nowIso(),
             updatedAt: raw.updatedAt || raw.createdAt || nowIso(),
@@ -514,11 +318,8 @@ function create(): AiChatApi {
   return {
     displayMessages,
     sessionsList,
-    scopeOptions,
     activeSession,
     activeSessionId,
-    activeScopeKey,
-    activeScopeLabel,
     isStreaming,
     inputText,
     config,
@@ -533,6 +334,5 @@ function create(): AiChatApi {
     closeConfigModal,
     saveConfig,
     fetchModels,
-    scopeLabel,
   };
 }

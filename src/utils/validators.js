@@ -80,27 +80,6 @@ function validateAiConfigFields(payload) {
   if (hasOwn(payload, 'model')) ensureOptionalString(payload.model, 'model 必须是字符串');
 }
 
-function validateChatMessages(messages) {
-  if (!Array.isArray(messages) || messages.length === 0) {
-    throw createValidationError('messages 不能为空');
-  }
-
-  messages.forEach((message, index) => {
-    ensureObject(message, `messages[${index}] 必须是对象`);
-    ensureEnum(message.role, ['system', 'user', 'assistant'], `messages[${index}].role 不合法`);
-    ensureNonEmptyString(message.content, `messages[${index}].content 不能为空`);
-  });
-
-  return messages;
-}
-
-function validateChatRequestBody(payload) {
-  const body = ensureObject(payload, '聊天请求体必须是对象');
-  validateChatMessages(body.messages);
-  validateAiConfigFields(body);
-  return body;
-}
-
 function validateCompletionRequestBody(payload) {
   const body = ensureObject(payload, '补全请求体必须是对象');
 
@@ -511,8 +490,6 @@ module.exports = {
   validateAgentResizePayload,
   validateAgentStartPayload,
   validateAgentStopPayload,
-  validateChatMessages,
-  validateChatRequestBody,
   validateCompletionRequestBody,
   validateHostPayload,
   validateManualLocation,

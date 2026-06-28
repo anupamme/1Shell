@@ -1,7 +1,6 @@
 'use strict';
 
 const fetch = require('node-fetch');
-const { validateChatMessages } = require('../utils/validators');
 
 const {
   ENV_API_BASE,
@@ -187,23 +186,6 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     }
 
     return '';
-  }
-
-  async function createChatUpstream(body = {}) {
-    validateChatMessages(body.messages);
-    const { base, key, model } = resolveConfig(body);
-    return fetchImpl(`${base}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: body.messages,
-        stream: true,
-      }),
-    });
   }
 
   async function requestCompletion(body = {}) {
@@ -539,7 +521,6 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
   }
 
   return {
-    createChatUpstream,
     fetchModelList,
     generateScript,
     requestSkillAdaptation,
