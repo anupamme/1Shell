@@ -178,8 +178,8 @@ const ide = useIdeChat({
   },
 });
 
-watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollToBottom()); });
-watch(() => ide.timeline.value, () => { void nextTick(() => scrollToBottom()); }, { deep: true });
+watch(() => ide.timeline.value.length, () => { scrollToBottom(); });
+watch(() => ide.timeline.value, () => { scrollToBottom(); }, { deep: true });
 watch(() => ide.inputText.value, () => { slashHighlight.value = 0; });
 watch(() => props.active, (active) => {
   if (active) {
@@ -202,7 +202,12 @@ function onChatScroll(): void {
 }
 
 function scrollToBottom(force = false): void {
-  scrollToBottomIfPinned(chatAreaEl.value, force || followOutput);
+  const el = chatAreaEl.value;
+  const wasPinned = force || (followOutput && (!el || isNearScrollBottom(el)));
+  if (force) followOutput = true;
+  void nextTick(() => {
+    scrollToBottomIfPinned(chatAreaEl.value, wasPinned);
+  });
 }
 
 function parseSessionTime(value: string): number {
@@ -497,6 +502,7 @@ async function sendOrHandleCommand(): Promise<void> {
     return;
   }
   if (await handleAgentShellCommand(ide.inputText.value)) return;
+  followOutput = true;
   ide.sendMessage();
 }
 
@@ -516,6 +522,7 @@ function startTaskAuthoring(intent: string): void {
   taskAuthoringContext.value = { mode, intent: intent.trim() };
   ide.inputText.value = buildTaskAuthoringPrompt({ mode, intent });
   window.setTimeout(() => {
+    followOutput = true;
     ide.sendMessage();
     nextEntry.value = 'console';
     taskAuthoringContext.value = null;

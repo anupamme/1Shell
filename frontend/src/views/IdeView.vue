@@ -95,8 +95,8 @@ const taskSuggestionVisible = computed(() => {
   return /^\/(?:t(?:a(?:s(?:k)?)?)?)?$/i.test(text);
 });
 
-watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollToBottom()); });
-watch(() => ide.timeline.value, () => { void nextTick(() => scrollToBottom()); }, { deep: true });
+watch(() => ide.timeline.value.length, () => { scrollToBottom(); });
+watch(() => ide.timeline.value, () => { scrollToBottom(); }, { deep: true });
 watch(() => ide.inputText.value, () => { slashHighlight.value = 0; });
 
 onBeforeUnmount(() => {
@@ -119,7 +119,12 @@ function onChatScroll(): void {
 }
 
 function scrollToBottom(force = false): void {
-  scrollToBottomIfPinned(chatEl.value, force || followOutput);
+  const el = chatEl.value;
+  const wasPinned = force || (followOutput && (!el || isNearScrollBottom(el)));
+  if (force) followOutput = true;
+  void nextTick(() => {
+    scrollToBottomIfPinned(chatEl.value, wasPinned);
+  });
 }
 
 function onInputKeydown(event: KeyboardEvent): void {
@@ -363,6 +368,7 @@ async function sendOrOpenTask(): Promise<void> {
   if (commandIntent === null) {
     nextEntry.value = 'core';
     taskAuthoringContext.value = null;
+    followOutput = true;
     ide.sendMessage();
     return;
   }
@@ -417,6 +423,7 @@ function startTaskAuthoring(): void {
   };
   ide.inputText.value = prompt;
   window.setTimeout(() => {
+    followOutput = true;
     ide.sendMessage();
     nextEntry.value = 'core';
     taskAuthoringContext.value = null;

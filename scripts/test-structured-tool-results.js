@@ -24,37 +24,47 @@ vm.runInNewContext(compiled, {
   require,
 }, { filename: sourcePath });
 
-const {
-  displayAssistantTextAfterToolResult,
-  parseProxyAccessResult,
-} = moduleContext.exports;
+const { displayAssistantTextAfterToolResult } = moduleContext.exports;
 
-const passedToolResult = 'verification passed: curl -x http://204.136.11.229:18317 https://example.com';
-const parsedPassed = parseProxyAccessResult(passedToolResult);
-assert.strictEqual(parsedPassed.host, '204.136.11.229');
-assert.strictEqual(parsedPassed.httpPort, '18317');
-assert.strictEqual(parsedPassed.password, '', 'passed must not be parsed as pass=ed');
+const generatedProxyTitle = '搭建完成 - GOST 代理服务';
 
-const items = [
-  {
-    kind: 'tool',
-    name: 'verify_outcome',
-    result: passedToolResult,
-  },
-  {
-    kind: 'assistant',
-    role: 'assistant',
-    text: '搭建完成 - GOST 代理服务\nHTTP 204.136.11.229:18317\n使用方式：curl -x http://204.136.11.229:18317 https://example.com',
-  },
+const fileText = [
+  'HTTP 157.254.234.107:8080',
+  '密码 OX81WGskwhij0CH6WJXc5psu',
+].join('\n');
+const readRemoteFileItems = [
+  { kind: 'user', role: 'user', text: '登录的账号密码是什么' },
+  { kind: 'tool', name: 'read_remote_file', result: fileText },
+  { kind: 'assistant', role: 'assistant', text: fileText },
 ];
+const displayedFileText = displayAssistantTextAfterToolResult(readRemoteFileItems, 2, fileText);
+assert.strictEqual(
+  displayedFileText,
+  fileText,
+  'read_remote_file content must stay as assistant text, not become a GOST proxy summary',
+);
+assert.ok(
+  !displayedFileText.includes(generatedProxyTitle),
+  'frontend must not generate a GOST proxy title from file contents',
+);
 
-const displayed = displayAssistantTextAfterToolResult(items, 1, items[1].text);
-assert.ok(displayed.includes('HTTP   204.136.11.229:18317'));
-assert.ok(!displayed.includes('密码   ed'), 'proxy summary must not invent password ed');
-assert.ok(displayed.includes('curl -x http://204.136.11.229:18317 https://example.com'));
+const commandText = [
+  'verification passed: curl -x http://204.136.11.229:18317 https://example.com',
+  'HTTP 204.136.11.229:18317',
+  '密码 secret-value',
+].join('\n');
+const commandItems = [
+  { kind: 'tool', name: 'execute_command', result: commandText },
+  { kind: 'assistant', role: 'assistant', text: commandText },
+];
+assert.strictEqual(
+  displayAssistantTextAfterToolResult(commandItems, 1, commandText),
+  commandText,
+  'execute_command output must not be replaced by a frontend-authored GOST proxy summary',
+);
 
-const oldGeneratedSummary = [
-  '搭建完成 - GOST 代理服务',
+const explicitAssistantSummary = [
+  generatedProxyTitle,
   '',
   '```text',
   'HTTP   204.136.11.229:18317',
@@ -67,17 +77,11 @@ const oldGeneratedSummary = [
   'curl -x http://204.136.11.229:18317 https://example.com',
   '```',
 ].join('\n');
-const repairedGenerated = displayAssistantTextAfterToolResult(items, 1, oldGeneratedSummary);
-assert.ok(!repairedGenerated.includes('密码   ed'), 'old generated summaries must not re-ingest their own bogus password');
-
-const displayedWithAuth = displayAssistantTextAfterToolResult(
-  items,
-  1,
-  '搭建完成，HTTP 204.136.11.229:18317，user weidu password 628785220Jsw',
+assert.strictEqual(
+  displayAssistantTextAfterToolResult(commandItems, 1, explicitAssistantSummary),
+  explicitAssistantSummary,
+  'frontend must not repair or rewrite assistant-authored proxy text',
 );
-assert.ok(displayedWithAuth.includes('用户   weidu'));
-assert.ok(displayedWithAuth.includes('密码   628785220Jsw'));
-assert.ok(displayedWithAuth.includes('curl -x http://weidu:628785220Jsw@204.136.11.229:18317 https://example.com'));
 
 const proxyToolResult = [
   'GOST proxy is ready',
@@ -93,14 +97,14 @@ const vpsReport = [
 const crossTurnItems = [
   { kind: 'user', role: 'user', text: '搭建 GOST 代理' },
   { kind: 'tool', name: 'execute_command', result: proxyToolResult },
-  { kind: 'assistant', role: 'assistant', text: '搭建完成 - GOST 代理服务' },
+  { kind: 'assistant', role: 'assistant', text: generatedProxyTitle },
   { kind: 'user', role: 'user', text: '探查这台 VPS 的情况' },
   { kind: 'assistant', role: 'assistant', text: vpsReport },
 ];
 assert.strictEqual(
   displayAssistantTextAfterToolResult(crossTurnItems, 4, vpsReport),
   vpsReport,
-  'proxy result from a previous user turn must not rewrite a normal VPS report',
+  'previous proxy-like tool text must not rewrite a later VPS report',
 );
 
 const sameTurnOrdinaryReport = [
@@ -110,7 +114,7 @@ const sameTurnOrdinaryReport = [
 assert.strictEqual(
   displayAssistantTextAfterToolResult(sameTurnOrdinaryReport, 1, vpsReport),
   vpsReport,
-  'normal HTTP service URLs must not trigger GOST proxy summary rewriting',
+  'normal HTTP service URLs must not trigger proxy summary rewriting',
 );
 
-console.log('structured-tool-results: proxy parsing checks passed');
+console.log('structured-tool-results: no proxy-summary rewriting checks passed');

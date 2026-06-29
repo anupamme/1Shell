@@ -37,14 +37,6 @@ export interface ProbeListResult {
   probes: StructuredProbe[];
 }
 
-export interface ProxyAccessResult {
-  host: string;
-  httpPort: string;
-  socks5Port: string;
-  username: string;
-  password: string;
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -218,166 +210,6 @@ function probeListResultFromTimelineItem(value: unknown): ProbeListResult | null
   return parseProbeListResult(record.result);
 }
 
-function toolResultText(value: unknown): string {
-  const record = asRecord(value);
-  if (!record || cleanString(record.kind) !== 'tool') return '';
-  const result = record.result;
-  if (typeof result === 'string') return result;
-  if (result === undefined || result === null) return '';
-  try {
-    return JSON.stringify(result);
-  } catch {
-    return String(result);
-  }
-}
-
-function cleanProxySecret(value: string): string {
-  return value
-    .trim()
-    .replace(/^[`'"“”‘’]+|[`'"“”‘’，,。.;；]+$/g, '');
-}
-
-function decodeUrlComponentSafe(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function normalizePortText(value: unknown): string {
-  const text = cleanString(value).replace(/[^\d]/g, '');
-  const number = Number(text);
-  return Number.isInteger(number) && number > 0 && number <= 65535 ? String(number) : '';
-}
-
-function parseProxyUrl(urlText: string): Partial<ProxyAccessResult> | null {
-  try {
-    const url = new URL(urlText);
-    const protocol = url.protocol.replace(/:$/, '').toLowerCase();
-    if (!['http', 'https', 'socks5'].includes(protocol)) return null;
-    const result: Partial<ProxyAccessResult> = {
-      host: url.hostname,
-      username: decodeUrlComponentSafe(url.username || ''),
-      password: decodeUrlComponentSafe(url.password || ''),
-    };
-    const port = normalizePortText(url.port);
-    if (protocol === 'socks5') result.socks5Port = port;
-    else result.httpPort = port;
-    return result.host && port ? result : null;
-  } catch {
-    return null;
-  }
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-export function parseProxyAccessResult(value: unknown): ProxyAccessResult | null {
-  const text = typeof value === 'string' ? value : (() => {
-    try { return JSON.stringify(value); } catch { return String(value || ''); }
-  })();
-  if (!/(GOST|SOCKS5?|HTTP|proxy|代理|curl\s+-x|端口|密码|用户)/i.test(text)) return null;
-
-  const found: Partial<ProxyAccessResult> = {};
-  const urlMatches = text.match(/\b(?:https?|socks5):\/\/[^\s`'"<>]+/gi) || [];
-  for (const rawUrl of urlMatches) {
-    const parsed = parseProxyUrl(rawUrl.replace(/[)\]，,。.;；]+$/g, ''));
-    if (!parsed) continue;
-    if (!found.host && parsed.host) found.host = parsed.host;
-    if (!found.username && parsed.username) found.username = parsed.username;
-    if (!found.password && parsed.password) found.password = parsed.password;
-    if (!found.httpPort && parsed.httpPort) found.httpPort = parsed.httpPort;
-    if (!found.socks5Port && parsed.socks5Port) found.socks5Port = parsed.socks5Port;
-  }
-
-  const endpointHost = String.raw`((?:\d{1,3}\.){3}\d{1,3}|localhost|[A-Za-z0-9.-]+\.[A-Za-z]{2,})`;
-  const httpMatch = text.match(new RegExp(String.raw`\bHTTP\b[^\r\n]{0,100}?${endpointHost}\s*[:：]\s*(\d{2,5})`, 'i'));
-  if (httpMatch) {
-    if (!found.host) found.host = httpMatch[1];
-    if (!found.httpPort) found.httpPort = normalizePortText(httpMatch[2]);
-  }
-
-  const socksMatch = text.match(new RegExp(String.raw`\bSOCKS5?\b[^\r\n]{0,100}?${endpointHost}\s*[:：]\s*(\d{2,5})`, 'i'));
-  if (socksMatch) {
-    if (!found.host) found.host = socksMatch[1];
-    if (!found.socks5Port) found.socks5Port = normalizePortText(socksMatch[2]);
-  }
-
-  const userMatch = text.match(/(?:用户名|用户)\s*(?:[:：=]|为|是)?\s*[`'"“”‘’]?([A-Za-z0-9._@-]{1,80})|\b(?:username|user)\b\s*(?:(?:[:：=]|is)\s*|\s+)[`'"“”‘’]?([A-Za-z0-9._@-]{1,80})/i);
-  if (!found.username && userMatch) found.username = cleanProxySecret(userMatch[1] || userMatch[2] || '');
-
-  const passMatch = text.match(/密码\s*(?:[:：=]|为|是)?\s*[`'"“”‘’]?([^\s`'"|，,。；;]{1,160})|\b(?:password|passwd|pass)\b\s*(?:(?:[:：=]|is)\s*|\s+)[`'"“”‘’]?([^\s`'"|，,。；;]{1,160})/i);
-  if (!found.password && passMatch) found.password = cleanProxySecret(passMatch[1] || passMatch[2] || '');
-
-  if (!found.host || (!found.httpPort && !found.socks5Port)) return null;
-  return {
-    host: found.host || '',
-    httpPort: found.httpPort || '',
-    socks5Port: found.socks5Port || '',
-    username: found.username || '',
-    password: found.password || '',
-  };
-}
-
-function previousProxyResult(items: readonly unknown[], index: number): ProxyAccessResult | null {
-  let inspectedTools = 0;
-  for (let i = index - 1; i >= 0 && inspectedTools < 12; i -= 1) {
-    const item = items[i];
-    if (hasKind(item, 'user')) break;
-    if (!hasKind(item, 'tool')) continue;
-    inspectedTools += 1;
-    const parsed = parseProxyAccessResult(toolResultText(item));
-    if (parsed) return parsed;
-  }
-  return null;
-}
-
-function hasExplicitProxyIntent(text: string): boolean {
-  return /(GOST|SOCKS5?|curl\s+-x|\bproxy\b|HTTP\s*代理|代理服务|用户名|密码|\busername\b|\buser\b|\bpassword\b|\bpasswd\b|\bpass\b)/i.test(text);
-}
-
-function sameProxyEndpointInText(text: string, proxy: ProxyAccessResult): boolean {
-  const host = proxy.host.trim();
-  if (!host) return false;
-  const ports = [proxy.httpPort, proxy.socks5Port].filter(Boolean);
-  return ports.some((port) => {
-    const endpointPattern = new RegExp(`(^|[^A-Za-z0-9.-])${escapeRegExp(host)}\\s*[:：]\\s*${escapeRegExp(port)}(?!\\d)`, 'i');
-    return endpointPattern.test(text);
-  });
-}
-
-function sameProxyUrlInText(text: string, proxy: ProxyAccessResult): boolean {
-  const urlMatches = text.match(/\b(?:https?|socks5):\/\/[^\s`'"<>]+/gi) || [];
-  const proxyHost = proxy.host.toLowerCase();
-  return urlMatches.some((rawUrl) => {
-    const parsed = parseProxyUrl(rawUrl.replace(/[)\]，,。.;；]+$/g, ''));
-    if (!parsed?.host || parsed.host.toLowerCase() !== proxyHost) return false;
-    return (parsed.httpPort && parsed.httpPort === proxy.httpPort)
-      || (parsed.socks5Port && parsed.socks5Port === proxy.socks5Port);
-  });
-}
-
-function mergeProxyResult(toolProxy: ProxyAccessResult | null, textProxy: ProxyAccessResult | null): ProxyAccessResult | null {
-  if (!toolProxy && !textProxy) return null;
-  const merged = {
-    host: toolProxy?.host || textProxy?.host || '',
-    httpPort: toolProxy?.httpPort || textProxy?.httpPort || '',
-    socks5Port: toolProxy?.socks5Port || textProxy?.socks5Port || '',
-    username: textProxy?.username || toolProxy?.username || '',
-    password: textProxy?.password || toolProxy?.password || '',
-  };
-  return merged.host && (merged.httpPort || merged.socks5Port) ? merged : null;
-}
-
-function isGeneratedProxySummary(text: string): boolean {
-  const normalized = text.trim();
-  return normalized.startsWith('搭建完成 - GOST 代理服务')
-    && normalized.includes('```text')
-    && normalized.includes('使用方式');
-}
-
 function previousToolResult(items: readonly unknown[], index: number): { kind: 'hosts'; result: HostListResult } | { kind: 'probes'; result: ProbeListResult } | null {
   for (let i = index - 1; i >= 0; i -= 1) {
     const item = items[i];
@@ -396,45 +228,6 @@ function previousToolResult(items: readonly unknown[], index: number): { kind: '
     return null;
   }
   return null;
-}
-
-function looksLikeProxyRestatement(text: string, proxy: ProxyAccessResult): boolean {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  if (!normalized) return false;
-  if (!hasExplicitProxyIntent(normalized)) return false;
-  return sameProxyEndpointInText(text, proxy) || sameProxyUrlInText(text, proxy);
-}
-
-function proxyAuthPrefix(proxy: ProxyAccessResult): string {
-  if (!proxy.username || !proxy.password) return '';
-  return `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`;
-}
-
-function proxyAccessSummary(proxy: ProxyAccessResult): string {
-  const details = [
-    proxy.httpPort ? `HTTP   ${proxy.host}:${proxy.httpPort}` : '',
-    proxy.socks5Port ? `SOCKS5 ${proxy.host}:${proxy.socks5Port}` : '',
-    proxy.username ? `用户   ${proxy.username}` : '',
-    proxy.password ? `密码   ${proxy.password}` : '',
-  ].filter(Boolean).join('\n');
-  const auth = proxyAuthPrefix(proxy);
-  const examples = [
-    proxy.httpPort ? `curl -x http://${auth}${proxy.host}:${proxy.httpPort} https://example.com` : '',
-    proxy.socks5Port ? `curl -x socks5://${auth}${proxy.host}:${proxy.socks5Port} https://example.com` : '',
-  ].filter(Boolean).join('\n');
-  return [
-    '搭建完成 - GOST 代理服务',
-    '',
-    '```text',
-    details,
-    '```',
-    examples ? '' : '',
-    examples ? '使用方式' : '',
-    examples ? '' : '',
-    examples ? '```bash' : '',
-    examples,
-    examples ? '```' : '',
-  ].filter((line, index, lines) => line !== '' || lines[index - 1] !== '').join('\n');
 }
 
 function looksLikeHostListRestatement(text: string, hostList: HostListResult): boolean {
@@ -488,13 +281,6 @@ function looksLikeProbeListRestatement(text: string, probeList: ProbeListResult)
 export function displayAssistantTextAfterToolResult(items: readonly unknown[], index: number, text: string): string {
   const raw = cleanString(text);
   if (!raw) return text;
-
-  const toolProxy = previousProxyResult(items, index);
-  const textProxy = isGeneratedProxySummary(raw) ? null : parseProxyAccessResult(raw);
-  const proxy = mergeProxyResult(toolProxy, textProxy);
-  if (proxy && looksLikeProxyRestatement(text, proxy)) {
-    return proxyAccessSummary(proxy);
-  }
 
   const previous = previousToolResult(items, index);
   if (!previous) return text;

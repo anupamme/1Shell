@@ -21,6 +21,7 @@ import {
 } from '@/utils/agentGoal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { renderMarkdown } from '@/utils/markdown';
+import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 import { displayAssistantTextAfterToolResult, parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlashCommand } from '@/utils/agentSlashCommands';
 import type { HostInfo, HostsListResponse } from '@/utils/scripts';
@@ -385,9 +386,9 @@ function submitTaskGoal(): void {
   slashSubView.value = null;
   composerInput.value = '';
   ide.inputText.value = goal;
+  follow = true;
   ide.sendMessage();
   taskGoalInput.value = '';
-  follow = true;
 }
 
 function closeSlashMenu(): void {
@@ -588,7 +589,7 @@ function activateRuntime(runtime: AgentRuntime): void {
   follow = true;
   syncRailFromTimeline();
   rememberRuntimeSession(runtime);
-  void nextTick(() => scrollToBottom());
+  scrollToBottom(true);
 }
 
 function findRuntimeBySessionId(id: string): AgentRuntime | null {
@@ -777,7 +778,7 @@ async function onSelectSession(id: string): Promise<boolean> {
     });
     if (resp.session.running) void runtime.ide.reattachSession();
     follow = true;
-    void nextTick(() => scrollToBottom());
+    scrollToBottom(true);
     return true;
   } catch { return false; }
 }
@@ -1104,10 +1105,10 @@ function syncRailFromTimeline(): void {
 }
 
 // ── lifecycle ──
-watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollToBottom()); });
+watch(() => ide.timeline.value.length, () => { scrollToBottom(); });
 watch(() => ide.timeline.value, () => {
   syncRailFromTimeline();
-  void nextTick(() => scrollToBottom());
+  scrollToBottom();
 }, { deep: true });
 watch(() => [route.query.taskAuthoring, route.query.taskIntent], () => {
   consumeTaskAuthoringRoute();
@@ -1152,12 +1153,15 @@ async function loadProviders(): Promise<void> {
 function onScroll(): void {
   const el = scrollEl.value;
   if (!el) return;
-  follow = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  follow = isNearScrollBottom(el);
 }
-function scrollToBottom(): void {
+function scrollToBottom(force = false): void {
   const el = scrollEl.value;
-  if (!el || !follow) return;
-  el.scrollTop = el.scrollHeight;
+  const wasPinned = force || (follow && (!el || isNearScrollBottom(el)));
+  if (force) follow = true;
+  void nextTick(() => {
+    scrollToBottomIfPinned(scrollEl.value, wasPinned);
+  });
 }
 
 // ── actions ──
@@ -1360,15 +1364,15 @@ function send(): void {
     return;
   }
   ide.inputText.value = `${t || '请分析附件。'}${attachmentSummary()}`;
+  follow = true;
   ide.sendMessage();
   composerInput.value = '';
   composerAttachments.value = [];
   attachmentError.value = '';
-  follow = true;
 }
 function sendSlash(cmd: string): void {
-  ide.prefillAndSend(cmd);
   follow = true;
+  ide.prefillAndSend(cmd);
 }
 function setGoal(): void {
   if (isGoalComposerMode.value) {
@@ -1529,8 +1533,8 @@ function moveRewindHighlight(delta: number): void {
 function runRewind(point = rewindPoints.value[rewindHighlight.value]): void {
   if (!point || isBusy.value) return;
   closeRewindModal();
-  ide.prefillAndSend(`/remind #${point.ordinal}`);
   follow = true;
+  ide.prefillAndSend(`/remind #${point.ordinal}`);
 }
 
 function onRewindModalKeydown(event: KeyboardEvent): void {

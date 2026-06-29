@@ -206,8 +206,8 @@ const panelPos = computed<{ left: number; top: number }>(() => {
   return { left, top };
 });
 
-watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollChatToBottom()); });
-watch(() => ide.timeline.value, () => { void nextTick(() => scrollChatToBottom()); }, { deep: true });
+watch(() => ide.timeline.value.length, () => { scrollChatToBottom(); });
+watch(() => ide.timeline.value, () => { scrollChatToBottom(); }, { deep: true });
 watch(() => ide.inputText.value, () => { slashHighlight.value = 0; });
 
 const slashCmds = computed<AgentSlashCommand[]>(() => {
@@ -222,7 +222,12 @@ function onChatScroll(): void {
 }
 
 function scrollChatToBottom(force = false): void {
-  scrollToBottomIfPinned(chatEl.value, force || followOutput);
+  const el = chatEl.value;
+  const wasPinned = force || (followOutput && (!el || isNearScrollBottom(el)));
+  if (force) followOutput = true;
+  void nextTick(() => {
+    scrollToBottomIfPinned(chatEl.value, wasPinned);
+  });
 }
 
 function onInputKeydown(event: KeyboardEvent): void {
@@ -346,6 +351,7 @@ async function handleSlashTextCommand(value: string): Promise<boolean> {
 
 async function sendOrHandleCommand(): Promise<void> {
   if (await handleSlashTextCommand(ide.inputText.value)) return;
+  followOutput = true;
   ide.sendMessage();
 }
 
