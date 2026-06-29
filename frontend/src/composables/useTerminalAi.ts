@@ -9,7 +9,6 @@ import {
   AI_ECHO_GRACE_MS,
   COMMON_COMMANDS,
   COMMON_COMMANDS_SET,
-  type AiApiConfig,
 } from '@/utils/terminal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { useHostsStore } from '@/stores/hosts';
@@ -59,12 +58,6 @@ export interface TerminalAiApi {
   clearGhostText(): void;
   resetInputState(): void;
   getRecentCommands(): string[];
-}
-
-declare global {
-  interface Window {
-    __aiApiConfig?: AiApiConfig;
-  }
 }
 
 let _instance: TerminalAiApi | null = null;
@@ -436,17 +429,12 @@ function createTerminalAi(): TerminalAiApi {
 
   async function requestInlineCompletion(requestId: number, inputSnapshot: string): Promise<void> {
     try {
-      const customConfig = window.__aiApiConfig || {};
       const body: Record<string, unknown> = {
         ...getHostPayload(),
         currentInput: inputSnapshot,
         cursorIndex: inputSnapshot.length,
         recentCommands: state.recentCommands,
       };
-      if (customConfig.apiBase) body.apiBase = customConfig.apiBase;
-      if (customConfig.apiKey) body.apiKey = customConfig.apiKey;
-      if (customConfig.model) body.model = customConfig.model;
-
       const response = await requestJson<InlineCompletionResponse>('/api/ai/terminal/complete-inline', {
         method: 'POST',
         body: JSON.stringify(body),

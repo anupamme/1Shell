@@ -74,34 +74,28 @@ function ensureEnum(value, allowedValues, message) {
   return value;
 }
 
-function validateAiConfigFields(payload) {
-  if (hasOwn(payload, 'apiBase')) ensureOptionalString(payload.apiBase, 'apiBase 必须是字符串');
-  if (hasOwn(payload, 'apiKey')) ensureOptionalString(payload.apiKey, 'apiKey 必须是字符串');
-  if (hasOwn(payload, 'model')) ensureOptionalString(payload.model, 'model 必须是字符串');
-}
-
 function validateCompletionRequestBody(payload) {
   const body = ensureObject(payload, '补全请求体必须是对象');
+  const next = {};
 
   if (hasOwn(body, 'prefix')) {
-    ensureOptionalString(body.prefix, 'prefix 必须是字符串');
+    next.prefix = ensureOptionalString(body.prefix, 'prefix 必须是字符串');
   }
 
   if (hasOwn(body, 'mode')) {
-    ensureEnum(body.mode, ['chat', 'command'], 'mode 不合法');
+    next.mode = ensureEnum(body.mode, ['chat', 'command'], 'mode 不合法');
   }
 
-  validateAiConfigFields(body);
-  return body;
+  return next;
 }
 
 function validateTerminalInlineCompletionBody(payload) {
   const body = ensureObject(payload, '终端补全请求体必须是对象');
-  ensureNonEmptyString(body.hostId, 'hostId 不能为空');
-  ensureOptionalString(body.shellType, 'shellType 必须是字符串');
-  ensureOptionalString(body.platform, 'platform 必须是字符串');
-  ensureOptionalString(body.arch, 'arch 必须是字符串');
-  ensureOptionalString(body.cwd, 'cwd 必须是字符串');
+  const hostId = ensureNonEmptyString(body.hostId, 'hostId 不能为空');
+  const shellType = ensureOptionalString(body.shellType, 'shellType 必须是字符串');
+  const platform = ensureOptionalString(body.platform, 'platform 必须是字符串');
+  const arch = ensureOptionalString(body.arch, 'arch 必须是字符串');
+  const cwd = ensureOptionalString(body.cwd, 'cwd 必须是字符串');
   const currentInput = ensureOptionalString(body.currentInput, 'currentInput 必须是字符串');
 
   const cursorIndex = Number(body.cursorIndex);
@@ -109,15 +103,25 @@ function validateTerminalInlineCompletionBody(payload) {
     throw createValidationError('cursorIndex 不合法');
   }
 
+  let recentCommands = undefined;
   if (hasOwn(body, 'recentCommands')) {
     const commands = ensureArray(body.recentCommands, 'recentCommands 必须是数组');
     commands.forEach((item, index) => {
       ensureOptionalString(item, `recentCommands[${index}] 必须是字符串`);
     });
+    recentCommands = commands;
   }
 
-  validateAiConfigFields(body);
-  return body;
+  return {
+    hostId,
+    shellType,
+    platform,
+    arch,
+    cwd,
+    currentInput,
+    cursorIndex,
+    ...(recentCommands ? { recentCommands } : {}),
+  };
 }
 
 function validateManualLocation(value) {
@@ -260,19 +264,26 @@ function validateAnalyzeSelectionBody(payload) {
   if (selectedText.length > 8000) {
     throw createValidationError('selectedText 超过最大长度 8000 字符');
   }
-  ensureNonEmptyString(body.hostId, 'hostId 不能为空');
-  ensureOptionalString(body.shellType, 'shellType 必须是字符串');
-  ensureOptionalString(body.platform, 'platform 必须是字符串');
+  const hostId = ensureNonEmptyString(body.hostId, 'hostId 不能为空');
+  const shellType = ensureOptionalString(body.shellType, 'shellType 必须是字符串');
+  const platform = ensureOptionalString(body.platform, 'platform 必须是字符串');
 
+  let recentCommands = undefined;
   if (hasOwn(body, 'recentCommands')) {
     const commands = ensureArray(body.recentCommands, 'recentCommands 必须是数组');
     commands.forEach((item, index) => {
       ensureOptionalString(item, `recentCommands[${index}] 必须是字符串`);
     });
+    recentCommands = commands;
   }
 
-  validateAiConfigFields(body);
-  return body;
+  return {
+    selectedText,
+    hostId,
+    shellType,
+    platform,
+    ...(recentCommands ? { recentCommands } : {}),
+  };
 }
 
 function validateAgentStartPayload(payload) {

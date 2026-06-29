@@ -549,7 +549,7 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
     onRunComplete: () => {
       touchedAt.value = new Date().toISOString();
       rememberRuntimeSession(runtime);
-      void loadSessions();
+      void refreshRuntimeProjection(runtime);
     },
   });
 
@@ -688,6 +688,53 @@ async function loadSessions(): Promise<void> {
     }
   } catch { /* ignore */ } finally {
     sessionsLoading.value = false;
+  }
+}
+
+function waitForSessionProjection(attempt: number): Promise<void> {
+  const delays = [140, 320, 700];
+  return new Promise((resolve) => window.setTimeout(resolve, delays[Math.min(attempt, delays.length - 1)]));
+}
+
+async function refreshRuntimeProjection(runtime: AgentRuntime, attempt = 0): Promise<void> {
+  const sessionId = runtime.ide.currentSessionId.value;
+  const currentLength = runtime.ide.timeline.value.length;
+  if (!sessionId || runtime.ide.isRunning.value) return;
+
+  try {
+    await waitForSessionProjection(attempt);
+    if (runtime.ide.currentSessionId.value !== sessionId || runtime.ide.isRunning.value) return;
+
+    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; workspaceHostIds?: string[]; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${encodeURIComponent(sessionId)}`);
+    const projected = resp.session?.timeline || [];
+    if (!resp.ok || !resp.session) {
+      if (attempt < 2) await refreshRuntimeProjection(runtime, attempt + 1);
+      return;
+    }
+    if (projected.length < currentLength) {
+      if (attempt < 2) await refreshRuntimeProjection(runtime, attempt + 1);
+      return;
+    }
+    if (runtime.ide.currentSessionId.value !== sessionId || runtime.ide.isRunning.value) return;
+
+    const workspaceIds = normalizeWorkspaceHostIds(resp.session.workspaceHostIds || (resp.session.hostId ? [resp.session.hostId] : []));
+    runtime.hostId.value = workspacePrimaryHostId(workspaceIds);
+    runtime.workspaceHostIds.value = workspaceIds;
+    runtime.taskMode.value = resp.session.entry === 'task';
+    runtime.ide.loadSession({
+      id: resp.session.id,
+      timeline: projected,
+      running: Boolean(resp.session.running),
+      runId: resp.session.runId || '',
+    });
+    if (resp.session.running) void runtime.ide.reattachSession();
+  } catch {
+    if (attempt < 2) {
+      await refreshRuntimeProjection(runtime, attempt + 1);
+      return;
+    }
+  } finally {
+    if (attempt === 0) void loadSessions();
   }
 }
 

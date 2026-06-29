@@ -8,7 +8,6 @@ import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useHostsStore } from '@/stores/hosts';
 import { useNotifyStore } from '@/stores/notify';
 import { LOCAL_HOST_ID, isLocalHost } from '@/utils/mainConsole';
-import type { AiApiConfig } from '@/utils/terminal';
 
 interface CommandCompletionResponse {
   completion?: string;
@@ -92,14 +91,10 @@ function createCommandSuggestion(): CommandSuggestionApi {
     setGenerating(true);
 
     try {
-      const customConfig: AiApiConfig = window.__aiApiConfig || {};
       const body: Record<string, unknown> = {
         prefix: `${getHostPromptPrefix()}${text}`,
         mode: 'command',
       };
-      if (customConfig.apiBase) body.apiBase = customConfig.apiBase;
-      if (customConfig.apiKey) body.apiKey = customConfig.apiKey;
-      if (customConfig.model) body.model = customConfig.model;
 
       const response = await requestJson<CommandCompletionResponse>('/api/complete', {
         method: 'POST',

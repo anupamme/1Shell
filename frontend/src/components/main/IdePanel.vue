@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import AppIcon from '@/components/AppIcon.vue';
 import IdeAgentTimeline from '@/components/ide/IdeAgentTimeline.vue';
@@ -7,9 +7,10 @@ import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import IdeApprovalModeMenu from '@/components/ide/IdeApprovalModeMenu.vue';
 import IdeModelSlashMenu from '@/components/ide/IdeModelSlashMenu.vue';
 import IdeSlashCommandMenu from '@/components/ide/IdeSlashCommandMenu.vue';
+import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
 import { useAgentModelProviders } from '@/composables/useAgentModelProviders';
-import { useIdeChat, type IdeApprovalMode } from '@/composables/useIdeChat';
+import { useIdeChat, type IdeApprovalMode, type IdeTimelineItem } from '@/composables/useIdeChat';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useHostsStore } from '@/stores/hosts';
 import {
@@ -37,6 +38,7 @@ const props = defineProps<{ active?: boolean }>();
 
 const hosts = useHostsStore();
 const sessionTerminal = useSessionTerminal();
+const { requestJson } = useApiClient();
 const { confirm } = useConfirm();
 const approvalMode = ref<IdeApprovalMode>('manual');
 const agentGoal = ref(emptyAgentGoalState());
@@ -53,10 +55,71 @@ const chatAreaEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
 let followOutput = true;
 
-const activeHostName = computed(() => {
-  const host = hosts.hostMap.get(sessionTerminal.activeHostId.value || LOCAL_HOST_ID);
-  return host?.name || '本机';
+interface SessionMeta {
+  id: string;
+  title: string;
+  entry: string;
+  hostId: string;
+  workspaceHostIds?: string[];
+  modelLabel: string;
+  messageCount: number;
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+  running?: boolean;
+  awaitingApproval?: boolean;
+}
+
+interface SessionDetail extends SessionMeta {
+  timeline: IdeTimelineItem[];
+  runId?: string;
+}
+
+const sessions = ref<SessionMeta[]>([]);
+const sessionsLoading = ref(false);
+const scopeMenuOpen = ref(false);
+const historyMenuOpen = ref(false);
+const selectedScopeId = ref('all');
+
+const activeScopeLabel = computed(() => {
+  if (selectedScopeId.value === 'all') return '全局';
+  const host = hosts.hostMap.get(selectedScopeId.value);
+  return host?.name || selectedScopeId.value || '全局';
 });
+
+const scopeOptions = computed(() => [
+  { id: 'all', label: '全局', detail: '不限定单台 VPS' },
+  ...hosts.items.map((host) => ({
+    id: host.id,
+    label: host.name || host.id,
+    detail: host.id === LOCAL_HOST_ID || host.type === 'local'
+      ? '本机'
+      : `${host.username || 'root'}@${host.host}:${host.port || 22}`,
+  })),
+]);
+
+const historySessions = computed(() => {
+  return [...sessions.value].sort((a, b) => parseSessionTime(b.updatedAt) - parseSessionTime(a.updatedAt));
+});
+
+function selectedWorkspaceHostIds(): string[] {
+  const id = String(selectedScopeId.value || '').trim();
+  return id && id !== 'all' ? [id] : [];
+}
+
+function hostPayloadForScope(): Array<Record<string, unknown>> {
+  const ids = selectedWorkspaceHostIds();
+  const selectedHosts = ids.length
+    ? ids.map((id) => hosts.hostMap.get(id)).filter(Boolean)
+    : hosts.items;
+  return selectedHosts.map((host) => ({
+    id: host?.id || LOCAL_HOST_ID,
+    name: host?.name || '本机',
+    username: host?.username,
+    host: host?.host,
+    port: host?.port,
+  }));
+}
 
 function toolPolicyForHost(hostId: string): Record<string, unknown> | undefined {
   const id = String(hostId || '').trim();
@@ -84,8 +147,8 @@ const ide = useIdeChat({
   sessionPrefix: 'console-ide',
   approvalMode: () => approvalMode.value,
   context: () => {
-    const hostId = sessionTerminal.activeHostId.value || LOCAL_HOST_ID;
-    const host = hosts.hostMap.get(hostId);
+    const workspaceHostIds = selectedWorkspaceHostIds();
+    const hostScope = workspaceHostIds.length ? workspaceHostIds.join(',') : 'all';
     return {
       module: '主控',
       moduleHint: '当前在主控页面。可结合主机和终端上下文处理运维目标。',
@@ -95,15 +158,10 @@ const ide = useIdeChat({
       taskAuthoring: taskAuthoringContext.value,
       activeSessionId: sessionTerminal.activeSessionId.value,
       terminalStatus: sessionTerminal.statusText.value,
-      hostScope: hostId,
-      toolPolicy: toolPolicyForHost(hostId),
-      hosts: host ? [{
-        id: host.id || 'local',
-        name: host.name,
-        username: (host as { username?: string }).username,
-        host: (host as { host?: string }).host,
-        port: (host as { port?: number }).port,
-      }] : [{ id: 'local', name: '本机' }],
+      hostScope,
+      workspaceHostIds,
+      toolPolicy: toolPolicyForHost(hostScope),
+      hosts: hostPayloadForScope(),
     };
   },
   messagePayload: () => ({
@@ -115,13 +173,23 @@ const ide = useIdeChat({
     modelPreference: currentModel.value !== '默认模型' ? currentModel.value : undefined,
     claudeCodeEnabled: false,
   }),
+  onRunComplete: () => {
+    void loadSessions();
+  },
 });
 
 watch(() => ide.timeline.value.length, () => { void nextTick(() => scrollToBottom()); });
 watch(() => ide.timeline.value, () => { void nextTick(() => scrollToBottom()); }, { deep: true });
 watch(() => ide.inputText.value, () => { slashHighlight.value = 0; });
 watch(() => props.active, (active) => {
-  if (active) void nextTick(() => scrollToBottom(true));
+  if (active) {
+    void loadSessions();
+    void nextTick(() => scrollToBottom(true));
+  }
+});
+
+onMounted(() => {
+  void loadSessions();
 });
 
 onBeforeUnmount(() => {
@@ -135,6 +203,87 @@ function onChatScroll(): void {
 
 function scrollToBottom(force = false): void {
   scrollToBottomIfPinned(chatAreaEl.value, force || followOutput);
+}
+
+function parseSessionTime(value: string): number {
+  if (!value) return 0;
+  const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  const time = Date.parse(iso);
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function createConsoleSessionId(): string {
+  return `console-ide-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function scopeFromSession(session: SessionDetail): string {
+  const ids = Array.isArray(session.workspaceHostIds)
+    ? session.workspaceHostIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (ids.length === 1) return ids[0];
+  const hostId = String(session.hostId || '').trim();
+  return hostId && hostId !== 'all' ? hostId : 'all';
+}
+
+function chooseScope(id: string): void {
+  if (ide.isRunning.value) return;
+  selectedScopeId.value = id || 'all';
+  scopeMenuOpen.value = false;
+}
+
+function toggleScopeMenu(): void {
+  if (ide.isRunning.value) return;
+  scopeMenuOpen.value = !scopeMenuOpen.value;
+  historyMenuOpen.value = false;
+}
+
+function toggleHistoryMenu(): void {
+  historyMenuOpen.value = !historyMenuOpen.value;
+  scopeMenuOpen.value = false;
+  if (historyMenuOpen.value) void loadSessions();
+}
+
+function startNewSession(): void {
+  if (ide.isRunning.value) return;
+  taskAuthoringContext.value = null;
+  nextEntry.value = 'console';
+  historyMenuOpen.value = false;
+  scopeMenuOpen.value = false;
+  ide.loadSession({ id: createConsoleSessionId(), timeline: [] });
+  void nextTick(() => inputEl.value?.focus());
+}
+
+async function loadSessions(): Promise<void> {
+  sessionsLoading.value = true;
+  try {
+    const resp = await requestJson<{ ok: boolean; sessions: SessionMeta[] }>('/api/agent/sessions');
+    if (resp.ok) sessions.value = resp.sessions || [];
+  } catch {
+    // History is helpful, but the live chat should keep working without it.
+  } finally {
+    sessionsLoading.value = false;
+  }
+}
+
+async function selectHistorySession(id: string): Promise<void> {
+  if (!id || ide.isRunning.value) return;
+  try {
+    const resp = await requestJson<{ ok: boolean; session: SessionDetail }>(`/api/agent/sessions/${encodeURIComponent(id)}`);
+    if (!resp.ok || !resp.session) throw new Error('会话不存在');
+    selectedScopeId.value = scopeFromSession(resp.session);
+    ide.loadSession({
+      id: resp.session.id,
+      timeline: resp.session.timeline || [],
+      running: Boolean(resp.session.running),
+      runId: resp.session.runId || '',
+    });
+    if (resp.session.running) void ide.reattachSession();
+    historyMenuOpen.value = false;
+    followOutput = true;
+    void nextTick(() => scrollToBottom(true));
+  } catch (err) {
+    ide.pushSystemEvent('历史加载失败', (err as Error).message || '无法加载这条 1Shell AI 会话', 'warning');
+  }
 }
 
 function onInputKeydown(event: KeyboardEvent): void {
@@ -396,11 +545,69 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
         </span>
         <div class="console-ide-title-text">
           <strong>1Shell AI</strong>
-          <span>{{ activeHostName }}</span>
+          <span>范围：{{ activeScopeLabel }}</span>
         </div>
       </div>
 
       <div class="console-ide-actions">
+        <div class="console-ide-menu-wrap">
+          <button
+            type="button"
+            class="console-ide-ghost-btn"
+            :disabled="ide.isRunning.value"
+            @click="toggleScopeMenu"
+          >
+            范围：{{ activeScopeLabel }}
+          </button>
+          <div v-if="scopeMenuOpen" class="console-ide-menu console-ide-scope-menu">
+            <button
+              v-for="scope in scopeOptions"
+              :key="scope.id"
+              type="button"
+              class="console-ide-menu-item"
+              :class="{ 'console-ide-menu-item--active': selectedScopeId === scope.id }"
+              @click="chooseScope(scope.id)"
+            >
+              <strong>{{ scope.label }}</strong>
+              <span>{{ scope.detail }}</span>
+            </button>
+          </div>
+        </div>
+        <div class="console-ide-menu-wrap">
+          <button
+            type="button"
+            class="console-ide-ghost-btn"
+            @click="toggleHistoryMenu"
+          >
+            历史
+          </button>
+          <div v-if="historyMenuOpen" class="console-ide-menu console-ide-history-menu">
+            <div v-if="sessionsLoading" class="console-ide-menu-empty">加载中...</div>
+            <div v-else-if="!historySessions.length" class="console-ide-menu-empty">暂无历史对话</div>
+            <template v-else>
+              <button
+                v-for="session in historySessions"
+                :key="session.id"
+                type="button"
+                class="console-ide-menu-item"
+                :class="{ 'console-ide-menu-item--active': ide.currentSessionId.value === session.id }"
+                :disabled="ide.isRunning.value"
+                @click="selectHistorySession(session.id)"
+              >
+                <strong>{{ session.title || '新对话' }}</strong>
+                <span>{{ session.preview || session.modelLabel || session.updatedAt }}</span>
+              </button>
+            </template>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="console-ide-ghost-btn"
+          :disabled="ide.isRunning.value"
+          @click="startNewSession"
+        >
+          新对话
+        </button>
         <button
           type="button"
           class="console-ide-ghost-btn"
@@ -546,6 +753,12 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   gap: 8px;
 }
 
+.console-ide-actions {
+  position: relative;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
 .console-ide-title-icon {
   width: 32px;
   height: 32px;
@@ -612,6 +825,7 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   padding: 0 9px;
   font-size: 12px;
   font-weight: 650;
+  white-space: nowrap;
 }
 
 .console-ide-ghost-btn:hover:not(:disabled) {
@@ -635,6 +849,103 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
   color: #7dd3fc;
   border-color: rgba(56, 189, 248, 0.34);
   background: rgba(30, 41, 59, 0.84);
+}
+
+.console-ide-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.console-ide-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  width: min(340px, 82vw);
+  max-height: 340px;
+  overflow: auto;
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.14);
+}
+
+.console-ide-scope-menu {
+  width: min(260px, 78vw);
+}
+
+.console-ide-menu-item {
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-radius: 6px;
+  display: grid;
+  gap: 2px;
+  padding: 7px 9px;
+  color: #334155;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.console-ide-menu-item:hover:not(:disabled),
+.console-ide-menu-item--active {
+  background: rgba(224, 242, 254, 0.78);
+  color: #075985;
+}
+
+.console-ide-menu-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.console-ide-menu-item strong,
+.console-ide-menu-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-ide-menu-item strong {
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.console-ide-menu-item span,
+.console-ide-menu-empty {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.console-ide-menu-empty {
+  padding: 14px 10px;
+  text-align: center;
+}
+
+:global(.dark) .console-ide-menu {
+  border-color: rgba(71, 85, 105, 0.8);
+  background: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.36);
+}
+
+:global(.dark) .console-ide-menu-item {
+  color: #cbd5e1;
+}
+
+:global(.dark) .console-ide-menu-item:hover:not(:disabled),
+:global(.dark) .console-ide-menu-item--active {
+  color: #e0f2fe;
+  background: rgba(14, 165, 233, 0.16);
+}
+
+:global(.dark) .console-ide-menu-item span,
+:global(.dark) .console-ide-menu-empty {
+  color: #94a3b8;
 }
 
 .console-ide-scroll {

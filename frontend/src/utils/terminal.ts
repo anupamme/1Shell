@@ -156,12 +156,6 @@ export interface GhostState {
   hint: string;
 }
 
-export interface AiApiConfig {
-  apiBase?: string;
-  apiKey?: string;
-  model?: string;
-}
-
 /* ───── 终端区按钮 emit 类型(辅助) ───────────────── */
 
 export interface TerminalAreaEmits {

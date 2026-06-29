@@ -50,15 +50,6 @@ function createAiRouter(aiService) {
     }
   });
 
-  router.post('/ai/models', aiLimiter, async (req, res, next) => {
-    try {
-      const models = await aiService.fetchModelList(req.body || {});
-      res.json({ ok: true, models });
-    } catch (error) {
-      next(error);
-    }
-  });
-
   router.post('/ai/terminal/analyze-selection', aiLimiter, async (req, res, next) => {
     try {
       const result = await aiService.analyzeSelection(validateAnalyzeSelectionBody(req.body));

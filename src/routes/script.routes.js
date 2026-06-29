@@ -29,7 +29,7 @@ function createScriptRouter({ scriptService, aiService }) {
       if (!prompt) {
         return res.status(400).json({ error: '请描述你想要的脚本' });
       }
-      const result = await aiService.generateScript({ prompt, ...req.body });
+      const result = await aiService.generateScript({ prompt });
       if (result.error) {
         return res.status(422).json({ ok: false, error: result.error });
       }

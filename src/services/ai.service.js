@@ -53,16 +53,16 @@ const AI_PROVIDER_TIMEOUT_MS = 45000;
 const SKILL_ADAPTATION_PROVIDER_TIMEOUT_MS = 120000;
 
 function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigStore = null, skillRegistry = null } = {}) {
-  function resolveConfig(body = {}) {
-    let rawBase = (body.apiBase || ENV_API_BASE) + '';
+  function resolveConfig() {
+    let rawBase = `${ENV_API_BASE || ''}`;
     // 自动补 /v1 后缀（兼容 One-API / New-API 等中转站）
     if (rawBase && !/\/v1$/.test(rawBase)) {
       rawBase = rawBase.replace(/\/$/, '') + '/v1';
     }
     return {
       base: rawBase.replace(/\/$/, ''),
-      key: body.apiKey || ENV_API_KEY,
-      model: body.model || ENV_MODEL,
+      key: ENV_API_KEY,
+      model: ENV_MODEL,
     };
   }
 
@@ -410,23 +410,6 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  async function fetchModelList(body = {}) {
-    const { base, key } = resolveConfig(body);
-    try {
-      const res = await fetchImpl(`${base}/models`, {
-        headers: { Authorization: `Bearer ${key}` },
-        timeout: 8000,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.data && Array.isArray(data.data)) {
-          return data.data.map((m) => m.id).filter(Boolean);
-        }
-      }
-    } catch { /* fall through to empty list */ }
-    return [];
-  }
-
   async function requestSkillAdaptation(body = {}) {
     const source = String(body.source || '').trim();
     if (!source) throw new Error('source 不能为空');
@@ -521,7 +504,6 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
   }
 
   return {
-    fetchModelList,
     generateScript,
     requestSkillAdaptation,
     requestCompletion,

@@ -18,7 +18,7 @@
  *   category        — 'domestic' | 'overseas' | 'relay' — 分组用
  *
  * 数据原则:
- *   - 只做"自动填",不做"模型清单的真理来源"(运行时由 /v1/models 拉取,见 ai.service.js fetchModelList)
+ *   - 只做"自动填",不做"模型清单的真理来源"
  *   - apiBase 不带 /v1 后缀(由调用方按协议补)— 但 OpenAI 兼容服务历史习惯参差,以官方文档为准
  *   - reasoningModels 只列已知前缀,模型迭代快不强求齐全
  */

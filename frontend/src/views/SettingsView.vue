@@ -6,7 +6,6 @@ import QRCode from 'qrcode';
 import AppIcon from '@/components/AppIcon.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useNotifyStore } from '@/stores/notify';
-import { useAiChat } from '@/composables/useAiChat';
 import IpFilterTab from '@/components/main/IpFilterTab.vue';
 
 type SecurityMode = 'strict' | 'standard' | 'trusted';
@@ -38,7 +37,6 @@ const route = useRoute();
 const router = useRouter();
 const { requestJson } = useApiClient();
 const notify = useNotifyStore();
-const chat = useAiChat();
 
 const SECURITY_MODES: SecurityMode[] = ['strict', 'standard', 'trusted'];
 const SECURITY_MODE_LABELS: Record<SecurityMode, string> = {
@@ -47,7 +45,7 @@ const SECURITY_MODE_LABELS: Record<SecurityMode, string> = {
   trusted: '信任直通 trusted',
 };
 
-type Tab = 'account' | 'security' | 'ipfilter' | 'aiconfig' | 'desktop' | 'about';
+type Tab = 'account' | 'security' | 'ipfilter' | 'desktop' | 'about';
 
 const APP_VERSION = '4.2.4';
 const GITHUB_URL = 'https://github.com/weidu12123/1Shell';
@@ -56,7 +54,6 @@ const TAB_ITEMS: Array<{ key: Tab; label: string; icon: string; desc: string }> 
   { key: 'account',  label: '账号设置',    icon: 'lock',    desc: '用户名与访问口令' },
   { key: 'security', label: '安全',        icon: 'shield',  desc: '两步验证 · 安全档位 · 权限隔离' },
   { key: 'ipfilter', label: 'IP 访问控制', icon: 'globe',   desc: '黑白名单与访问限制' },
-  { key: 'aiconfig', label: 'AI 配置',     icon: 'spark',   desc: '1Shell AI 的模型与 API' },
   { key: 'desktop',  label: '桌面版',      icon: 'console', desc: '自启 · 托盘 · 本地服务' },
   { key: 'about',    label: '关于 / 详情', icon: 'github',  desc: '版本 · 检查更新 · 项目主页' },
 ];
@@ -76,13 +73,6 @@ const username = ref('');
 const password = ref('');
 const passwordConfirm = ref('');
 const errorMsg = ref('');
-
-const apiBase = ref('');
-const apiKey = ref('');
-const model = ref('');
-const aiError = ref('');
-const fetching = ref(false);
-const modelsHints = ref<string[]>([]);
 
 const securityLoading = ref(false);
 const securitySaving = ref(false);
@@ -289,13 +279,7 @@ async function onInstallUpdate(): Promise<void> {
 }
 
 function loadTabData(t: Tab): void {
-  if (t === 'aiconfig') {
-    apiBase.value = chat.config.value.apiBase;
-    apiKey.value = chat.config.value.apiKey;
-    model.value = chat.config.value.model;
-    aiError.value = '';
-    modelsHints.value = [];
-  } else if (t === 'security') {
+  if (t === 'security') {
     void loadSecuritySettings();
     void loadTwofaStatus();
   } else if (t === 'desktop') {
@@ -343,49 +327,8 @@ async function onSubmit(e: Event): Promise<void> {
   }
 }
 
-async function onFetchModels(): Promise<void> {
-  aiError.value = '';
-  if (!apiBase.value.trim() || !apiKey.value.trim()) {
-    aiError.value = '请先填写 API 地址和 Key';
-    return;
-  }
-  fetching.value = true;
-  try {
-    const list = await chat.fetchModels(apiBase.value, apiKey.value);
-    if (!list.length) {
-      aiError.value = '未能获取到模型列表，请手动输入';
-      return;
-    }
-    modelsHints.value = list;
-  } catch (err) {
-    aiError.value = '获取模型失败: ' + (err as Error).message;
-  } finally {
-    fetching.value = false;
-  }
-}
-
 function openMcpHub(): void {
   void router.push('/config/mcp');
-}
-
-function onAiSubmit(e: Event): void {
-  e.preventDefault();
-  aiError.value = '';
-  const cleanBase = apiBase.value.trim().replace(/\/$/, '');
-  if (!cleanBase) {
-    aiError.value = 'API 基础地址不能为空';
-    return;
-  }
-  try { new URL(cleanBase); } catch {
-    aiError.value = 'API 基础地址格式不正确';
-    return;
-  }
-  chat.saveConfig({
-    apiBase: cleanBase,
-    apiKey: apiKey.value.trim(),
-    model: model.value.trim(),
-  });
-  notify.success('AI 配置已保存');
 }
 
 function isSecurityMode(value: string): value is SecurityMode {
@@ -608,7 +551,7 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
         </span>
         <div>
           <div class="text-base font-bold text-slate-700 dark:text-slate-200">系统设置</div>
-          <div class="text-[11px] text-slate-400">账号 · 安全 · 访问控制 · AI · 桌面版</div>
+          <div class="text-[11px] text-slate-400">账号 · 安全 · 访问控制 · 桌面版</div>
         </div>
       </div>
       <button
@@ -691,61 +634,6 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
               <IpFilterTab />
             </div>
           </template>
-
-          <!-- AI 配置 -->
-          <form v-else-if="tab === 'aiconfig'" class="flex flex-col gap-4" autocomplete="off" @submit="onAiSubmit">
-            <div class="settings-section-title">AI 配置</div>
-            <div class="flex flex-col gap-1.5">
-              <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">API 基础地址</label>
-              <input
-                v-model="apiBase"
-                type="text"
-                placeholder="https://api.openai.com/v1"
-                required
-                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
-              />
-              <div class="text-[11px] text-slate-400">不含 /chat/completions 的完整地址</div>
-            </div>
-            <div class="flex flex-col gap-1.5">
-              <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">API Key</label>
-              <input
-                v-model="apiKey"
-                type="password"
-                placeholder="sk-..."
-                autocomplete="off"
-                class="w-full h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
-              />
-            </div>
-            <div class="flex flex-col gap-1.5">
-              <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">模型名称</label>
-              <div class="flex gap-2">
-                <input
-                  v-model="model"
-                  type="text"
-                  placeholder="gpt-4o"
-                  list="settings-ai-model-list"
-                  class="flex-1 h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 text-slate-700 dark:bg-[#0b1324] dark:text-slate-200 text-sm outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
-                />
-                <button
-                  type="button"
-                  class="h-9 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#1a2332] text-xs font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 transition-all whitespace-nowrap disabled:opacity-50 cursor-pointer"
-                  :disabled="fetching"
-                  @click="onFetchModels"
-                >{{ fetching ? '获取中…' : '获取模型' }}</button>
-              </div>
-              <datalist id="settings-ai-model-list">
-                <option v-for="m in modelsHints" :key="m" :value="m" />
-              </datalist>
-              <div class="text-[11px] text-slate-400">点击"获取模型"自动填充，也可手动输入</div>
-            </div>
-            <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-[#1e293b]">
-              <div class="text-red-500 text-xs">{{ aiError }}</div>
-              <button
-                type="submit"
-                class="h-9 px-5 rounded-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-semibold shadow-md hover:shadow-lg transition-all cursor-pointer"
-              >保存配置</button>
-            </div>
-          </form>
 
           <!-- 安全设置 -->
           <form v-else-if="tab === 'security'" class="flex flex-col gap-4" autocomplete="off" @submit="onSecuritySubmit">

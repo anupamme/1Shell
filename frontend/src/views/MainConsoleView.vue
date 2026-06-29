@@ -20,7 +20,6 @@ import TerminalArea from '@/components/main/TerminalArea.vue';
 import HostModal from '@/components/main/HostModal.vue';
 import AnalyzeContextMenu from '@/components/main/AnalyzeContextMenu.vue';
 import FileBrowserPanel from '@/components/main/FileBrowserPanel.vue';
-import AiChatPanel from '@/components/main/AiChatPanel.vue';
 import IdePanel from '@/components/main/IdePanel.vue';
 import AgentPanel from '@/components/main/AgentPanel.vue';
 
@@ -36,20 +35,45 @@ const activeHostId = sessionTerminal.activeHostId;
 const probe = useTopbarProbe(activeHostId);
 const route = useRoute();
 const CONSOLE_PREFS_KEY = '1shell.console.page.prefs.v1';
-const consolePrefs = readStorageState(CONSOLE_PREFS_KEY, {
-  sidebarCollapsed: false,
-  aiPanelCollapsed: false,
-  terminalFullscreen: false,
-  rightTab: 'chat' as 'chat' | 'ide' | 'agent',
-});
+const CONSOLE_PREFS_VERSION = 2;
+type RightTab = 'ide' | 'agent';
 
-const sidebarCollapsed = ref(consolePrefs.sidebarCollapsed);
-const aiPanelCollapsed = ref(consolePrefs.aiPanelCollapsed);
-const terminalFullscreen = ref(consolePrefs.terminalFullscreen);
+interface ConsolePrefs {
+  version?: number;
+  sidebarCollapsed: boolean;
+  aiPanelCollapsed: boolean;
+  terminalFullscreen: boolean;
+  rightTab: RightTab;
+}
+
+function normalizeRightTab(value: unknown): RightTab {
+  return value === 'agent' ? 'agent' : 'ide';
+}
+
+const storedConsolePrefs = readStorageState<ConsolePrefs>(CONSOLE_PREFS_KEY, {
+  version: CONSOLE_PREFS_VERSION,
+  sidebarCollapsed: false,
+  aiPanelCollapsed: true,
+  terminalFullscreen: false,
+  rightTab: 'ide' as RightTab,
+});
+const consolePrefs: ConsolePrefs = {
+  ...storedConsolePrefs,
+  version: CONSOLE_PREFS_VERSION,
+  rightTab: normalizeRightTab(storedConsolePrefs.rightTab),
+  aiPanelCollapsed: storedConsolePrefs.version === CONSOLE_PREFS_VERSION
+    ? Boolean(storedConsolePrefs.aiPanelCollapsed)
+    : true,
+};
+
+const sidebarCollapsed = ref(Boolean(consolePrefs.sidebarCollapsed));
+const aiPanelCollapsed = ref(Boolean(consolePrefs.aiPanelCollapsed));
+const terminalFullscreen = ref(Boolean(consolePrefs.terminalFullscreen));
 const leftRailTab = ref<'hosts' | 'files'>('hosts');
 
 function saveConsolePrefs(): void {
   writeStorageState(CONSOLE_PREFS_KEY, {
+    version: CONSOLE_PREFS_VERSION,
     sidebarCollapsed: sidebarCollapsed.value,
     aiPanelCollapsed: aiPanelCollapsed.value,
     terminalFullscreen: terminalFullscreen.value,
@@ -215,13 +239,13 @@ async function onHostSubmit(
 }
 
 // 刀 5a/5b 拍板：右栏 tab 切换（feedback-right-aside-tabs）
-const rightTab = ref<'chat' | 'ide' | 'agent'>(consolePrefs.rightTab);
+const rightTab = ref<RightTab>(normalizeRightTab(consolePrefs.rightTab));
 function onTerminalFullscreen(value: boolean): void {
   terminalFullscreen.value = value;
   saveConsolePrefs();
 }
 
-// 右栏 tab 切换时也要 refit（IDE↔Chat↔Agent 宽度从 40%↔20%↔40% 切换）
+// 右栏 tab 切换时也要 refit（IDE↔Agent）
 watch(rightTab, () => {
   saveConsolePrefs();
   setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
@@ -306,21 +330,13 @@ watch(() => hosts.filterKeyword, () => {
         />
       </main>
 
-      <!-- 右栏：AI Chat / 1Shell AI / AI Agent tab 切换（刀 4 + 刀 5a + 刀 5b） -->
-      <!-- 宽度跟随 tab：IDE/Agent 激活时 w-[40%]（整体 2:4:4 同老版 setIdePanelOpen/setAgentPanelOpen）；AI Chat 时 w-[20%] -->
+      <!-- 右栏：1Shell AI / AI Agent tab 切换 -->
       <aside
         v-if="!aiPanelCollapsed && !terminalFullscreen"
-        class="console-paper-panel console-side-panel console-right-panel shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
-        :class="rightTab === 'ide' || rightTab === 'agent' ? 'w-[40%]' : 'w-[20%]'"
+        class="console-paper-panel console-side-panel console-right-panel w-[40%] shrink-0 flex flex-col min-h-0 rounded-2xl overflow-hidden transition-all duration-300 ease-in-out"
       >
         <!-- tab 头：feedback-right-aside-tabs 拍板 -->
         <div class="ai-side-tabs">
-          <button
-            type="button"
-            class="ai-side-tab"
-            :class="{ 'ai-side-tab--active': rightTab === 'chat' }"
-            @click="rightTab = 'chat'"
-          >AI Chat</button>
           <button
             type="button"
             class="ai-side-tab"
@@ -335,7 +351,6 @@ watch(() => hosts.filterKeyword, () => {
           >AI Agent</button>
         </div>
         <div class="ai-side-tab-content">
-          <AiChatPanel v-show="rightTab === 'chat'" />
           <IdePanel v-show="rightTab === 'ide'" :active="rightTab === 'ide'" />
           <AgentPanel v-show="rightTab === 'agent'" />
         </div>

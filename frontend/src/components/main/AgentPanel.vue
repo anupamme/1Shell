@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// AgentPanel.vue — MainConsole 刀 5b · AI Agent 右栏（与 AI Chat / 1Shell AI 在右栏 tab 切换）
+// AgentPanel.vue — MainConsole 刀 5b · AI Agent 右栏（与 1Shell AI 在右栏 tab 切换）
 // 1:1 复刻 [public/agent-panel.js](public/agent-panel.js) UI + [public/index.html:460-492](public/index.html#L460-L492)
 //
 // feedback-right-aside-tabs：右栏用 tab 切换，Agent 激活时右栏 w-[40%]（2:4:4）

@@ -127,26 +127,48 @@ onBeforeUnmount(() => {
   <section class="terminal-area" :class="{ fullscreen: isFullscreen }">
     <!-- 终端 tabs（老 index.html row 329-336 + layout.js renderTabs） -->
     <div id="terminal-tabs" class="terminal-tabs">
-      <div
-        v-for="session in sessionsList"
-        :key="session.id"
-        :data-tab-host="session.hostId"
-        class="terminal-tab"
-        :class="{ active: session.id === sessionTerminal.activeSessionId.value }"
-        @click="switchSession(session)"
+      <button
+        type="button"
+        class="terminal-rail-toggle terminal-rail-toggle--left"
+        :title="props.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏'"
+        :aria-label="props.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏'"
+        @click="emit('toggle-sidebar')"
       >
-        <span class="terminal-tab-status" :class="`status-${session.status}`"></span>
-        <span class="terminal-tab-name">{{ tabName(session) }}</span>
-        <span class="terminal-tab-meta">{{ tabMeta(session) }}</span>
-        <button
-          type="button"
-          class="terminal-tab-close"
-          :data-tab-close="session.hostId"
-          @click="closeSession(session, $event)"
-        >×</button>
+        <AppIcon name="arrow-right" :size="14" :class="props.sidebarCollapsed ? '' : 'rotate-180'" />
+        <span class="terminal-rail-toggle-label">左栏</span>
+      </button>
+      <div class="terminal-tab-strip">
+        <div
+          v-for="session in sessionsList"
+          :key="session.id"
+          :data-tab-host="session.hostId"
+          class="terminal-tab"
+          :class="{ active: session.id === sessionTerminal.activeSessionId.value }"
+          @click="switchSession(session)"
+        >
+          <span class="terminal-tab-status" :class="`status-${session.status}`"></span>
+          <span class="terminal-tab-name">{{ tabName(session) }}</span>
+          <span class="terminal-tab-meta">{{ tabMeta(session) }}</span>
+          <button
+            type="button"
+            class="terminal-tab-close"
+            :data-tab-close="session.hostId"
+            @click="closeSession(session, $event)"
+          >×</button>
+        </div>
+        <!-- "+ 新终端"：第 16 节决策 A，dead button 不绑 handler（仅渲染） -->
+        <button class="terminal-tab-add" type="button">+ 新终端</button>
       </div>
-      <!-- "+ 新终端"：第 16 节决策 A，dead button 不绑 handler（仅渲染） -->
-      <button class="terminal-tab-add" type="button">+ 新终端</button>
+      <button
+        type="button"
+        class="terminal-rail-toggle terminal-rail-toggle--right"
+        :title="props.aiPanelCollapsed ? '展开 AI 面板' : '收起 AI 面板'"
+        :aria-label="props.aiPanelCollapsed ? '展开 AI 面板' : '收起 AI 面板'"
+        @click="emit('toggle-ai-panel')"
+      >
+        <AppIcon name="arrow-right" :size="14" :class="props.aiPanelCollapsed ? 'rotate-180' : ''" />
+        <span class="terminal-rail-toggle-label">AI栏</span>
+      </button>
     </div>
 
     <!-- 状态栏（老 index.html row 339-354） -->
@@ -190,22 +212,6 @@ onBeforeUnmount(() => {
           title="全屏终端"
           @click="toggleFullscreen"
         >{{ isFullscreen ? '退出全屏' : '全屏' }}</button>
-        <button
-          type="button"
-          class="terminal-mini-btn"
-          :title="props.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏'"
-          @click="emit('toggle-sidebar')"
-        >
-          <AppIcon name="arrow-right" :size="12" :class="props.sidebarCollapsed ? '' : 'rotate-180'" />
-        </button>
-        <button
-          type="button"
-          class="terminal-mini-btn"
-          :title="props.aiPanelCollapsed ? '展开 AI 面板' : '收起 AI 面板'"
-          @click="emit('toggle-ai-panel')"
-        >
-          <AppIcon name="spark" :size="12" />
-        </button>
       </div>
     </div>
 

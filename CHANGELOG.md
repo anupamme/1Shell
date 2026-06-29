@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.6.6 - 2026-06-29
+
+4.6.6 继续清理旧版 AI Chat 残留，并调整主控台布局，避免右侧栏默认挤压终端空间。
+
+- 彻底删除旧版 AI Chat 前端入口和旧聊天 composable，主控台右栏只保留 `1Shell AI` 与 `AI Agent`。
+- 删除设置页里只服务旧 AI Chat 的 AI 配置入口，模型/API 配置继续使用新的 Provider/渠道配置体系。
+- 后端继续移除旧 `/api/chat`、旧 chat upstream、旧 chat validator，以及旧 AI 配置字段透传。
+- 主控台右侧栏默认收起，并对旧布局偏好做版本迁移，避免浏览器缓存让右栏继续默认打开。
+- 左右侧栏折叠按钮移动到“本机 / 新终端”这一行，分别显示 `左栏` 与 `AI栏`，不再挤在终端状态栏右上角。
+- AI Agent 页面在运行结束后会重新加载后端投影时间线，恢复自动修复后的最终报告展示。
+- 增加旧 AI Chat 删除守卫测试，防止旧入口、旧范围选择和旧后端接口再次被带回。
+
+### Verification
+
+- `npm test`
+- `npm --prefix frontend run build`
+- `node scripts/repack-release-assets.js`
+
+### Release assets
+
+- Windows x64 updater package: `release/repacked/1shell-4.6.6-windows-x64.zip`
+- Linux x64 updater package: `release/repacked/1shell-4.6.6-linux-x64.tar.gz`
+
 ## 4.6.5 - 2026-06-28
 
 4.6.5 清理旧版 AI Chat 的直连聊天链路，避免它继续和新的 1Shell AI / AI Agent 入口混在一起。

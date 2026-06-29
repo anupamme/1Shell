@@ -9,7 +9,6 @@ import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useTerminalAi } from '@/composables/useTerminalAi';
 import { useHostsStore } from '@/stores/hosts';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
-import type { AiApiConfig } from '@/utils/terminal';
 
 type RiskLevel = 'safe' | 'caution' | 'danger' | null;
 type ErrorType = 'permission_denied' | 'command_not_found' | 'oom' | 'network_error' | 'syntax_error' | 'other' | null;
@@ -35,12 +34,6 @@ const ERROR_TYPE_LABELS: Record<string, string> = {
   syntax_error: '语法错误',
   other: '其他错误',
 };
-
-declare global {
-  interface Window {
-    __aiApiConfig?: AiApiConfig;
-  }
-}
 
 export interface TerminalAnalyzeApi {
   readonly fabVisible: Ref<boolean>;
@@ -242,16 +235,12 @@ function create(): TerminalAnalyzeApi {
     result.value = null;
 
     try {
-      const customConfig = window.__aiApiConfig || {};
       const recentCommands = terminalAi.getRecentCommands();
       const body: Record<string, unknown> = {
         ...getHostPayload(),
         selectedText: text,
         recentCommands,
       };
-      if (customConfig.apiBase) body.apiBase = customConfig.apiBase;
-      if (customConfig.apiKey) body.apiKey = customConfig.apiKey;
-      if (customConfig.model) body.model = customConfig.model;
 
       const resp = await requestJson<AnalysisResult>(
         '/api/ai/terminal/analyze-selection',
