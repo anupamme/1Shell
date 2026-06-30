@@ -66,6 +66,27 @@ assert.ok(
   'plain inline-code mode should not expose backticks or create inline code tags',
 );
 
+const partialStreamHtml = renderMarkdown('- CPU 使用率：约 `1.55%', { tables: 'safe', inlineCode: 'plain' });
+assert.ok(
+  partialStreamHtml.includes('CPU 使用率：约 1.55%'),
+  'plain inline-code mode should hide an opening inline marker while streaming partial text',
+);
+assert.ok(
+  !partialStreamHtml.includes('`'),
+  'streaming partial inline markers must not be visible',
+);
+
+const fencedHtml = renderMarkdown([
+  '执行命令：',
+  '```bash',
+  'printf `date`',
+  '```',
+].join('\n'), { tables: 'safe', inlineCode: 'plain' });
+assert.ok(
+  fencedHtml.includes('printf `date`'),
+  'plain inline-code mode must not strip backticks inside fenced code blocks',
+);
+
 assert.strictEqual(
   hasSuspiciousInlineCode('这个中文标点不应成为代码：`：`'),
   true,

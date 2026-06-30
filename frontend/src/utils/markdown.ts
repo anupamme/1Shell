@@ -291,6 +291,60 @@ function rendererFor(tableMode: MarkdownTableMode, inlineCodeMode: MarkdownInlin
   return inlineCode ? md : mdLiteralInlineCode;
 }
 
+function stripInlineCodeMarkersFromLine(line: string): string {
+  let out = '';
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] !== '`' || isEscaped(line, i)) {
+      out += line[i];
+      continue;
+    }
+
+    const markerLength = backtickRunLength(line, i);
+    const contentStart = i + markerLength;
+    let closeIndex = -1;
+    for (let j = contentStart; j < line.length; j += 1) {
+      if (line[j] !== '`' || isEscaped(line, j)) continue;
+      const closeLength = backtickRunLength(line, j);
+      if (closeLength === markerLength) {
+        closeIndex = j;
+        break;
+      }
+      j += closeLength - 1;
+    }
+
+    if (closeIndex >= 0) {
+      out += line.slice(contentStart, closeIndex);
+      i = closeIndex + markerLength - 1;
+    } else {
+      out += line.slice(contentStart);
+      break;
+    }
+  }
+  return out;
+}
+
+function stripInlineCodeMarkersOutsideFences(source: string): string {
+  const lines = String(source || '').split(/\r?\n/);
+  const out: string[] = [];
+  let fence: { marker: '`' | '~'; length: number } | null = null;
+
+  for (const line of lines) {
+    const fenceLine = isFenceLine(line);
+    if (fence) {
+      out.push(line);
+      if (canCloseFence(line, fence)) fence = null;
+      continue;
+    }
+    if (fenceLine) {
+      fence = fenceLine;
+      out.push(line);
+      continue;
+    }
+    out.push(stripInlineCodeMarkersFromLine(line));
+  }
+  return out.join('\n');
+}
+
 function isUnsafeTableBlock(lines: string[]): boolean {
   if (lines.length < 2) return true;
   const header = splitTableLine(lines[0]);
@@ -350,7 +404,9 @@ function protectUnsafeMarkdownTables(source: string): string {
 export function renderMarkdown(text: string, options: RenderMarkdownOptions = {}): string {
   const mode = normalizeTableMode(options.tables);
   const inlineCodeMode = normalizeInlineCodeMode(options.inlineCode);
-  const source = mode === 'safe' ? protectUnsafeMarkdownTables(String(text || '')) : String(text || '');
+  const raw = String(text || '');
+  const plainSource = inlineCodeMode === 'plain' ? stripInlineCodeMarkersOutsideFences(raw) : raw;
+  const source = mode === 'safe' ? protectUnsafeMarkdownTables(plainSource) : plainSource;
   const renderer = rendererFor(mode, inlineCodeMode, shouldRenderInlineCode(source, inlineCodeMode));
   return sanitizeHtml(renderer.render(source));
 }
