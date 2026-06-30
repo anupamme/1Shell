@@ -22,7 +22,7 @@ import {
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import { renderMarkdown } from '@/utils/markdown';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
-import { displayAssistantTextAfterToolResult, parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
+import { parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlashCommand } from '@/utils/agentSlashCommands';
 import type { HostInfo, HostsListResponse } from '@/utils/scripts';
 
@@ -116,7 +116,7 @@ function hasProbeListResult(tool: IdeToolTimelineItem): boolean {
 }
 
 function assistantDisplayText(item: IdeChatMessage, index: number): string {
-  return displayAssistantTextAfterToolResult(ide.timeline.value, index, item.text);
+  return item.text;
 }
 
 // ── state ──

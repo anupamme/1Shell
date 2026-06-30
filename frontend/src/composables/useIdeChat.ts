@@ -4,7 +4,6 @@ import type { Socket } from 'socket.io-client';
 import { useSocket } from '@/composables/useSocket';
 import { bindIdeStreamHandlers, type IdeLegacyHandler } from '@/utils/ideStreamEvents';
 import { createStreamDeltaBuffer } from '@/utils/streaming';
-import { displayAssistantTextAfterToolResult } from '@/utils/structuredToolResults';
 
 type IdeChatRole = 'user' | 'assistant';
 type IdeChatStatus = 'streaming' | 'done' | 'error' | 'cancelled';
@@ -565,10 +564,6 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
   function closeCurrentAssistant(status?: IdeChatStatus): void {
     deltaBuffer.flushNow();
     if (!currentAssistant) return;
-    const assistantIndex = timeline.value.findIndex((item) => item.id === currentAssistant?.id);
-    if (assistantIndex >= 0) {
-      currentAssistant.text = displayAssistantTextAfterToolResult(timeline.value, assistantIndex, currentAssistant.text);
-    }
     if (currentAssistant.text.trim() && !isStrayAssistantFragment(currentAssistant.text)) {
       if (status) currentAssistant.status = status;
       touchTimeline();
@@ -816,7 +811,12 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
       }],
       ['ide:text', (raw: unknown) => {
         const msg = raw as StreamMessage & { text?: string };
-        if (!matchesCurrentRun(msg) || !msg.text || currentTextHadDelta) return;
+        if (!matchesCurrentRun(msg) || typeof msg.text !== 'string') return;
+        if (currentTextHadDelta) {
+          replaceAssistantText(msg.text);
+          currentTextHadDelta = false;
+          return;
+        }
         appendAssistantText(msg.text);
       }],
       ['ide:tool-start', (raw: unknown) => {

@@ -59,28 +59,24 @@ function testReadRemoteFileIsExactForModel() {
   assert.strictEqual(result, fileText, 'read_remote_file results must not be compacted before the model sees them');
 
   const shellText = Array.from({ length: 240 }, (_, index) => `same line ${index}`).join('\n');
-  const compacted = compactToolResultForModel('execute_command', shellText);
-  assert.ok(String(compacted).length <= 5200, 'non-exact tool results may still be compacted for model budget');
+  const shellResult = compactToolResultForModel('execute_command', shellText);
+  assert.strictEqual(shellResult, shellText, 'execute_command results must not be compacted before the model sees them');
 }
 
-function testCarriageReturnProgressCompaction() {
+function testCarriageReturnProgressIsExactForModel() {
   const progress = [
     '[host]# Geekbench5 CPU Running Text Compression.......... 10%',
     '[host]# Geekbench5 CPU Running Text Compression.................... 25%',
     '[host]# Geekbench5 CPU Running Image Compression.................... 50%',
   ].join('\r');
   const result = compactToolResultForModel('execute_command', progress);
-  assert.strictEqual(
-    result,
-    '[host]# Geekbench5 CPU Running Image Compression.................... 50%',
-    'carriage-return progress updates should collapse to the latest visible line for the model',
-  );
+  assert.strictEqual(result, progress, 'carriage-return progress output must stay exact before the model sees it');
 }
 
 (async () => {
   await testSplitUtf8Sse();
   testReadRemoteFileIsExactForModel();
-  testCarriageReturnProgressCompaction();
+  testCarriageReturnProgressIsExactForModel();
   console.log('ide-text-fidelity checks passed');
 })().catch((err) => {
   console.error(err);

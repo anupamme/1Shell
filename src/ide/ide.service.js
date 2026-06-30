@@ -360,14 +360,8 @@ function isProviderProtocolError(err) {
   return /No tool call found for function call output|invalid_request_error|Provider (?:返回|杩斿洖) 400|HTTP 400|status 400/i.test(message);
 }
 
-const EXACT_MODEL_TOOL_RESULTS = new Set(['read_remote_file']);
-
-function compactToolResultForModel(toolName, content) {
-  const text = toolContentPreview(content);
-  if (!text) return content;
-  if (EXACT_MODEL_TOOL_RESULTS.has(String(toolName || '').trim())) return content;
-  const compacted = compactTerminalOutputForModel(text, 5000, 160);
-  return compacted === text && text.length <= 5000 ? content : compacted;
+function compactToolResultForModel(_toolName, content) {
+  return content;
 }
 
 function compactMessages(messages) {

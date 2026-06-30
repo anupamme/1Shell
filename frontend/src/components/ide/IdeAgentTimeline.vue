@@ -10,7 +10,7 @@ import {
   type IdeToolTimelineItem,
 } from '@/composables/useIdeChat';
 import { renderMarkdown } from '@/utils/markdown';
-import { displayAssistantTextAfterToolResult, parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
+import { parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 
 const props = withDefaults(defineProps<{
   items: IdeTimelineItem[];
@@ -45,7 +45,7 @@ function messageLabel(item: IdeChatMessage): string {
 
 function messageDisplayText(item: IdeChatMessage, index: number): string {
   if (item.role !== 'assistant') return item.text;
-  return displayAssistantTextAfterToolResult(props.items, index, item.text);
+  return item.text;
 }
 
 function systemIcon(item: IdeSystemTimelineItem): string {

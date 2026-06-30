@@ -117,4 +117,51 @@ assert.strictEqual(
   'normal HTTP service URLs must not trigger proxy summary rewriting',
 );
 
-console.log('structured-tool-results: no proxy-summary rewriting checks passed');
+const hostToolResult = JSON.stringify({
+  ok: true,
+  data: {
+    hosts: [
+      { id: 'local', name: '本机', type: 'local' },
+      { id: 'host_123456abcdef', name: 'lax4', host: '23.169.169.12', port: 22, type: 'ssh' },
+    ],
+  },
+});
+const hostAssistantText = [
+  '当前共有 2 台主机：',
+  '- 本机 local',
+  '- lax4 23.169.169.12:22',
+].join('\n');
+assert.strictEqual(
+  displayAssistantTextAfterToolResult([
+    { kind: 'tool', name: 'list_hosts', result: hostToolResult },
+    { kind: 'assistant', role: 'assistant', text: hostAssistantText },
+  ], 1, hostAssistantText),
+  hostAssistantText,
+  'host list assistant text must stay model-authored and must not be replaced by frontend reference text',
+);
+
+const probeToolResult = JSON.stringify({
+  ok: true,
+  data: {
+    probes: [
+      { hostId: 'local', name: '本机', online: true, cpuUsage: 1.2, memoryUsage: 35, diskUsage: 20, platform: 'Linux' },
+      { hostId: 'host_123456abcdef', name: 'lax4', online: true, cpuUsage: 3.4, memoryUsage: 40, diskUsage: 28, platform: 'Ubuntu' },
+    ],
+  },
+});
+const probeAssistantText = [
+  '| 主机 | 状态 | CPU | 内存 | 磁盘 |',
+  '| --- | --- | --- | --- | --- |',
+  '| 本机 | 在线 | 1.2% | 35% | 20% |',
+  '| lax4 | 在线 | 3.4% | 40% | 28% |',
+].join('\n');
+assert.strictEqual(
+  displayAssistantTextAfterToolResult([
+    { kind: 'tool', name: 'list_probes', result: probeToolResult },
+    { kind: 'assistant', role: 'assistant', text: probeAssistantText },
+  ], 1, probeAssistantText),
+  probeAssistantText,
+  'probe assistant text must stay model-authored and must not be replaced by frontend summary text',
+);
+
+console.log('structured-tool-results: assistant text is never frontend-rewritten');

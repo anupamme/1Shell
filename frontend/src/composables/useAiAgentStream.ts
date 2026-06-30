@@ -160,6 +160,25 @@ export function bindAiAgentStreamHandlers(
   const flushDelta = () => callbacks.flushDelta?.();
   const cancelledRunIds = new Set<string>();
 
+  const replaceAssistantText = (text: string): void => {
+    if (callbacks.replaceText) {
+      callbacks.replaceText(text);
+      return;
+    }
+    if (callbacks.ensureAssistant && callbacks.touchAssistant) {
+      flushDelta();
+      const assistant = callbacks.ensureAssistant();
+      const line = { kind: 'stream' as AiLineKind, text };
+      assistant.lines = [line];
+      assistant.events = [{ type: 'line', line }, ...assistant.events.filter((event) => event.type !== 'line')];
+      assistant.status = 'streaming';
+      callbacks.touchAssistant();
+      return;
+    }
+    flushDelta();
+    callbacks.appendDelta?.(text);
+  };
+
   const handlers: IdeLegacyHandler[] = [
     ['ide:thinking', (msg: unknown) => {
       const m = msg as AiAgentSocketMessage;
@@ -169,7 +188,12 @@ export function bindAiAgentStreamHandlers(
     }],
     ['ide:text', (msg: unknown) => {
       const m = msg as AiAgentSocketMessage & { text?: string };
-      if (!controller.matchesCurrentRun(m) || !m.text || controller.currentTextHadDelta) return;
+      if (!controller.matchesCurrentRun(m) || typeof m.text !== 'string') return;
+      if (controller.currentTextHadDelta) {
+        replaceAssistantText(m.text);
+        controller.setCurrentTextHadDelta(false);
+        return;
+      }
       callbacks.appendDelta?.(m.text);
     }],
     ['ide:text-delta', (msg: unknown) => {
@@ -184,20 +208,7 @@ export function bindAiAgentStreamHandlers(
       if (!controller.matchesCurrentRun(m) || typeof m.text !== 'string') return;
       controller.setCurrentTextHadDelta(true);
       callbacks.setStatus('生成中...');
-      if (callbacks.replaceText) callbacks.replaceText(m.text);
-      else if (callbacks.ensureAssistant && callbacks.touchAssistant) {
-        flushDelta();
-        const assistant = callbacks.ensureAssistant();
-        const line = { kind: 'stream' as AiLineKind, text: m.text };
-        assistant.lines = [line];
-        assistant.events = [{ type: 'line', line }, ...assistant.events.filter((event) => event.type !== 'line')];
-        assistant.status = 'streaming';
-        callbacks.touchAssistant();
-      }
-      else {
-        flushDelta();
-        callbacks.appendDelta?.(m.text);
-      }
+      replaceAssistantText(m.text);
     }],
     ['ide:tool-start', (msg: unknown) => {
       const m = msg as AiAgentSocketMessage & { name?: string; toolUseId?: string; input?: unknown; phase?: string };
