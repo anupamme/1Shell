@@ -104,6 +104,36 @@ assert.ok(
   'plain inline-code mode must not strip backticks inside fenced code blocks',
 );
 
+const reportHtml = renderMarkdown([
+  '## 巡检报告',
+  '**硬件**',
+  '',
+  '```markdown',
+  '| 项目 | 详情 |',
+  '| --- | --- |',
+  '| CPU | `2 核` |',
+  '| 内存 | 11 GB |',
+  '```',
+].join('\n'), { tables: 'safe', inlineCode: 'plain' });
+assert.ok(
+  reportHtml.includes('<h2>巡检报告</h2>') && reportHtml.includes('<strong>硬件</strong>'),
+  'plain inline-code mode should preserve normal final markdown formatting',
+);
+assert.ok(
+  reportHtml.includes('<table>') && reportHtml.includes('<td>2 核</td>') && !reportHtml.includes('markdown-code-block'),
+  'markdown tables wrapped in markdown code fences should render as real tables',
+);
+
+const indentedTableHtml = renderMarkdown([
+  '    | 项目 | 详情 |',
+  '    | --- | --- |',
+  '    | 端口 | `22` |',
+].join('\n'), { tables: 'safe', inlineCode: 'plain' });
+assert.ok(
+  indentedTableHtml.includes('<table>') && indentedTableHtml.includes('<td>22</td>'),
+  'indented markdown table blocks should render as real tables',
+);
+
 assert.strictEqual(
   hasSuspiciousInlineCode('这个中文标点不应成为代码：`：`'),
   true,

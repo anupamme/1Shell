@@ -193,18 +193,31 @@
 }
 .markdown-body table {
   display: block;
+  width: max-content;
   max-width: 100%;
   overflow: auto;
   border-collapse: collapse;
   margin: 0.55em 0;
+  background: rgba(255, 255, 255, 0.72);
 }
 .markdown-body th,
 .markdown-body td {
   border: 1px solid #cbd5e1;
   padding: 0.35em 0.55em;
+  vertical-align: top;
 }
+.markdown-body th {
+  background: rgba(248, 250, 252, 0.92);
+  color: #0f172a;
+  font-weight: 700;
+}
+.dark .markdown-body table { background: rgba(15, 23, 42, 0.32); }
 .dark .markdown-body th,
 .dark .markdown-body td { border-color: #334155; }
+.dark .markdown-body th {
+  background: rgba(30, 41, 59, 0.72);
+  color: #e2e8f0;
+}
 .markdown-body a {
   color: #2563eb;
   text-decoration: underline;

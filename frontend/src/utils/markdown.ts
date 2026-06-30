@@ -231,6 +231,11 @@ function isFenceLine(line: string): { marker: '`' | '~'; length: number } | null
   return { marker, length: match[1].length };
 }
 
+function fenceInfo(line: string): string {
+  const match = line.match(/^\s*(?:`{3,}|~{3,})(.*)$/);
+  return match ? match[1].trim() : '';
+}
+
 function canCloseFence(line: string, fence: { marker: '`' | '~'; length: number }): boolean {
   const pattern = fence.marker === '`' ? /^(\s*)`{3,}/ : /^(\s*)~{3,}/;
   const match = line.match(pattern);
@@ -383,6 +388,113 @@ export function streamingPlainText(text: string): string {
   );
 }
 
+function trimBlankEdges(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && !lines[start].trim()) start += 1;
+  while (end > start && !lines[end - 1].trim()) end -= 1;
+  return lines.slice(start, end);
+}
+
+function dedentCodeLines(lines: string[]): string[] {
+  const trimmed = trimBlankEdges(lines);
+  const indents = trimmed
+    .filter((line) => line.trim())
+    .map((line) => line.match(/^[ \t]*/)?.[0].length || 0);
+  const minIndent = indents.length ? Math.min(...indents) : 0;
+  if (minIndent <= 0) return trimmed;
+  return trimmed.map((line) => line.trim() ? line.slice(minIndent) : '');
+}
+
+function hasMarkdownTableBlock(lines: string[]): boolean {
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const header = splitTableLine(lines[i]);
+    const delimiter = splitTableLine(lines[i + 1]);
+    if (header && header.length >= 2 && isDelimiterCells(delimiter)) return true;
+  }
+  return false;
+}
+
+function looksLikeMarkdownTableCode(lines: string[]): boolean {
+  const dedented = dedentCodeLines(lines);
+  const nonBlank = dedented.filter((line) => line.trim());
+  if (nonBlank.length < 2 || !hasMarkdownTableBlock(dedented)) return false;
+  const pipeLines = nonBlank.filter((line) => hasUnescapedPipe(line)).length;
+  return pipeLines >= 2 && pipeLines >= Math.ceil(nonBlank.length / 2);
+}
+
+function isMarkdownishCodeLanguage(info: string): boolean {
+  const lang = normalizeCodeLanguage(info).toLowerCase();
+  return !lang || ['code', 'text', 'txt', 'plain', 'plaintext', 'markdown', 'md', 'mdown'].includes(lang);
+}
+
+function unwrapMarkdownTableFences(source: string): string {
+  const lines = String(source || '').split(/\r?\n/);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length;) {
+    const open = isFenceLine(lines[i]);
+    if (!open) {
+      out.push(lines[i]);
+      i += 1;
+      continue;
+    }
+
+    const start = i;
+    const info = fenceInfo(lines[i]);
+    i += 1;
+    const body: string[] = [];
+    let closed = false;
+    while (i < lines.length) {
+      if (canCloseFence(lines[i], open)) {
+        closed = true;
+        break;
+      }
+      body.push(lines[i]);
+      i += 1;
+    }
+
+    if (closed && isMarkdownishCodeLanguage(info) && looksLikeMarkdownTableCode(body)) {
+      out.push(...dedentCodeLines(body));
+      i += 1;
+      continue;
+    }
+
+    out.push(...lines.slice(start, closed ? i + 1 : i));
+    if (closed) i += 1;
+  }
+  return out.join('\n');
+}
+
+function unwrapIndentedMarkdownTableBlocks(source: string): string {
+  const lines = String(source || '').split(/\r?\n/);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length;) {
+    if (!/^(?: {4,}|\t)/.test(lines[i])) {
+      out.push(lines[i]);
+      i += 1;
+      continue;
+    }
+
+    const start = i;
+    const block: string[] = [];
+    while (i < lines.length && (/^(?: {4,}|\t)/.test(lines[i]) || !lines[i].trim())) {
+      block.push(lines[i]);
+      i += 1;
+    }
+
+    if (looksLikeMarkdownTableCode(block)) {
+      out.push(...dedentCodeLines(block));
+    } else {
+      out.push(...lines.slice(start, i));
+    }
+  }
+  return out.join('\n');
+}
+
+function normalizeMarkdownSourceForDisplay(source: string): string {
+  return unwrapIndentedMarkdownTableBlocks(unwrapMarkdownTableFences(source));
+}
+
 function isUnsafeTableBlock(lines: string[]): boolean {
   if (lines.length < 2) return true;
   const header = splitTableLine(lines[0]);
@@ -443,7 +555,8 @@ export function renderMarkdown(text: string, options: RenderMarkdownOptions = {}
   const mode = normalizeTableMode(options.tables);
   const inlineCodeMode = normalizeInlineCodeMode(options.inlineCode);
   const raw = String(text || '');
-  const plainSource = inlineCodeMode === 'plain' ? streamingPlainText(raw) : raw;
+  const displaySource = normalizeMarkdownSourceForDisplay(raw);
+  const plainSource = inlineCodeMode === 'plain' ? stripInlineCodeMarkersOutsideFences(displaySource) : displaySource;
   const source = mode === 'safe' ? protectUnsafeMarkdownTables(plainSource) : plainSource;
   const renderer = rendererFor(mode, inlineCodeMode, shouldRenderInlineCode(source, inlineCodeMode));
   return sanitizeHtml(renderer.render(source));
