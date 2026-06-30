@@ -174,6 +174,44 @@ function hasUnbalancedBackticks(text: string): boolean {
   return count % 2 === 1;
 }
 
+interface InlineCodeSpan {
+  content: string;
+  end: number;
+}
+
+function backtickRunLength(text: string, index: number): number {
+  let length = 0;
+  while (text[index + length] === '`') length += 1;
+  return length;
+}
+
+function collectInlineCodeSpans(text: string): { spans: InlineCodeSpan[]; unbalanced: boolean } {
+  const spans: InlineCodeSpan[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '`' || isEscaped(text, i)) continue;
+
+    const markerLength = backtickRunLength(text, i);
+    const contentStart = i + markerLength;
+    let closed = false;
+
+    for (let j = contentStart; j < text.length; j += 1) {
+      if (text[j] !== '`' || isEscaped(text, j)) continue;
+      const closeLength = backtickRunLength(text, j);
+      if (closeLength !== markerLength) {
+        j += closeLength - 1;
+        continue;
+      }
+      spans.push({ content: text.slice(contentStart, j), end: j + closeLength });
+      i = j + closeLength - 1;
+      closed = true;
+      break;
+    }
+
+    if (!closed) return { spans, unbalanced: true };
+  }
+  return { spans, unbalanced: false };
+}
+
 function isFenceLine(line: string): { marker: '`' | '~'; length: number } | null {
   const match = line.match(/^\s*(`{3,}|~{3,})/);
   if (!match) return null;
@@ -219,8 +257,13 @@ function textOutsideFences(source: string): string {
 function hasSuspiciousInlineCode(source: string): boolean {
   const text = textOutsideFences(source);
   if (hasUnbalancedBackticks(text)) return true;
-  if (/(^|[^\\])`[^`\n]{1,32}`\.[A-Za-z0-9_-]+/.test(text)) return true;
-  return /(^|[^\\])`[\p{Script=Han}\s，。！？、：；]{1,12}`/u.test(text);
+  const { spans, unbalanced } = collectInlineCodeSpans(text);
+  if (unbalanced) return true;
+  return spans.some((span) => {
+    if (span.content.includes('\n')) return false;
+    if (/^\.[A-Za-z0-9_-]+/.test(text.slice(span.end))) return true;
+    return /^[\p{Script=Han}\s，。！？、：；]{1,12}$/u.test(span.content);
+  });
 }
 
 function shouldRenderInlineCode(source: string, mode: MarkdownInlineCodeMode): boolean {

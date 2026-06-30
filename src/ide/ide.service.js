@@ -3106,20 +3106,20 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
         for (const h of context.hosts) {
           const osText = h.platform || h.os || '';
           const osSuffix = osText ? ` · OS: ${osText}` : '';
-          parts.push(`  - \`${h.id}\` · ${h.name || h.id} (${h.username || 'root'}@${h.host || '127.0.0.1'}:${h.port || 22})${osSuffix}`);
+          parts.push(`  - id=${h.id} · ${h.name || h.id} (${h.username || 'root'}@${h.host || '127.0.0.1'}:${h.port || 22})${osSuffix}`);
         }
       }
       if (context.files?.length > 0) {
         parts.push('**相关文件**：');
-        for (const f of context.files) parts.push(`  - hostId=\`${f.hostId}\` path=\`${f.path}\``);
+        for (const f of context.files) parts.push(`  - hostId=${f.hostId} path=${f.path}`);
       }
       if (context.containers?.length > 0) {
         parts.push('**相关容器**：');
-        for (const c of context.containers) parts.push(`  - hostId=\`${c.hostId}\` name=\`${c.name || c.id}\`${c.image ? ` image=${c.image}` : ''}`);
+        for (const c of context.containers) parts.push(`  - hostId=${c.hostId} name=${c.name || c.id}${c.image ? ` image=${c.image}` : ''}`);
       }
       if (context.mcpServers?.length > 0) {
         parts.push('**MCP Server**：');
-        for (const s of context.mcpServers) parts.push(`  - \`${s.name}\` → ${s.url}`);
+        for (const s of context.mcpServers) parts.push(`  - name=${s.name} → ${s.url}`);
       }
       if (parts.length > 0) contextBlock = parts.join('\n') + '\n\n';
     }
