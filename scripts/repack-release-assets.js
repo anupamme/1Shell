@@ -2,7 +2,9 @@
 'use strict';
 
 const { execFileSync } = require('child_process');
+const archiver = require('archiver');
 const crypto = require('crypto');
+const extractZip = require('extract-zip');
 const { once } = require('events');
 const fs = require('fs');
 const os = require('os');
@@ -363,6 +365,15 @@ async function createTarGz(output, workDir, packageName) {
   await once(out, 'finish');
 }
 
+async function createZip(output, workDir, packageName) {
+  const out = fs.createWriteStream(output);
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.pipe(out);
+  archive.directory(path.join(workDir, packageName), packageName);
+  await archive.finalize();
+  await once(out, 'finish');
+}
+
 function sha256File(filePath) {
   const hash = crypto.createHash('sha256');
   const fd = fs.openSync(filePath, 'r');
@@ -403,11 +414,15 @@ async function repack(asset) {
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oneshell-repack-'));
   try {
-    const extractArgs = ['-xf', source, '-C', workDir];
-    if (sourceAsset.name.endsWith('.tar.gz') && process.platform === 'win32') {
-      extractArgs.push('--exclude=*/node_modules/.bin/*');
+    if (sourceAsset.name.endsWith('.zip')) {
+      await extractZip(source, { dir: workDir });
+    } else {
+      const extractArgs = ['-xf', source, '-C', workDir];
+      if (sourceAsset.name.endsWith('.tar.gz') && process.platform === 'win32') {
+        extractArgs.push('--exclude=*/node_modules/.bin/*');
+      }
+      execFileSync('tar', extractArgs, { stdio: 'inherit' });
     }
-    execFileSync('tar', extractArgs, { stdio: 'inherit' });
     let packageDir = findPackageDir(workDir);
     overlay(packageDir);
     restoreExecutableBits(packageDir);
@@ -422,7 +437,7 @@ async function repack(asset) {
     const output = path.join(OUTPUT_DIR, asset.outputName);
     rm(output);
     if (asset.outputName.endsWith('.zip')) {
-      execFileSync('tar', ['-a', '-cf', output, '-C', workDir, path.basename(packageDir)], { stdio: 'inherit' });
+      await createZip(output, workDir, path.basename(packageDir));
     } else {
       await createTarGz(output, workDir, path.basename(packageDir));
     }
