@@ -796,11 +796,15 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         setStatus(msg.phase === 'compact' ? '正在压缩...' : '思考中...');
       }],
       ['ide:text-delta', (raw: unknown) => {
-        const msg = raw as StreamMessage & { delta?: string };
-        if (!matchesCurrentRun(msg) || !msg.delta) return;
+        const msg = raw as StreamMessage & { delta?: string; text?: string };
+        if (!matchesCurrentRun(msg) || (!msg.delta && typeof msg.text !== 'string')) return;
         currentTextHadDelta = true;
         setStatus('生成中...');
-        appendAssistantText(msg.delta);
+        if (typeof msg.text === 'string') {
+          replaceAssistantText(msg.text);
+          return;
+        }
+        appendAssistantText(msg.delta || '');
       }],
       ['ide:text-replace', (raw: unknown) => {
         const msg = raw as StreamMessage & { text?: string };

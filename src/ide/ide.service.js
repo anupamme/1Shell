@@ -36,6 +36,13 @@ function emitToSession(session, fallbackSocket, event, payload) {
   try { emitIdeEvent(target, event, payload); } catch { /* ignore */ }
 }
 
+function assistantTextFromBlocks(blocks = []) {
+  return blocks
+    .filter(block => block?.type === 'text')
+    .map(block => String(block.text || ''))
+    .join('');
+}
+
 function normalizeVisibleWorkNote(value, maxLength = 1600) {
   const text = String(value || '').replace(/\r\n/g, '\n').trim();
   if (!text) return '';
@@ -197,7 +204,12 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
           blk.text += d.text;
           emittedTextDelta = true;
           if (session.currentRunId === runId && !session.cancelled) {
-            emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: d.text });
+            emitToSession(session, socket, 'ide:text-delta', {
+              sessionId,
+              runId,
+              delta: d.text,
+              text: assistantTextFromBlocks(blocks),
+            });
           }
         }
         if (d.type === 'input_json_delta') {
@@ -3989,9 +4001,22 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     let outputTruncated = false;
     let sawDelta = false;
     let error = null;
+    const truncateOutput = (value) => {
+      const textValue = String(value || '');
+      if (textValue.length <= maxOutputChars) return { text: textValue, truncated: false };
+      return {
+        text: `${textValue.slice(0, maxOutputChars)}\n...(1Shell AI 输出已截断)`,
+        truncated: true,
+      };
+    };
+    const replaceOutput = (value) => {
+      const next = truncateOutput(value);
+      output = next.text;
+      outputTruncated = next.truncated;
+    };
     const appendOutput = (value) => {
       if (outputTruncated) return;
-      const textValue = String(value || '');
+      const { text: textValue } = truncateOutput(value);
       const remaining = maxOutputChars - output.length;
       if (textValue.length <= remaining) {
         output += textValue;
@@ -4021,12 +4046,18 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     const originalEmit = socket.emit.bind(socket);
     socket.emit = (event, payload = {}) => {
       if (events.length < maxEvents) events.push({ event, payload: summarizeEventPayload(payload) });
-      if (event === 'ide:text-delta' && payload.delta) {
+      if (event === 'ide:text-delta' && (payload.delta || typeof payload.text === 'string')) {
         sawDelta = true;
-        appendOutput(payload.delta);
+        if (typeof payload.text === 'string') replaceOutput(payload.text);
+        else appendOutput(payload.delta);
       }
-      if (event === 'ide:text' && !sawDelta && payload.text) {
-        appendOutput(payload.text);
+      if (event === 'ide:text-replace' && typeof payload.text === 'string') {
+        sawDelta = true;
+        replaceOutput(payload.text);
+      }
+      if (event === 'ide:text' && typeof payload.text === 'string') {
+        if (sawDelta) replaceOutput(payload.text);
+        else appendOutput(payload.text);
       }
       if (event === 'ide:tool-start') {
         toolCalls.push({ name: payload.name, input: redactInput(payload.input || {}) });

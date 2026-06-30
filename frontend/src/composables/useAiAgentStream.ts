@@ -197,11 +197,15 @@ export function bindAiAgentStreamHandlers(
       callbacks.appendDelta?.(m.text);
     }],
     ['ide:text-delta', (msg: unknown) => {
-      const m = msg as AiAgentSocketMessage & { delta?: string };
-      if (!controller.matchesCurrentRun(m) || !m.delta) return;
+      const m = msg as AiAgentSocketMessage & { delta?: string; text?: string };
+      if (!controller.matchesCurrentRun(m) || (!m.delta && typeof m.text !== 'string')) return;
       controller.setCurrentTextHadDelta(true);
       callbacks.setStatus('生成中...');
-      callbacks.appendDelta?.(m.delta);
+      if (typeof m.text === 'string') {
+        replaceAssistantText(m.text);
+        return;
+      }
+      callbacks.appendDelta?.(m.delta || '');
     }],
     ['ide:text-replace', (msg: unknown) => {
       const m = msg as AiAgentSocketMessage & { text?: string };

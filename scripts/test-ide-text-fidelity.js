@@ -12,11 +12,14 @@ const {
 } = __private;
 
 async function testSplitUtf8Sse() {
-  const text = '找到准确内容: `handshake.server`，引号 ‘ 和 www.apple.com 必须不变。';
+  const first = '找到准确内容: `handshake.server`，';
+  const second = '引号 ‘ 和 www.apple.com 必须不变。';
+  const text = `${first}${second}`;
   const events = [
     { type: 'message_start', message: { model: 'test-model', usage: { input_tokens: 1, output_tokens: 0 } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
-    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: first } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: second } },
     { type: 'content_block_stop', index: 0 },
     { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
     { type: 'message_stop' },
@@ -44,8 +47,11 @@ async function testSplitUtf8Sse() {
   const result = await done;
 
   assert.strictEqual(result.content[0].text, text, 'SSE parser must preserve split UTF-8 text exactly');
-  const textDelta = emitted.find((item) => item.event === 'ide:text-delta');
-  assert.strictEqual(textDelta?.payload?.delta, text, 'emitted text delta must preserve split UTF-8 text exactly');
+  const textDeltas = emitted.filter((item) => item.event === 'ide:text-delta');
+  assert.strictEqual(textDeltas[0]?.payload?.delta, first, 'first emitted text delta must preserve split UTF-8 text exactly');
+  assert.strictEqual(textDeltas[0]?.payload?.text, first, 'first emitted text snapshot must match accumulated assistant text');
+  assert.strictEqual(textDeltas[1]?.payload?.delta, second, 'second emitted text delta must preserve split UTF-8 text exactly');
+  assert.strictEqual(textDeltas[1]?.payload?.text, text, 'second emitted text snapshot must match accumulated assistant text');
 }
 
 function testReadRemoteFileIsExactForModel() {
