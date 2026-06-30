@@ -360,6 +360,8 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 
 <style scoped>
 .ide-agent-timeline {
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 16px;
 }
@@ -372,15 +374,19 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 .ide-agent-thinking,
 .ide-agent-system,
 .ide-agent-tool {
+  min-width: 0;
   max-width: min(900px, 100%);
 }
 
 .ide-agent-message {
+  width: 100%;
   display: grid;
   gap: 6px;
 }
 
 .ide-agent-message--user {
+  width: auto;
+  max-width: min(720px, 86%);
   margin-left: auto;
   justify-items: end;
 }
@@ -389,6 +395,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 .ide-agent-thinking,
 .ide-agent-system,
 .ide-agent-tool {
+  width: 100%;
   margin-right: auto;
   justify-items: start;
 }
@@ -495,7 +502,11 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 }
 
 .ide-agent-bubble {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
   max-width: 100%;
+  overflow: hidden;
   border: 1px solid rgba(203, 213, 225, 0.9);
   border-radius: 8px;
   padding: 11px 13px;
@@ -528,9 +539,23 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 }
 
 .ide-agent-markdown {
+  min-width: 0;
+  max-width: 100%;
   font-size: 13px;
   line-height: 1.62;
   word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.ide-agent-markdown :deep(.markdown-code-block),
+.ide-agent-thinking-markdown :deep(.markdown-code-block) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ide-agent-markdown :deep(pre),
+.ide-agent-thinking-markdown :deep(pre) {
+  max-width: 100%;
 }
 
 .ide-agent-timeline--compact .ide-agent-markdown {
@@ -540,6 +565,8 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 
 .ide-agent-thinking-card,
 .ide-agent-tool-card {
+  min-width: 0;
+  max-width: 100%;
   width: 100%;
   border-radius: 8px;
   overflow: hidden;
@@ -650,12 +677,15 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
 }
 
 .ide-agent-thinking-markdown {
+  min-width: 0;
+  max-width: 100%;
   border-top: 1px solid rgba(226, 232, 240, 0.82);
   padding: 9px 12px 11px;
   font-size: 12.5px;
   line-height: 1.62;
   color: #475569;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .ide-agent-timeline--compact .ide-agent-thinking-markdown {

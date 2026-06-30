@@ -14,10 +14,19 @@ function stripTerminalControl(text) {
     .replace(ANSI_PATTERN, '');
 }
 
-function splitMeaningfulLines(text, maxLines = 12, maxLineChars = 300) {
-  const clean = stripTerminalControl(text)
+function collapseCarriageReturnUpdates(text) {
+  return String(text || '')
     .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n');
+    .split('\n')
+    .map((line) => {
+      const segments = line.split('\r');
+      return [...segments].reverse().find((segment) => segment.length > 0) || '';
+    })
+    .join('\n');
+}
+
+function splitMeaningfulLines(text, maxLines = 12, maxLineChars = 300) {
+  const clean = collapseCarriageReturnUpdates(stripTerminalControl(text));
   return clean
     .split('\n')
     .map((line) => line.trimEnd())
@@ -37,7 +46,7 @@ function analyzeCommandOutput(result = {}) {
   const stderr = String(result.stderr || '');
   const combinedRaw = `${stdout}\n${stderr}`;
   const combinedClean = stripTerminalControl(combinedRaw);
-  const normalized = combinedClean.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const normalized = collapseCarriageReturnUpdates(combinedClean);
   const durationMs = Number.isFinite(Number(result.durationMs)) ? Number(result.durationMs) : 0;
   const exitCode = Number.isFinite(Number(result.exitCode)) ? Number(result.exitCode) : null;
   const timeout = Number.isFinite(Number(result.timeout)) ? Number(result.timeout) : 0;
@@ -118,6 +127,7 @@ function formatOutputDiagnostics(diag = {}) {
 module.exports = {
   analyzeCommandOutput,
   formatOutputDiagnostics,
+  collapseCarriageReturnUpdates,
   stripTerminalControl,
   withOutputDiagnostics,
 };

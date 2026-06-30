@@ -123,6 +123,7 @@ function create(): SessionTerminalApi {
   let socket: Socket | null = null;
   let initialized = false;
   let onDataDispose: { dispose(): void } | null = null;
+  let mountedContainer: HTMLElement | null = null;
   let _resizeObserver: ResizeObserver | null = null;
   let _resizeRafId: number | null = null;
   let _resizeSettleTimerId: number | null = null;
@@ -194,15 +195,67 @@ function create(): SessionTerminalApi {
     };
   }
 
+  function terminalCellSize(): { width: number; height: number } {
+    const core = (_term as unknown as {
+      _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } };
+    })._core;
+    const cell = core?._renderService?.dimensions?.css?.cell;
+    const width = Number(cell?.width);
+    const height = Number(cell?.height);
+    return {
+      width: Number.isFinite(width) && width > 0 ? width : 8.4,
+      height: Number.isFinite(height) && height > 0 ? height : 17.5,
+    };
+  }
+
+  function measuredTerminalSize(): { cols: number; rows: number } | null {
+    const container = mountedContainer || _term.element?.parentElement || null;
+    if (!container) return null;
+    const rect = container.getBoundingClientRect();
+    const width = rect.width || container.clientWidth;
+    const height = rect.height || container.clientHeight;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+    const cell = terminalCellSize();
+    const cols = Math.floor(width / cell.width);
+    const rows = Math.floor(height / cell.height);
+    if (!isUsableTerminalSize(cols, rows)) return null;
+    return { cols, rows };
+  }
+
+  function chooseTerminalSize(proposed: { cols: number; rows: number } | null): { cols: number; rows: number } | null {
+    const measured = measuredTerminalSize();
+    const validProposed = proposed && isUsableTerminalSize(proposed.cols, proposed.rows) ? proposed : null;
+    if (!validProposed) return measured;
+    if (!measured) return validProposed;
+    const proposedKey = `${validProposed.cols}x${validProposed.rows}`;
+    const measuredKey = `${measured.cols}x${measured.rows}`;
+    if (proposedKey === measuredKey) return validProposed;
+    if (measured.cols > validProposed.cols + 8 || Math.abs(measured.rows - validProposed.rows) > 2) return measured;
+    return validProposed;
+  }
+
   function fitTerminal(): { cols: number; rows: number } | null {
     try {
       const proposed = _fit.proposeDimensions();
-      if (!proposed || !isUsableTerminalSize(proposed.cols, proposed.rows)) return null;
-      _fit.fit();
-      const size = { cols: _term.cols, rows: _term.rows };
-      refreshTerminalViewport(size);
-      return size;
+      const size = chooseTerminalSize(proposed || null);
+      if (!size) return null;
+      if (proposed && size.cols === proposed.cols && size.rows === proposed.rows) {
+        _fit.fit();
+      } else if (_term.cols !== size.cols || _term.rows !== size.rows) {
+        _term.resize(size.cols, size.rows);
+      }
+      const appliedSize = { cols: _term.cols, rows: _term.rows };
+      refreshTerminalViewport(appliedSize);
+      return appliedSize;
     } catch {
+      const measured = measuredTerminalSize();
+      if (measured) {
+        try {
+          _term.resize(measured.cols, measured.rows);
+          refreshTerminalViewport(measured);
+          return measured;
+        } catch { /* 静默 */ }
+      }
       return null;
     }
   }
@@ -351,6 +404,8 @@ function create(): SessionTerminalApi {
       activeSessionId.value = session.id;
       notifyLifecycle('session-change', { hostId, sessionId: session.id, forceReconnect });
       syncTerminalSize(true);
+      window.setTimeout(() => syncTerminalSize(true), 120);
+      window.setTimeout(() => syncTerminalSize(true), 360);
       _term.write(sessionBuffers.get(session.id) || '', () => scrollTerminalToBottom());
       scrollTerminalToBottom();
       if (hostId !== LOCAL_HOST_ID) {
@@ -574,6 +629,7 @@ function create(): SessionTerminalApi {
   }
 
   function mount(container: HTMLElement): void {
+    mountedContainer = container;
     // 切换路由再回来时,xterm 已挂在原 DOM —— 复用元素重挂到新 container,
     // 避免 v-if 重建后 _term.element 还指向旧 DOM 节点导致空白。
     if (initialized) {
@@ -613,6 +669,7 @@ function create(): SessionTerminalApi {
     window.removeEventListener('resize', onWindowResize);
     _resizeObserver?.disconnect();
     _resizeObserver = null;
+    mountedContainer = null;
     if (_resizeRafId !== null) { cancelAnimationFrame(_resizeRafId); _resizeRafId = null; }
     if (_resizeSettleTimerId !== null) { window.clearTimeout(_resizeSettleTimerId); _resizeSettleTimerId = null; }
     // 注意:不 dispose onDataDispose 也不 reset initialized —— xterm 实例单例,

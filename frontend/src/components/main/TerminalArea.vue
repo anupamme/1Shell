@@ -2,7 +2,7 @@
 // TerminalArea.vue — MainConsole 终端区
 // 严格 1:1 对照老 [public/index.html](public/index.html) row 326-426 + [public/layout.js](public/layout.js) renderTabs。
 // 结构（自上而下）：terminal-tabs → 状态栏 → SuggestionBox → CmdInlinePanel → terminal-main（含 terminal-hint / terminal-container / Ghost / fab）
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue';
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 
 import AppIcon from '@/components/AppIcon.vue';
 import AnalyzeFab from '@/components/main/AnalyzeFab.vue';
@@ -97,6 +97,18 @@ function closeSuggestion(): void {
   setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
 }
 
+function refitTerminalSoon(): void {
+  [40, 140, 360].forEach((delay) => {
+    window.setTimeout(() => sessionTerminal.focusTerminal(), delay);
+  });
+}
+
+watch(
+  () => [props.sidebarCollapsed, props.aiPanelCollapsed, isFullscreen.value],
+  () => refitTerminalSoon(),
+  { flush: 'post' },
+);
+
 onMounted(() => {
   sessionTerminal.resumeUserInput(0);
   if (terminalEl.value) sessionTerminal.mount(terminalEl.value);
@@ -104,13 +116,13 @@ onMounted(() => {
   commandSuggestion.initialize();
   scriptInject.initialize();
   terminalAnalyze.initialize();
-  setTimeout(() => sessionTerminal.focusTerminal(), 80);
+  refitTerminalSoon();
 });
 
 onActivated(() => {
   sessionTerminal.resumeUserInput();
   if (terminalEl.value) sessionTerminal.mount(terminalEl.value);
-  setTimeout(() => sessionTerminal.focusTerminal(), 80);
+  refitTerminalSoon();
 });
 
 onDeactivated(() => {

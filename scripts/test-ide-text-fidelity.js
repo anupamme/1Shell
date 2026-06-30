@@ -63,9 +63,24 @@ function testReadRemoteFileIsExactForModel() {
   assert.ok(String(compacted).length <= 5200, 'non-exact tool results may still be compacted for model budget');
 }
 
+function testCarriageReturnProgressCompaction() {
+  const progress = [
+    '[host]# Geekbench5 CPU Running Text Compression.......... 10%',
+    '[host]# Geekbench5 CPU Running Text Compression.................... 25%',
+    '[host]# Geekbench5 CPU Running Image Compression.................... 50%',
+  ].join('\r');
+  const result = compactToolResultForModel('execute_command', progress);
+  assert.strictEqual(
+    result,
+    '[host]# Geekbench5 CPU Running Image Compression.................... 50%',
+    'carriage-return progress updates should collapse to the latest visible line for the model',
+  );
+}
+
 (async () => {
   await testSplitUtf8Sse();
   testReadRemoteFileIsExactForModel();
+  testCarriageReturnProgressCompaction();
   console.log('ide-text-fidelity checks passed');
 })().catch((err) => {
   console.error(err);

@@ -303,8 +303,19 @@ function stripTerminalControl(text) {
     .replace(/\x9b[0-?]*[ -/]*[@-~]/g, '');
 }
 
+function collapseCarriageReturnUpdates(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => {
+      const segments = line.split('\r');
+      return [...segments].reverse().find((segment) => segment.length > 0) || '';
+    })
+    .join('\n');
+}
+
 function compactTerminalOutputForModel(text, maxChars = 5000, maxLines = 160) {
-  const lines = stripTerminalControl(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').map(line => line.trimEnd());
+  const lines = collapseCarriageReturnUpdates(stripTerminalControl(text)).split('\n').map(line => line.trimEnd());
   const compacted = [];
   let previous = null;
   let repeats = 0;

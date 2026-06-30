@@ -725,7 +725,9 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
 <style scoped>
 .console-ide-panel {
   height: 100%;
+  min-width: 0;
   min-height: 0;
+  max-width: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
@@ -739,6 +741,7 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
 }
 
 .console-ide-header {
+  min-width: 0;
   min-height: 54px;
   display: flex;
   align-items: center;
@@ -761,6 +764,7 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
 }
 
 .console-ide-actions {
+  min-width: 0;
   position: relative;
   justify-content: flex-end;
   flex-wrap: wrap;
@@ -956,8 +960,10 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
 }
 
 .console-ide-scroll {
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 14px;
 }
 
@@ -1005,6 +1011,8 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
 
 .console-ide-composer {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 9px;
   padding: 12px;
@@ -1019,6 +1027,8 @@ function selectSlashCommand(command: AgentSlashCommand | undefined): void {
 
 .console-ide-input {
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   min-height: 82px;
   max-height: 150px;
   resize: vertical;
