@@ -3,7 +3,7 @@
     "1shell": {
       "command": "node",
       "args": [
-        "C:/Users/jsw_0/AppData/Local/Temp/bin/1shell-mcp-stdio.js"
+        "<TMP_PARENT>/bin/1shell-mcp-stdio.js"
       ],
       "env": {
         "ONESHELL_URL": "http://127.0.0.1:3399",

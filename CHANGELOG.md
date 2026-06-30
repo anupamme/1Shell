@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.6.7 - 2026-06-30
+
+4.6.7 集中修复终端与 1Shell AI 输出保真问题，重点让模型看到完整工具信息，并让流式显示过程与最终回答保持一致。
+
+- 修复终端输出刷屏和 ANSI/回车进度类输出导致的前端日志抖动问题。
+- 修复 1Shell AI 面板在长输出后横向撑开、输入区不可见的问题。
+- 工具结果传给模型前不再做前端式压缩或摘要，`read_remote_file`、`execute_command` 等结果按原文进入模型上下文。
+- 移除前端对 assistant 文本的结构化改写，工具卡片只负责展示结果，不再替 AI 生成固定总结。
+- 修复 assistant Markdown/inline code 在流式阶段暴露反引号、单引号和半解析标记的问题，最终渲染保留文本保真。
+- 流式文本事件携带当前累计全文，前端优先用权威快照替换当前内容，避免中途出现重复汉字、重复冒号或“先错后修”的显示过程。
+- 远程命令执行优先通过 `bash -lc` 包装，避免 `/bin/sh` 不支持 `set -o pipefail` 导致工具误失败。
+
+### Verification
+
+- `node scripts/test-ide-text-fidelity.js`
+- `node scripts/test-ide-exact-text-handling.js`
+- `node scripts/test-markdown-inline-code-safety.js`
+- `node scripts/test-bridge-command-shell.js`
+- `node scripts/test-structured-tool-results.js`
+- `npm --prefix frontend run typecheck`
+- `npm --prefix frontend run build`
+
 ## 4.6.6 - 2026-06-29
 
 4.6.6 继续清理旧版 AI Chat 残留，并调整主控台布局，避免右侧栏默认挤压终端空间。

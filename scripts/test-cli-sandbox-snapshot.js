@@ -82,7 +82,10 @@ function normalizeContent(content, dataDir) {
   let text = content.toString('utf8');
   text = text.replaceAll(dataDir, '<TMP_DATA_DIR>');
   // home 目录在 buildMcpEntry 等地方不出现,但 stdio bridge 脚本路径会带
-  // 项目根路径(path.join(dataDir, '..', 'bin', '...')),也归一化
+  // dataDir 上级临时目录(path.join(dataDir, '..', 'bin', '...')),也归一化
+  const tempParent = path.resolve(dataDir, '..');
+  text = text.replaceAll(tempParent, '<TMP_PARENT>');
+  // 项目根路径也归一化
   const projectRoot = path.resolve(__dirname, '..');
   text = text.replaceAll(projectRoot, '<PROJECT_ROOT>');
   // Windows 路径分隔符归一化(快照在 git 里跨平台)
