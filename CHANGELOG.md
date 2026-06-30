@@ -11,6 +11,7 @@
 - 修复 assistant Markdown/inline code 在流式阶段暴露反引号、单引号和半解析标记的问题，最终渲染保留文本保真。
 - 流式文本事件携带当前累计全文，前端优先用权威快照替换当前内容，避免中途出现重复汉字、重复冒号或“先错后修”的显示过程。
 - 远程命令执行优先通过 `bash -lc` 包装，避免 `/bin/sh` 不支持 `set -o pipefail` 导致工具误失败。
+- 在线更新完成后会等待服务重启并自动整页刷新，避免浏览器继续运行更新前已经加载的旧前端代码。
 
 ### Verification
 
@@ -19,6 +20,7 @@
 - `node scripts/test-markdown-inline-code-safety.js`
 - `node scripts/test-bridge-command-shell.js`
 - `node scripts/test-structured-tool-results.js`
+- `node scripts/test-updater-client-reload-guard.js`
 - `npm --prefix frontend run typecheck`
 - `npm --prefix frontend run build`
 

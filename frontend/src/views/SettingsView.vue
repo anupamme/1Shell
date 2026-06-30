@@ -145,12 +145,71 @@ interface ServerUpdateStatus {
 }
 
 const srvUpdate = ref<ServerUpdateStatus | null>(null);
-const srvBusy = ref('');           // '' | 'check' | 'apply' | 'rollback' | 'docker' | 'token' | 'verify'
+const srvBusy = ref('');           // '' | 'check' | 'apply' | 'rollback' | 'docker' | 'token' | 'verify' | 'restart'
 const srvError = ref('');
 const srvNotesOpen = ref(false);
+const srvRestarting = ref(false);
+const srvRestartText = ref('');
 const tokenInput = ref('');
 const tokenVerifyMsg = ref('');
 const isDesktopMode = Boolean(window.oneshellDesktop?.isDesktop);
+const SERVER_RESTART_INITIAL_DELAY_MS = 2500;
+const SERVER_RESTART_POLL_MS = 1500;
+const SERVER_RESTART_TIMEOUT_MS = 90000;
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function hardReloadApp(): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set('_1shellUpdated', Date.now().toString(36));
+  window.location.replace(url.toString());
+}
+
+async function readServerVersion(): Promise<string> {
+  const response = await fetch(`/api/updater/status?_=${Date.now()}`, {
+    cache: 'no-store',
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as { status?: { currentVersion?: string } };
+  return String(data.status?.currentVersion || '').trim();
+}
+
+async function reloadAfterServerUpdate(expectedVersion: string, label: string): Promise<void> {
+  srvBusy.value = 'restart';
+  srvRestarting.value = true;
+  srvRestartText.value = `${label}已提交，等待服务重启并加载新前端…`;
+  await wait(SERVER_RESTART_INITIAL_DELAY_MS);
+
+  const deadline = Date.now() + SERVER_RESTART_TIMEOUT_MS;
+  let lastVersion = '';
+  while (Date.now() < deadline) {
+    try {
+      const version = await readServerVersion();
+      lastVersion = version;
+      if (!expectedVersion || version === expectedVersion) {
+        srvRestartText.value = `服务已恢复到 v${version || expectedVersion}，正在刷新页面…`;
+        await wait(300);
+        hardReloadApp();
+        return;
+      }
+      srvRestartText.value = `服务已响应，当前版本 v${version || '未知'}，继续等待 v${expectedVersion}…`;
+    } catch {
+      srvRestartText.value = '服务正在重启，继续等待…';
+    }
+    await wait(SERVER_RESTART_POLL_MS);
+  }
+
+  srvBusy.value = '';
+  srvRestarting.value = false;
+  srvRestartText.value = '';
+  srvError.value = lastVersion && expectedVersion
+    ? `已提交${label}，但自动刷新超时：当前服务报告 v${lastVersion}，目标 v${expectedVersion}。请手动刷新页面。`
+    : `已提交${label}，但自动刷新超时。请手动刷新页面。`;
+  notify.warn(srvError.value, 8000);
+}
 
 async function loadServerUpdate(): Promise<void> {
   if (isDesktopMode) return;
@@ -177,10 +236,14 @@ async function srvApply(): Promise<void> {
   if (!window.confirm('确定更新并重启？更新期间服务会短暂中断。')) return;
   srvBusy.value = 'apply'; srvError.value = '';
   try {
-    await requestJson('/api/updater/apply', { method: 'POST', body: JSON.stringify({}) });
-    notify.success('更新已开始，服务即将重启…');
-  } catch (e) { srvError.value = (e as Error).message || '更新失败'; }
-  finally { srvBusy.value = ''; }
+    const result = await requestJson<{ toVersion?: string }>('/api/updater/apply', { method: 'POST', body: JSON.stringify({}) });
+    const toVersion = String(result.toVersion || srvUpdate.value?.latestVersion || '').trim();
+    notify.success('更新已开始，服务即将重启并刷新页面…', 6000);
+    void reloadAfterServerUpdate(toVersion, '更新');
+  } catch (e) {
+    srvBusy.value = '';
+    srvError.value = (e as Error).message || '更新失败';
+  }
 }
 
 async function srvDockerPull(): Promise<void> {
@@ -199,10 +262,14 @@ async function srvRollback(): Promise<void> {
   if (!window.confirm('回退到上一版本并重启？')) return;
   srvBusy.value = 'rollback'; srvError.value = '';
   try {
-    await requestJson('/api/updater/rollback', { method: 'POST' });
-    notify.success('回退已开始，服务即将重启…');
-  } catch (e) { srvError.value = (e as Error).message || '回退失败'; }
-  finally { srvBusy.value = ''; }
+    const result = await requestJson<{ toVersion?: string }>('/api/updater/rollback', { method: 'POST' });
+    const toVersion = String(result.toVersion || srvUpdate.value?.previousVersion || '').trim();
+    notify.success('回退已开始，服务即将重启并刷新页面…', 6000);
+    void reloadAfterServerUpdate(toVersion, '回退');
+  } catch (e) {
+    srvBusy.value = '';
+    srvError.value = (e as Error).message || '回退失败';
+  }
 }
 
 async function srvSaveToken(): Promise<void> {
@@ -1061,6 +1128,12 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
                 <div v-if="srvUpdate.rateLimit.resetAt" class="mt-1 text-[11px] text-slate-400">重置于：{{ new Date(srvUpdate.rateLimit.resetAt).toLocaleString() }}</div>
               </div>
 
+              <div
+                v-if="srvRestarting"
+                class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-200"
+              >
+                {{ srvRestartText }}
+              </div>
               <div v-if="srvError" class="text-xs text-red-500">{{ srvError }}</div>
               <div v-else-if="srvUpdate.checkError" class="text-xs text-red-500">检查失败：{{ srvUpdate.checkError }}</div>
 
@@ -1089,7 +1162,7 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
                   :class="srvUpdate.hasUpdate && !srvBusy ? 'bg-gradient-to-r from-blue-500 to-blue-600 hover:shadow-lg' : 'bg-slate-300 dark:bg-slate-600 cursor-not-allowed'"
                   :disabled="!srvUpdate.hasUpdate || !!srvBusy"
                   @click="srvApply"
-                ><AppIcon name="arrow-up" :size="14" /> {{ srvBusy === 'apply' ? '更新中…' : '更新并重启' }}</button>
+                ><AppIcon name="arrow-up" :size="14" /> {{ srvBusy === 'apply' ? '更新中…' : (srvBusy === 'restart' ? '等待重启…' : '更新并重启') }}</button>
               </div>
             </template>
 
