@@ -23,9 +23,20 @@ const moduleContext = { exports: {} };
 vm.runInNewContext(compiled, {
   module: moduleContext,
   exports: moduleContext.exports,
+  DOMParser: class {
+    parseFromString(html) {
+      const innerHTML = String(html).replace(/^<div>/, '').replace(/<\/div>$/, '');
+      return {
+        body: { firstElementChild: { innerHTML } },
+        createTreeWalker: () => ({ nextNode: () => false, currentNode: null }),
+      };
+    }
+  },
+  NodeFilter: { SHOW_ELEMENT: 1 },
   require: (id) => (id === 'markdown-it' ? { default: require('../frontend/node_modules/markdown-it') } : require(id)),
 }, { filename: sourcePath });
 
+const { renderMarkdown } = moduleContext.exports;
 const { hasSuspiciousInlineCode, shouldRenderInlineCode } = moduleContext.exports.__markdownInlineCodeTest;
 
 const systemReport = [
@@ -44,6 +55,15 @@ assert.strictEqual(
   shouldRenderInlineCode(systemReport, 'safe'),
   true,
   'safe markdown mode should still render valid inline code in system reports',
+);
+const plainHtml = renderMarkdown(systemReport, { tables: 'safe', inlineCode: 'plain' });
+assert.ok(
+  plainHtml.includes('根分区 /：77G'),
+  'plain inline-code mode should keep inline code text without markdown markers',
+);
+assert.ok(
+  !plainHtml.includes('`') && !plainHtml.includes('<code>'),
+  'plain inline-code mode should not expose backticks or create inline code tags',
 );
 
 assert.strictEqual(

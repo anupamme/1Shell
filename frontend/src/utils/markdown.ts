@@ -12,9 +12,11 @@ const mdLiteralInlineCode = new MarkdownIt(markdownOptions).disable('backticks')
 const mdNoTablesLiteralInlineCode = new MarkdownIt(markdownOptions)
   .disable('table')
   .disable('backticks');
+const mdPlainInlineCode = new MarkdownIt(markdownOptions);
+const mdNoTablesPlainInlineCode = new MarkdownIt(markdownOptions).disable('table');
 
 export type MarkdownTableMode = 'enabled' | 'disabled' | 'safe';
-export type MarkdownInlineCodeMode = 'enabled' | 'disabled' | 'safe';
+export type MarkdownInlineCodeMode = 'enabled' | 'disabled' | 'safe' | 'plain';
 
 export interface RenderMarkdownOptions {
   tables?: MarkdownTableMode | boolean;
@@ -100,6 +102,10 @@ function renderCodeBlock(tokens: MarkdownToken[], idx: number): string {
   ].join('');
 }
 
+function renderInlineCodeAsText(tokens: MarkdownToken[], idx: number): string {
+  return escapeHtml(tokens[idx]?.content || '');
+}
+
 md.renderer.rules.fence = renderCodeBlock;
 md.renderer.rules.code_block = renderCodeBlock;
 mdNoTables.renderer.rules.fence = renderCodeBlock;
@@ -108,6 +114,12 @@ mdLiteralInlineCode.renderer.rules.fence = renderCodeBlock;
 mdLiteralInlineCode.renderer.rules.code_block = renderCodeBlock;
 mdNoTablesLiteralInlineCode.renderer.rules.fence = renderCodeBlock;
 mdNoTablesLiteralInlineCode.renderer.rules.code_block = renderCodeBlock;
+mdPlainInlineCode.renderer.rules.fence = renderCodeBlock;
+mdPlainInlineCode.renderer.rules.code_block = renderCodeBlock;
+mdPlainInlineCode.renderer.rules.code_inline = renderInlineCodeAsText;
+mdNoTablesPlainInlineCode.renderer.rules.fence = renderCodeBlock;
+mdNoTablesPlainInlineCode.renderer.rules.code_block = renderCodeBlock;
+mdNoTablesPlainInlineCode.renderer.rules.code_inline = renderInlineCodeAsText;
 
 function normalizeTableMode(value: RenderMarkdownOptions['tables']): MarkdownTableMode {
   if (value === false) return 'disabled';
@@ -269,10 +281,12 @@ function hasSuspiciousInlineCode(source: string): boolean {
 function shouldRenderInlineCode(source: string, mode: MarkdownInlineCodeMode): boolean {
   if (mode === 'disabled') return false;
   if (mode === 'enabled') return true;
+  if (mode === 'plain') return true;
   return !hasSuspiciousInlineCode(source);
 }
 
-function rendererFor(tableMode: MarkdownTableMode, inlineCode: boolean): MarkdownIt {
+function rendererFor(tableMode: MarkdownTableMode, inlineCodeMode: MarkdownInlineCodeMode, inlineCode: boolean): MarkdownIt {
+  if (inlineCodeMode === 'plain') return tableMode === 'disabled' ? mdNoTablesPlainInlineCode : mdPlainInlineCode;
   if (tableMode === 'disabled') return inlineCode ? mdNoTables : mdNoTablesLiteralInlineCode;
   return inlineCode ? md : mdLiteralInlineCode;
 }
@@ -337,7 +351,7 @@ export function renderMarkdown(text: string, options: RenderMarkdownOptions = {}
   const mode = normalizeTableMode(options.tables);
   const inlineCodeMode = normalizeInlineCodeMode(options.inlineCode);
   const source = mode === 'safe' ? protectUnsafeMarkdownTables(String(text || '')) : String(text || '');
-  const renderer = rendererFor(mode, shouldRenderInlineCode(source, inlineCodeMode));
+  const renderer = rendererFor(mode, inlineCodeMode, shouldRenderInlineCode(source, inlineCodeMode));
   return sanitizeHtml(renderer.render(source));
 }
 

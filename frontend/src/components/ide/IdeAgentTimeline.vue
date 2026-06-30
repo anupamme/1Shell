@@ -247,7 +247,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
           <div
             v-if="messageDisplayText(item, index)"
             class="markdown-body ide-agent-markdown"
-            v-html="renderMarkdown(messageDisplayText(item, index), { tables: 'safe' })"
+            v-html="renderMarkdown(messageDisplayText(item, index), { tables: 'safe', inlineCode: item.role === 'assistant' ? 'plain' : 'safe' })"
           ></div>
           <div v-else class="ide-agent-pending" role="status" aria-label="生成中">
             <span></span>
