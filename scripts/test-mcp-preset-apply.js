@@ -63,22 +63,22 @@ try {
   assert.throws(() => store.apply('codex', 'github', {}), /githubToken/);
 
   // apply github 含 token → 成功 & 脱敏
-  store.apply('codex', 'github', { githubToken: 'ghp_supersecret1234567890' });
+  store.apply('codex', 'github', { githubToken: 'TEST_GITHUB_TOKEN_VALUE_1234567890' });
   applied = store.listApplied('codex');
   assert.strictEqual(applied.length, 2);
   const githubItem = applied.find(x => x.presetId === 'github');
   assert.ok(githubItem.config.githubToken.includes('…'), 'githubToken 应脱敏');
-  assert.ok(!githubItem.config.githubToken.includes('supersecret'), 'githubToken 明文不应出现在 listApplied');
+  assert.ok(!githubItem.config.githubToken.includes('VALUE_1234567890'), 'githubToken 明文不应出现在 listApplied');
 
   // getAppliedRaw 返回原始 token(供 sandbox 写入用)
   const raw = store.getAppliedRaw('codex');
   const rawGithub = raw.find(x => x.presetId === 'github');
-  assert.strictEqual(rawGithub.config.githubToken, 'ghp_supersecret1234567890', 'getAppliedRaw 应返回原始 token');
+  assert.strictEqual(rawGithub.config.githubToken, 'TEST_GITHUB_TOKEN_VALUE_1234567890', 'getAppliedRaw 应返回原始 token');
 
   // 重复 apply github 用新 token 覆盖
-  store.apply('codex', 'github', { githubToken: 'ghp_NEW_TOKEN_xxx' });
+  store.apply('codex', 'github', { githubToken: 'TEST_GITHUB_TOKEN_REPLACED' });
   assert.strictEqual(store.listApplied('codex').length, 2, '重复 apply 不应增加条数');
-  assert.strictEqual(store.getAppliedRaw('codex').find(x => x.presetId === 'github').config.githubToken, 'ghp_NEW_TOKEN_xxx');
+  assert.strictEqual(store.getAppliedRaw('codex').find(x => x.presetId === 'github').config.githubToken, 'TEST_GITHUB_TOKEN_REPLACED');
 
   // 未知 preset
   assert.throws(() => store.apply('codex', 'nonexistent', {}), /未知 MCP preset/);
@@ -104,7 +104,7 @@ try {
   assert.ok(codexMcp.mcpServers.github, 'codex mcp.json 应含 github entry');
   assert.strictEqual(
     codexMcp.mcpServers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN,
-    'ghp_NEW_TOKEN_xxx',
+    'TEST_GITHUB_TOKEN_REPLACED',
     'github entry 的 env 模板应被实际 token 替换',
   );
 

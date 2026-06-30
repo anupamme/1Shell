@@ -122,14 +122,14 @@ const hostToolResult = JSON.stringify({
   data: {
     hosts: [
       { id: 'local', name: '本机', type: 'local' },
-      { id: 'host_123456abcdef', name: 'lax4', host: '23.169.169.12', port: 22, type: 'ssh' },
+      { id: 'host_123456abcdef', name: 'example-vps', host: '203.0.113.12', port: 22, type: 'ssh' },
     ],
   },
 });
 const hostAssistantText = [
   '当前共有 2 台主机：',
   '- 本机 local',
-  '- lax4 23.169.169.12:22',
+  '- example-vps 203.0.113.12:22',
 ].join('\n');
 assert.strictEqual(
   displayAssistantTextAfterToolResult([
