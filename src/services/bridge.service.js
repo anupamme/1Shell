@@ -132,7 +132,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
   async function execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput, env, secrets }) {
     const startAt = Date.now();
     const commandForAudit = auditCommand || command;
-    const commandForExecution = withRemoteEnv(command, env);
+    const commandForExecution = withRemoteEnv(wrapRemoteCommand(command), env);
     try {
       const result = await sshShellPool.exec(hostId, commandForExecution, timeout, { signal, onOutput });
       auditService?.log({
@@ -168,7 +168,7 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
       if (signal?.aborted) return reject(makeAbortError());
       const startAt = Date.now();
       const commandForAudit = auditCommand || command;
-      const commandForExecution = withRemoteEnv(command, env);
+      const commandForExecution = withRemoteEnv(wrapRemoteCommand(command), env);
       let settled = false;
       let timer = null;
       let targetClient = null;
@@ -352,8 +352,19 @@ function withRemoteEnv(command, env) {
   return `${exports}\n${command}`;
 }
 
+function wrapRemoteCommand(command) {
+  const script = String(command || '');
+  return [
+    'if command -v bash >/dev/null 2>&1; then',
+    `  exec bash -lc ${shellQuote(script)}`,
+    'else',
+    `  exec sh -lc ${shellQuote(script)}`,
+    'fi',
+  ].join('\n');
+}
+
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-module.exports = { createBridgeService };
+module.exports = { createBridgeService, __private: { wrapRemoteCommand } };

@@ -9,7 +9,7 @@ import {
   type IdeTimelineItem,
   type IdeToolTimelineItem,
 } from '@/composables/useIdeChat';
-import { renderMarkdown } from '@/utils/markdown';
+import { renderMarkdown, streamingPlainText } from '@/utils/markdown';
 import { parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 
 const props = withDefaults(defineProps<{
@@ -46,6 +46,10 @@ function messageLabel(item: IdeChatMessage): string {
 function messageDisplayText(item: IdeChatMessage, index: number): string {
   if (item.role !== 'assistant') return item.text;
   return item.text;
+}
+
+function messageStreamingText(item: IdeChatMessage, index: number): string {
+  return streamingPlainText(messageDisplayText(item, index));
 }
 
 function systemIcon(item: IdeSystemTimelineItem): string {
@@ -245,7 +249,12 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
         </div>
         <div class="ide-agent-bubble">
           <div
-            v-if="messageDisplayText(item, index)"
+            v-if="messageDisplayText(item, index) && item.role === 'assistant' && item.status === 'streaming'"
+            class="ide-agent-markdown ide-agent-streaming-text"
+            v-text="messageStreamingText(item, index)"
+          ></div>
+          <div
+            v-else-if="messageDisplayText(item, index)"
             class="markdown-body ide-agent-markdown"
             v-html="renderMarkdown(messageDisplayText(item, index), { tables: 'safe', inlineCode: item.role === 'assistant' ? 'plain' : 'safe' })"
           ></div>
@@ -545,6 +554,10 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   line-height: 1.62;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+.ide-agent-streaming-text {
+  white-space: pre-wrap;
 }
 
 .ide-agent-markdown :deep(.markdown-code-block),

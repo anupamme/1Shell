@@ -37,6 +37,7 @@ vm.runInNewContext(compiled, {
 }, { filename: sourcePath });
 
 const { renderMarkdown } = moduleContext.exports;
+const { streamingPlainText } = moduleContext.exports;
 const { hasSuspiciousInlineCode, shouldRenderInlineCode } = moduleContext.exports.__markdownInlineCodeTest;
 
 const systemReport = [
@@ -74,6 +75,22 @@ assert.ok(
 assert.ok(
   !partialStreamHtml.includes('`'),
   'streaming partial inline markers must not be visible',
+);
+const partialStreamText = streamingPlainText([
+  '## 主机信息',
+  '- 主机名：`gs-weidu12123-lax-1',
+  '- CPU 使用率：约 **1.64',
+  '- Load：`0.19`',
+].join('\n'));
+assert.strictEqual(
+  partialStreamText,
+  [
+    '主机信息',
+    '- 主机名：gs-weidu12123-lax-1',
+    '- CPU 使用率：约 1.64',
+    '- Load：0.19',
+  ].join('\n'),
+  'streaming plain text should remove partial inline/bold markers before markdown parsing',
 );
 
 const fencedHtml = renderMarkdown([

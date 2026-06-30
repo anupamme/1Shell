@@ -20,7 +20,7 @@ import {
   type AgentGoalCommand,
 } from '@/utils/agentGoal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
-import { renderMarkdown } from '@/utils/markdown';
+import { renderMarkdown, streamingPlainText } from '@/utils/markdown';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 import { parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlashCommand } from '@/utils/agentSlashCommands';
@@ -117,6 +117,10 @@ function hasProbeListResult(tool: IdeToolTimelineItem): boolean {
 
 function assistantDisplayText(item: IdeChatMessage, index: number): string {
   return item.text;
+}
+
+function assistantStreamingText(item: IdeChatMessage, index: number): string {
+  return streamingPlainText(assistantDisplayText(item, index));
 }
 
 // ── state ──
@@ -1768,7 +1772,8 @@ function onSecretRefSubmit(secretRef: string): void {
             <div v-else class="flex items-start gap-3">
               <span class="w-7 h-7 mt-0.5 rounded-full bg-white dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.08] shadow-sm flex items-center justify-center shrink-0"><AppIcon name="spark" :size="13" class="text-slate-500 dark:text-slate-300" /></span>
               <div class="min-w-0 flex-1">
-                <div v-if="assistantDisplayText(item as IdeChatMessage, index)" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 space-y-3 markdown-body agent-md" v-html="renderMarkdown(assistantDisplayText(item as IdeChatMessage, index), { tables: 'safe', inlineCode: 'plain' })"></div>
+                <div v-if="assistantDisplayText(item as IdeChatMessage, index) && (item as IdeChatMessage).status === 'streaming'" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words" v-text="assistantStreamingText(item as IdeChatMessage, index)"></div>
+                <div v-else-if="assistantDisplayText(item as IdeChatMessage, index)" class="text-sm leading-relaxed text-slate-700 dark:text-slate-200 space-y-3 markdown-body agent-md" v-html="renderMarkdown(assistantDisplayText(item as IdeChatMessage, index), { tables: 'safe', inlineCode: 'plain' })"></div>
                 <div v-else class="flex items-center gap-1.5 py-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-sky-400/60 animate-pulse"></span>
                   <span class="w-1.5 h-1.5 rounded-full bg-sky-400/60 animate-pulse" style="animation-delay: 0.15s"></span>

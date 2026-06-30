@@ -345,6 +345,44 @@ function stripInlineCodeMarkersOutsideFences(source: string): string {
   return out.join('\n');
 }
 
+function transformLinesOutsideFences(source: string, transformLine: (line: string) => string): string {
+  const lines = String(source || '').split(/\r?\n/);
+  const out: string[] = [];
+  let fence: { marker: '`' | '~'; length: number } | null = null;
+
+  for (const line of lines) {
+    const fenceLine = isFenceLine(line);
+    if (fence) {
+      out.push(line);
+      if (canCloseFence(line, fence)) fence = null;
+      continue;
+    }
+    if (fenceLine) {
+      fence = fenceLine;
+      out.push(line);
+      continue;
+    }
+    out.push(transformLine(line));
+  }
+  return out.join('\n');
+}
+
+function stripStreamingMarkdownMarkersFromLine(line: string): string {
+  return line
+    .replace(/^(\s{0,3})#{1,6}\s+/, '$1')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/\*\*/g, '')
+    .replace(/__/g, '');
+}
+
+export function streamingPlainText(text: string): string {
+  return transformLinesOutsideFences(
+    stripInlineCodeMarkersOutsideFences(String(text || '')),
+    stripStreamingMarkdownMarkersFromLine,
+  );
+}
+
 function isUnsafeTableBlock(lines: string[]): boolean {
   if (lines.length < 2) return true;
   const header = splitTableLine(lines[0]);
@@ -405,7 +443,7 @@ export function renderMarkdown(text: string, options: RenderMarkdownOptions = {}
   const mode = normalizeTableMode(options.tables);
   const inlineCodeMode = normalizeInlineCodeMode(options.inlineCode);
   const raw = String(text || '');
-  const plainSource = inlineCodeMode === 'plain' ? stripInlineCodeMarkersOutsideFences(raw) : raw;
+  const plainSource = inlineCodeMode === 'plain' ? streamingPlainText(raw) : raw;
   const source = mode === 'safe' ? protectUnsafeMarkdownTables(plainSource) : plainSource;
   const renderer = rendererFor(mode, inlineCodeMode, shouldRenderInlineCode(source, inlineCodeMode));
   return sanitizeHtml(renderer.render(source));
