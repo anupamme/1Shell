@@ -4,7 +4,7 @@
  * MCP Server preset 集合(v3 plan §4.1 + §4.3)
  *
  * 用户在 "/agent" 的 Tools 面板里可选一个 preset,一键把这个 MCP server 添加到
- * 某个 CLI(claude/codex/opencode) 的沙箱 MCP 配置里(deep-merge,默认 disabled)。
+ * 某个 CLI(claude/codex/opencode) 的原生 MCP 配置里(deep-merge,默认 disabled)。
  *
  * 字段含义:
  *   id           — 内部唯一 id

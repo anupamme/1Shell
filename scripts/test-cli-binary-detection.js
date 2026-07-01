@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { __test } = require('../src/agents/cli-sandbox');
+const { __test } = require('../src/agents/native-cli-config');
 
 const opencodeManifest = { id: 'opencode', name: 'OpenCode' };
 

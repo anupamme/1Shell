@@ -1,8 +1,4 @@
 <script setup lang="ts">
-// AgentPanel.vue — MainConsole 刀 5b · AI Agent 右栏（与 1Shell AI 在右栏 tab 切换）
-// 1:1 复刻 [public/agent-panel.js](public/agent-panel.js) UI + [public/index.html:460-492](public/index.html#L460-L492)
-//
-// feedback-right-aside-tabs：右栏用 tab 切换，Agent 激活时右栏 w-[40%]（2:4:4）
 import { onMounted, ref } from 'vue';
 
 import { useAgentPanel } from '@/composables/useAgentPanel';
@@ -20,50 +16,10 @@ onMounted(() => {
 
 async function handleStart(): Promise<void> {
   try {
-    await agent.startAgent(false);
+    await agent.startAgent();
   } catch (err) {
     notify.error((err as Error).message || '启动 Agent 失败');
   }
-}
-
-async function handleStartLocal(): Promise<void> {
-  try {
-    await agent.startAgent(true);
-  } catch (err) {
-    notify.error((err as Error).message || '本地启动 Agent 失败');
-  }
-}
-
-async function handleNewSession(): Promise<void> {
-  try {
-    await agent.newSession();
-  } catch (err) {
-    notify.error((err as Error).message || '新建会话失败');
-  }
-}
-
-async function handleSetup(): Promise<void> {
-  try {
-    await agent.setupMcp();
-    notify.success('MCP 沙箱已就绪');
-  } catch (err) {
-    notify.error((err as Error).message || 'MCP 配置失败');
-  }
-}
-
-async function handleModelChange(event: Event): Promise<void> {
-  const modelId = (event.target as HTMLSelectElement).value;
-  if (!modelId) return;
-  try {
-    await agent.setSelectedModel(modelId);
-    notify.success('模型已切换');
-  } catch (err) {
-    notify.error((err as Error).message || '模型切换失败');
-  }
-}
-
-function activeModelValue(): string {
-  return agent.activeModelOptions.value.find((model) => model.active)?.id || agent.activeModelOptions.value[0]?.id || '';
 }
 
 function getSessionDotColor(status: string): string {
@@ -76,7 +32,7 @@ function getSessionDotColor(status: string): string {
 <template>
   <div class="agent-panel">
     <!-- 会话标签页（类似终端 tabs） -->
-    <div class="agent-tabs">
+    <div v-if="agent.hasSessions.value" class="agent-tabs">
       <div
         v-for="[sessionKey, sess] in agent.sessions.value"
         :key="sessionKey"
@@ -93,11 +49,6 @@ function getSessionDotColor(status: string): string {
           @click.stop="agent.closeSession(sessionKey)"
         >×</button>
       </div>
-      <button
-        type="button"
-        class="agent-new-session-btn"
-        @click="handleNewSession"
-      >+ 新会话</button>
     </div>
 
     <!-- 标题栏 -->
@@ -119,31 +70,9 @@ function getSessionDotColor(status: string): string {
           :key="p.id"
           :value="p.id"
         >
-          {{ p.label }}{{ p.configured ? (p.activeProviderName ? ` · ${p.activeProviderName}` : '') : ' · 未配置 API' }}
+          {{ p.label }}{{ p.binaryPath ? ` · ${p.binaryPath}` : '' }}
         </option>
       </select>
-      <select
-        :value="activeModelValue()"
-        class="agent-model-select"
-        :disabled="agent.activeModelOptions.value.length <= 1"
-        title="切换 1Shell 网关模型"
-        @change="handleModelChange"
-      >
-        <option
-          v-for="model in agent.activeModelOptions.value"
-          :key="model.id"
-          :value="model.id"
-        >
-          {{ model.label }}
-        </option>
-      </select>
-      <button
-        type="button"
-        class="agent-setup-btn"
-        :class="{ 'agent-setup-btn--done': agent.mcpConfigured.value }"
-        title="一键将当前 AI CLI 工具接入 1Shell MCP"
-        @click="handleSetup"
-      >{{ agent.mcpConfigured.value ? '✓ 沙箱就绪' : '⚡ 创建沙箱' }}</button>
       <span class="agent-status-text">{{ agent.statusText.value }}</span>
     </div>
 
@@ -157,11 +86,6 @@ function getSessionDotColor(status: string): string {
         class="agent-btn agent-btn-start"
         @click="handleStart"
       >启动</button>
-      <button
-        type="button"
-        class="agent-btn agent-btn-start-local"
-        @click="handleStartLocal"
-      >本地启动</button>
       <button
         type="button"
         class="agent-btn agent-btn-stop"

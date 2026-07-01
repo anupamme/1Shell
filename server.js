@@ -57,7 +57,7 @@ const { createPanelWorkloadsRouter } = require('./src/routes/panel-workloads.rou
 const { createAiTaskRouter } = require('./src/routes/ai-task.routes');
 const { createIdeSessionRouter } = require('./src/routes/ide-session.routes');
 const { createScriptRouter } = require('./src/routes/script.routes');
-const { createCliSandbox } = require('./src/agents/cli-sandbox');
+const { createNativeCliConfig } = require('./src/agents/native-cli-config');
 const { createMcpPresetStore } = require('./src/agents/mcp-preset-store');
 const { createAgentProviders } = require('./src/agents/providers');
 const { createAgentPtyService } = require('./src/agents/agent-pty.service');
@@ -142,8 +142,8 @@ const hostService = createHostService({ hostRepository });
 const auditService = createAuditService({ db, dataDir });
 const sessionService = createSessionService({ hostService });
 const mcpPresetStore = createMcpPresetStore({ dataDir });
-const cliSandbox = createCliSandbox({ dataDir, bridgeToken: BRIDGE_TOKEN, port: PORT, proxyConfigStore, claudeCodeSkillRegistry, mcpPresetStore, logger: log });
-const agentProviders = createAgentProviders({ cliSandbox });
+const nativeCliConfig = createNativeCliConfig({ dataDir, bridgeToken: BRIDGE_TOKEN, port: PORT, proxyConfigStore, claudeCodeSkillRegistry, mcpPresetStore, logger: log });
+const agentProviders = createAgentProviders({ nativeCliConfig });
 const agentPtyService = createAgentPtyService({ hostService, providerRegistry: agentProviders });
 const sshPool = createSshPool({ hostService });
 const sshShellPool = createSshShellPool({ hostService });
@@ -203,7 +203,7 @@ const ideTools = createIdeTools({
   probeDiagService,
   probeAgentInstallerService,
   dataDir,
-  cliSandbox,
+  nativeCliConfig,
   harness,
   agentRuntime,
   skillRegistry,
@@ -263,8 +263,8 @@ app.use('/api/auth', createAuthRouter(authService, twoFactorService));
 app.use('/api', createBridgeRouter({ bridgeService }));
 app.use('/mcp', createMcpRouter({ mcpService, remoteMcpService }));
 
-// 协议转换代理：不走 Web session，但仅允许 localhost 或 PROXY_TOKEN 调用
-// Claude Code 设置 ANTHROPIC_BASE_URL=http://localhost:PORT/api/proxy 即可
+// Skill Runner 内部协议端点：不走 Web session，但仅允许 localhost 或 PROXY_TOKEN 调用。
+// Claude Code / Codex / OpenCode 从 4.7 开始走各自原生配置，不再走这里的 Agent proxy。
 app.use('/api/proxy', createProxyRouter({ proxyConfigStore, proxyToken: PROXY_TOKEN }));
 
 app.use('/api', createProbeAgentPublicRouter({ probeAgentService }));
@@ -295,7 +295,7 @@ app.use('/api', createProbeTrafficRouter({ trafficService: probeTrafficService, 
 app.use('/api', createProbeAlertRouter({ alertService: probeAlertService }));
 app.use('/api', createProbeDiagRouter({ diagService: probeDiagService }));
 app.use('/api', createPanelWorkloadsRouter({ panelWorkloadsService }));
-app.use('/api', createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }));
+app.use('/api', createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetStore }));
 app.use('/api', createRemoteMcpRouter({ remoteMcpService, mcpService }));
 app.use('/api', createSecuritySettingsRouter({ securitySettingsService, bridgeService, hostService, auditService }));
 app.use('/api', createFileRouter({ fileService }));

@@ -38,6 +38,13 @@ try {
     presetId: 'openai',
     contextTokenLimit: 200000,
     maxOutputTokens: 8192,
+    claudeModels: {
+      sonnet: { model: 'claude-sonnet-4-6[1M]', displayName: 'Claude Sonnet 4.6' },
+      opus: { model: 'claude-opus-4-8', displayName: 'Claude Opus 4.8' },
+      fable: { model: 'claude-opus-4-8', displayName: 'Claude Fable' },
+      haiku: { model: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5' },
+    },
+    includeCoAuthoredBy: false,
   });
   assert.ok(id1, 'addProvider 应返回 id');
 
@@ -52,6 +59,9 @@ try {
   assert.strictEqual(p1.models.length, 1, '旧单模型 provider 应投影出默认 models[]');
   assert.strictEqual(p1.models[0].apiModel, 'gpt-5');
   assert.strictEqual(p1.activeModelId, p1.models[0].id);
+  assert.strictEqual(p1.claudeModels.sonnet.model, 'claude-sonnet-4-6[1M]');
+  assert.strictEqual(p1.claudeModels.haiku.displayName, 'Claude Haiku 4.5');
+  assert.strictEqual(p1.includeCoAuthoredBy, false);
   assert.strictEqual(p1.apiKeySet, true);
   assert.ok(!p1.apiKey.includes('sk-test-key-12345'), 'apiKey 应脱敏');
 
@@ -87,6 +97,10 @@ try {
   const p4 = list4.providers.find(p => p.id === id2);
   assert.strictEqual(p4.reasoningEffort, 'medium');
   assert.strictEqual(p4.presetId, 'deepseek');
+
+  assert.ok(store.updateProvider('claude-code', id2, { reasoningEffort: 'max' }));
+  const maxEffortProvider = store.listProviders('claude-code').providers.find(p => p.id === id2);
+  assert.strictEqual(maxEffortProvider.reasoningEffort, 'max', 'Claude Code 最高档应保存为 max,不是 xhigh');
 
   // getActiveProvider 返回原始(含 reasoningEffort,不脱敏)
   store.setActive('claude-code', id1);
@@ -209,6 +223,49 @@ try {
   assert.strictEqual(copiedOpencode.enabled, true);
   assert.strictEqual(store.copyProvider('opencode', 'missing-provider'), null, '复制不存在的 provider 应返回 null');
 
+  // native import — 原生文件扫描结果 upsert 到界面缓存；后续扫描不应清空旧 key
+  const nativeImport = store.upsertNativeProvider('codex', {
+    name: 'cpa-codex',
+    apiBase: 'https://codex.weidu.my/v1',
+    apiKey: 'sk-native-codex',
+    upstreamProtocol: 'openai',
+    model: 'gpt-5.5',
+    reasoningEffort: 'high',
+    activeModelId: 'native-gpt-5-5',
+    models: [
+      { id: 'native-gpt-5-5', apiModel: 'gpt-5.5', displayName: 'gpt-5.5', reasoningEffort: 'high', enabled: true },
+    ],
+    nativeProviderId: 'cpa',
+    codexProviderId: 'cpa',
+  });
+  assert.strictEqual(nativeImport.id, 'native-codex-cpa');
+  const nativeListed = store.listProviders('codex').providers.find(p => p.id === nativeImport.id);
+  assert.strictEqual(nativeListed.name, 'cpa-codex');
+  assert.strictEqual(nativeListed.apiBase, 'https://codex.weidu.my/v1');
+  assert.strictEqual(nativeListed.apiKeySet, true);
+  assert.strictEqual(nativeListed.nativeSource, 'host-config');
+  assert.strictEqual(nativeListed.nativeProviderId, 'cpa');
+
+  const nativeUpdate = store.upsertNativeProvider('codex', {
+    name: 'cpa-codex-renamed',
+    apiBase: 'https://codex.weidu.my/v1',
+    apiKey: '',
+    upstreamProtocol: 'openai',
+    model: 'gpt-5.6',
+    reasoningEffort: 'xhigh',
+    activeModelId: 'native-gpt-5-6',
+    models: [
+      { id: 'native-gpt-5-6', apiModel: 'gpt-5.6', displayName: 'gpt-5.6', reasoningEffort: 'xhigh', enabled: true },
+    ],
+    nativeProviderId: 'cpa',
+    codexProviderId: 'cpa',
+  });
+  assert.strictEqual(nativeUpdate.id, nativeImport.id, '重复 native import 应更新同一条 provider');
+  const nativeRaw = store.getProvider('codex', nativeImport.id);
+  assert.strictEqual(nativeRaw.apiKey, 'sk-native-codex', 'native import 未读到新 key 时应保留旧 key');
+  assert.strictEqual(nativeRaw.model, 'gpt-5.6');
+  assert.strictEqual(nativeRaw.reasoningEffort, 'xhigh');
+
   assert.ok(store.deleteProvider('codex', multiId), '删除 Codex provider 应成功');
   const afterDeleteCodex = store.listProviders('codex');
   const afterDeleteOpenCode = store.listProviders('opencode');
@@ -304,6 +361,7 @@ console.log('  - provider.models[] 可存多个模型档案并投影活跃模型
 console.log('  - activeRoute 可把入口路由到 provider/model profile');
 console.log('  - 各入口 provider 独立，删除一个入口不影响其他入口');
 console.log('  - provider 复制会保留真实 apiKey 并追加 -copy');
+console.log('  - native import 会 upsert 本机配置并保留旧 apiKey');
 console.log('  - 旧全局 Provider 池会拆成各入口本地副本');
 console.log('  - 非法 effort 归一化为 auto');
 console.log('  - reasoning 注入对 reasoning model 生效、对非 reasoning model 跳过');

@@ -4,14 +4,14 @@
  * Reasoning effort 映射 + reasoning model 白名单。
  *
  * v3 plan §4.2 双轨策略的"轨 2"(proxy 请求体注入)由本模块提供数据;
- * "轨 1"(manifest 配置写入)由 cli-sandbox 的 template builder 消费 `getEffortLabel()`。
+ * "轨 1"(manifest 配置写入)由 native-cli-config 的 template builder 消费 `getEffortLabel()`。
  *
  * 数据原则:
  *   - 白名单宁缺勿滥,只列已知支持 reasoning 的模型前缀(模型迭代快,4.3 用户反馈再扩)
  *   - effort 档位与上游 API 字段含义对齐;不发明 1Shell 自有档位
  */
 
-const EFFORT_LABELS = ['auto', 'low', 'medium', 'high'];
+const EFFORT_LABELS = ['auto', 'low', 'medium', 'high', 'max', 'xhigh'];
 
 // Anthropic thinking.budget_tokens 映射(单位:输出 token 数)
 // 参考:claude-3.7-sonnet thinking 上限 64000;>=1024 才有效
@@ -19,6 +19,7 @@ const ANTHROPIC_BUDGET_TOKENS = {
   low: 4000,
   medium: 16000,
   high: 64000,
+  max: 64000,
 };
 
 // OpenAI reasoning_effort 字符串(o-series / gpt-5-thinking 都接受这种枚举)
@@ -26,6 +27,8 @@ const OPENAI_EFFORT_VALUES = {
   low: 'low',
   medium: 'medium',
   high: 'high',
+  max: 'xhigh',
+  xhigh: 'xhigh',
 };
 
 // reasoning model 前缀白名单(按上游 protocol 分组)
@@ -108,15 +111,16 @@ function injectOpenAIReasoningEffort(body, effort) {
 
 /**
  * 给 codex `config.toml` template builder 用 — 把 1Shell 的 effort 翻译成 codex `model_reasoning_effort` 行。
- * codex 在 config.toml 里也用 low/medium/high 三档(auto = 不写这一行,让 codex 默认决定)。
+ * codex 在 config.toml 里使用 low/medium/high/xhigh(auto = 不写这一行,让 codex 默认决定)。
  *
  * @param {string} effort
  * @returns {string|null} — TOML 行(不含换行)或 null(表示不写)
  */
 function codexConfigTomlReasoningLine(effort) {
   if (!effort || effort === 'auto') return null;
-  if (!OPENAI_EFFORT_VALUES[effort]) return null;
-  return `model_reasoning_effort = "${effort}"`;
+  const value = OPENAI_EFFORT_VALUES[effort];
+  if (!value) return null;
+  return `model_reasoning_effort = "${value}"`;
 }
 
 module.exports = {

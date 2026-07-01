@@ -27,9 +27,9 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { id: SKILLS_SLOT_ID, label: '1Shell AI',   desc: 'Agent · Skill 引擎',         supportedUpstream: ['anthropic', 'openai'] },
-  { id: 'claude-code',   label: 'Claude Code', desc: 'Anthropic 官方 CLI',          supportedUpstream: ['anthropic', 'openai'] },
-  { id: 'codex',          label: 'Codex',       desc: 'OpenAI 官方 CLI',             supportedUpstream: ['openai', 'anthropic'] },
-  { id: 'opencode',       label: 'OpenCode',   desc: '开源终端 AI 助手',             supportedUpstream: ['openai', 'anthropic'] },
+  { id: 'claude-code',   label: 'Claude Code', desc: 'Anthropic 官方 CLI',          supportedUpstream: ['anthropic'] },
+  { id: 'codex',          label: 'Codex',       desc: 'OpenAI 官方 CLI',             supportedUpstream: ['openai'] },
+  { id: 'opencode',       label: 'OpenCode',   desc: '开源终端 AI 助手',             supportedUpstream: ['openai'] },
 ];
 
 // ── state ──
@@ -45,6 +45,7 @@ const activeProviderId = ref<string | null>(null);
 const loadingProviders = ref(false);
 const testingProviderIds = ref<Set<string>>(new Set());
 const copyingProviderIds = ref<Set<string>>(new Set());
+const enablingProviderIds = ref<Set<string>>(new Set());
 
 // CLI tabs
 const tools = ref<ToolInfo[]>([]);
@@ -67,7 +68,7 @@ const toolStatus = computed(() => {
   const t = currentTool.value;
   if (!t) return { label: '未知', cls: 'text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.06]' };
   switch (t.status) {
-    case 'sandboxed': return { label: '沙箱就绪', cls: 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20' };
+    case 'configured': return { label: '配置就绪', cls: 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20' };
     case 'detected':  return { label: '已检测到', cls: 'text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-500/10 border-sky-200 dark:border-sky-500/20' };
     default:          return { label: '未安装',   cls: 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/20' };
   }
@@ -139,22 +140,52 @@ async function setActive(providerId: string): Promise<void> {
   try {
     await requestJson(`/api/agent/providers/${encodeURIComponent(activeTabId.value)}/${encodeURIComponent(providerId)}/activate`, { method: 'PUT' } as any);
     activeProviderId.value = providerId;
-    notify.success('已切换活跃渠道');
+    notify.success('已切换当前配置方案');
   } catch {
     notify.error('切换失败');
+  }
+}
+
+function isProviderNativeEnabled(p: ProviderInfo): boolean {
+  if (isSkillsTab.value) return false;
+  const nativeConfig = currentTool.value?.nativeConfig;
+  return Boolean(nativeConfig?.configured && nativeConfig?.meta?.providerId === p.id);
+}
+
+async function enableProviderConfig(p: ProviderInfo): Promise<void> {
+  if (isSkillsTab.value || enablingProviderIds.value.has(p.id)) return;
+  const cliId = activeTabId.value;
+  setBusyFlag(enablingProviderIds, p.id, true);
+  try {
+    await requestJson(`/api/agent/providers/${encodeURIComponent(cliId)}/${encodeURIComponent(p.id)}/activate`, {
+      method: 'PUT',
+      body: JSON.stringify({ modelId: p.activeModelId || p.routeModelId || null }),
+    } as any);
+    activeProviderId.value = p.id;
+    const resp = await requestJson<{ ok: boolean; error?: string }>(
+      `/api/agent/native-config/enable/${encodeURIComponent(cliId)}`,
+      { method: 'POST', body: JSON.stringify({}) } as any,
+    );
+    if (!resp.ok) throw new Error(resp.error || '启用失败');
+    notify.success(`${p.name || '配置方案'} 已启用`);
+    await Promise.all([loadProviders(cliId), loadScan()]);
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : String(err), 5000);
+  } finally {
+    setBusyFlag(enablingProviderIds, p.id, false);
   }
 }
 
 async function deleteProvider(providerId: string): Promise<void> {
   const p = providers.value.find(x => x.id === providerId);
   const ok = await confirm({
-    title: '删除渠道',
-    message: `确定删除 ${activeTab.value.label} 的渠道"${p?.name || providerId}"吗？此操作不会影响其他入口。`,
+    title: '删除配置方案',
+    message: `确定删除 ${activeTab.value.label} 的配置方案"${p?.name || providerId}"吗？此操作不会影响其他入口。`,
   });
   if (!ok) return;
   try {
     await requestJson(`/api/agent/providers/${encodeURIComponent(activeTabId.value)}/${encodeURIComponent(providerId)}`, { method: 'DELETE' } as any);
-    notify.success('渠道已删除');
+    notify.success('配置方案已删除');
     await loadProviders(activeTabId.value);
   } catch {
     notify.error('删除失败');
@@ -171,7 +202,7 @@ async function testProvider(p: ProviderInfo): Promise<void> {
     });
     if (resp.ok) {
       const ms = typeof resp.ms === 'number' ? ` · ${resp.ms}ms` : '';
-      notify.success(`${p.name || '渠道'} 测试通过${ms}`);
+      notify.success(`${p.name || '配置方案'} 测试通过${ms}`);
     } else {
       notify.error(resp.error || '测试失败', 8000);
     }
@@ -190,7 +221,7 @@ async function copyProvider(p: ProviderInfo): Promise<void> {
       method: 'POST',
       body: JSON.stringify({}),
     });
-    notify.success(`${p.name || '渠道'} 已复制为 ${p.name || 'Provider'}-copy`);
+    notify.success(`${p.name || '配置方案'} 已复制为 ${p.name || '配置方案'}-copy`);
     await loadProviders(activeTabId.value);
   } catch (err) {
     notify.error(err instanceof Error ? err.message : String(err), 8000);
@@ -283,17 +314,17 @@ async function onUpdate(): Promise<void> {
   await onInstall();
 }
 
-async function onEnsureSandbox(): Promise<void> {
+async function onEnsureNativeConfig(): Promise<void> {
   const id = activeTabId.value;
   const tool = currentTool.value;
   setBusyFlag(ensuringIds, id, true);
   try {
-    const resp = await requestJson<{ ok: boolean; error?: string }>(`/api/agent/sandbox/ensure/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({}) } as any);
+    const resp = await requestJson<{ ok: boolean; error?: string }>(`/api/agent/native-config/enable/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({}) } as any);
     if (resp.ok) {
-      notify.success(`${tool?.name || id} 沙箱已就绪`);
+      notify.success(`${tool?.name || id} 配置已启用`);
       await loadScan();
     } else {
-      notify.error(resp.error || '创建失败', 5000);
+      notify.error(resp.error || '启用失败', 5000);
     }
   } catch (err) {
     notify.error(err instanceof Error ? err.message : String(err), 5000);
@@ -302,14 +333,14 @@ async function onEnsureSandbox(): Promise<void> {
   }
 }
 
-async function onResetSandbox(): Promise<void> {
+async function onResetNativeConfig(): Promise<void> {
   const id = activeTabId.value;
   const tool = currentTool.value;
-  if (!window.confirm(`确定要重置 ${tool?.name || id} 的沙箱吗？配置文件将被清除。`)) return;
+  if (!window.confirm(`确定要重置 ${tool?.name || id} 的 1Shell 配置状态吗？\n\n这不会删除整个主机配置目录，只会清除 1Shell 的覆盖标记。`)) return;
   try {
-    const resp = await requestJson<{ ok: boolean; error?: string }>(`/api/agent/sandbox/reset/${encodeURIComponent(id)}`, { method: 'POST' } as any);
+    const resp = await requestJson<{ ok: boolean; error?: string }>(`/api/agent/native-config/reset/${encodeURIComponent(id)}`, { method: 'POST' } as any);
     if (resp.ok) {
-      notify.success(`${tool?.name || id} 沙箱已重置`);
+      notify.success(`${tool?.name || id} 配置状态已重置`);
       await loadScan();
     } else {
       notify.error(resp.error || '重置失败', 5000);
@@ -378,11 +409,6 @@ function fmtBase(url: string): string {
   catch { return url.replace(/https?:\/\//, '').replace(/\/+$/, ''); }
 }
 
-function fmtTokenLimit(value?: number | null): string {
-  if (!value) return '';
-  return value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
-}
-
 // ── lifecycle ──
 function switchTab(cliId: string): void {
   if (activeTabId.value === cliId) return;
@@ -402,7 +428,7 @@ onMounted(() => {
     <!-- ═══ 左侧：竖排 tab 导航 ═══ -->
     <nav class="w-48 shrink-0 flex flex-col border-r border-slate-200 dark:border-white/[0.05] bg-white dark:bg-[#0f1321] select-none">
       <div class="px-4 py-3">
-        <h3 class="text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-3">AI 渠道</h3>
+        <h3 class="text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-3">模型接入</h3>
       </div>
       <button
         v-for="tab in TABS"
@@ -428,7 +454,7 @@ onMounted(() => {
           <div>
             <h2 class="text-base font-semibold text-slate-800 dark:text-slate-200">1Shell AI 引擎</h2>
             <p class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-              Agent 与 Skill 执行的模型渠道 · 已启用 <span class="font-semibold text-sky-600 dark:text-sky-400">{{ enabledCount }}</span> 个
+              Agent 与 Skill 执行的模型接入 · 已启用 <span class="font-semibold text-sky-600 dark:text-sky-400">{{ enabledCount }}</span> 个
             </p>
           </div>
           <button
@@ -437,7 +463,7 @@ onMounted(() => {
             @click="openAddModal"
           >
             <AppIcon name="plus" :size="14" />
-            添加渠道
+            添加接入
           </button>
         </header>
 
@@ -451,13 +477,13 @@ onMounted(() => {
             <div class="w-14 h-14 rounded-2xl bg-slate-100 dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.06] flex items-center justify-center mb-4">
               <AppIcon name="spark" :size="24" class="text-slate-300 dark:text-slate-600" />
             </div>
-            <h3 class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">暂无配置的渠道</h3>
-            <p class="text-xs text-slate-400 dark:text-slate-600 mb-5">添加 API 渠道后，在 Agent 页面使用 /model 即可切换</p>
+            <h3 class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">暂无配置的模型接入</h3>
+            <p class="text-xs text-slate-400 dark:text-slate-600 mb-5">添加模型接入后，在 Agent 页面使用 /model 即可切换</p>
             <button
               type="button"
               class="h-8 px-4 rounded-lg bg-sky-500 hover:bg-sky-600 text-white text-xs font-medium transition-colors cursor-pointer"
               @click="openAddModal"
-            >添加渠道</button>
+            >添加接入</button>
           </div>
 
           <!-- provider cards -->
@@ -501,10 +527,6 @@ onMounted(() => {
                   <span class="truncate">{{ p.model || '未指定模型' }}</span>
                   <span class="text-slate-300 dark:text-slate-700">·</span>
                   <span class="truncate">{{ fmtBase(p.apiBase || '') }}</span>
-                  <span v-if="p.contextTokenLimit" class="text-slate-300 dark:text-slate-700">·</span>
-                  <span v-if="p.contextTokenLimit" class="shrink-0">ctx {{ fmtTokenLimit(p.contextTokenLimit) }}</span>
-                  <span v-if="p.maxOutputTokens" class="text-slate-300 dark:text-slate-700">·</span>
-                  <span v-if="p.maxOutputTokens" class="shrink-0">out {{ fmtTokenLimit(p.maxOutputTokens) }}</span>
                   <span v-if="!p.apiKeySet" class="text-amber-500 dark:text-amber-400 shrink-0">· 未设 Key</span>
                 </div>
               </div>
@@ -515,7 +537,7 @@ onMounted(() => {
                   type="button"
                   class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
                   :disabled="testingProviderIds.has(p.id)"
-                  title="测试渠道"
+                  title="测试配置方案"
                   @click.stop="testProvider(p)"
                 >
                   <AppIcon name="radio" :size="13" />
@@ -525,7 +547,7 @@ onMounted(() => {
                   type="button"
                   class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
                   :disabled="copyingProviderIds.has(p.id)"
-                  title="复制渠道"
+                  title="复制配置方案"
                   @click.stop="copyProvider(p)"
                 >
                   <AppIcon name="copy" :size="13" />
@@ -534,7 +556,7 @@ onMounted(() => {
                 <button
                   type="button"
                   class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
-                  title="编辑渠道"
+                  title="编辑配置方案"
                   @click.stop="openEditModal(p.id)"
                 >
                   <AppIcon name="cog" :size="13" />
@@ -543,7 +565,7 @@ onMounted(() => {
                 <button
                   type="button"
                   class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
-                  title="删除渠道"
+                  title="删除配置方案"
                   @click.stop="deleteProvider(p.id)"
                 >
                   <AppIcon name="close" :size="13" />
@@ -620,9 +642,9 @@ onMounted(() => {
                 <span class="text-slate-400 dark:text-slate-500">版本</span>
                 <span class="text-slate-700 dark:text-slate-200">{{ currentTool.binary.version }}</span>
               </div>
-              <div v-if="currentTool.sandbox?.sandboxDir" class="flex justify-between">
-                <span class="text-slate-400 dark:text-slate-500">沙箱目录</span>
-                <span class="text-slate-700 dark:text-slate-200 font-mono truncate max-w-[300px]">{{ currentTool.sandbox.sandboxDir }}</span>
+              <div v-if="currentTool.nativeConfig?.configDir" class="flex justify-between">
+                <span class="text-slate-400 dark:text-slate-500">配置目录</span>
+                <span class="text-slate-700 dark:text-slate-200 font-mono truncate max-w-[300px]">{{ currentTool.nativeConfig.configDir }}</span>
               </div>
             </div>
 
@@ -632,14 +654,14 @@ onMounted(() => {
                 type="button"
                 class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-white/[0.15] hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all cursor-pointer"
                 :disabled="ensuringIds.has(activeTabId)"
-                @click="onEnsureSandbox"
-              >{{ ensuringIds.has(activeTabId) ? '创建中...' : '创建沙箱' }}</button>
+                @click="onEnsureNativeConfig"
+              >{{ ensuringIds.has(activeTabId) ? '启用中...' : '启用配置' }}</button>
               <button
-                v-if="currentTool.sandbox?.sandboxDir"
+                v-if="currentTool.nativeConfig?.configDir"
                 type="button"
                 class="h-7 px-2.5 rounded-lg border border-red-200 dark:border-red-500/20 text-[11px] text-red-400 hover:border-red-300 dark:hover:border-red-500/30 hover:bg-red-50 dark:hover:bg-red-500/5 transition-all cursor-pointer"
-                @click="onResetSandbox"
-              >重置沙箱</button>
+                @click="onResetNativeConfig"
+              >重置配置状态</button>
               <button
                 type="button"
                 class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-white/[0.15] hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all cursor-pointer"
@@ -659,10 +681,10 @@ onMounted(() => {
             </div>
           </div>
 
-          <!-- Provider channels for this CLI -->
+          <!-- Native config profiles for this CLI -->
           <div class="rounded-xl border border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#0f1321] p-4">
             <div class="flex items-center justify-between mb-3">
-              <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">API 渠道</h3>
+              <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">原生配置方案</h3>
               <button
                 type="button"
                 class="h-7 px-2.5 rounded-lg border border-sky-200 dark:border-sky-500/30 bg-sky-50 dark:bg-sky-500/10 text-[11px] font-medium text-sky-600 dark:text-sky-400 hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-500/20 transition-all cursor-pointer flex items-center gap-1"
@@ -676,7 +698,7 @@ onMounted(() => {
             <div v-if="loadingProviders" class="text-xs text-slate-400 text-center py-6">加载中...</div>
 
             <div v-else-if="!providers.length" class="text-xs text-slate-400 dark:text-slate-500 text-center py-6">
-              暂无 API 渠道，点击"添加"配置
+              暂无原生配置方案，点击"添加"配置
             </div>
 
             <div v-else class="space-y-2">
@@ -697,16 +719,24 @@ onMounted(() => {
                   </div>
                   <div class="text-[11px] text-slate-400 dark:text-slate-500 truncate">
                     {{ p.model || '未指定模型' }} · {{ fmtBase(p.apiBase || '') }}
-                    <span v-if="p.contextTokenLimit"> · ctx {{ fmtTokenLimit(p.contextTokenLimit) }}</span>
-                    <span v-if="p.maxOutputTokens"> · out {{ fmtTokenLimit(p.maxOutputTokens) }}</span>
                   </div>
                 </div>
                 <div class="shrink-0 flex items-center gap-1 rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50/80 dark:bg-white/[0.035] p-1 shadow-sm">
                   <button
                     type="button"
                     class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                    :disabled="enablingProviderIds.has(p.id)"
+                    title="启用该配置方案到原生配置文件"
+                    @click.stop="enableProviderConfig(p)"
+                  >
+                    <AppIcon name="check" :size="12" />
+                    {{ enablingProviderIds.has(p.id) ? '启用中' : (isProviderNativeEnabled(p) ? '已启用' : '启用') }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
                     :disabled="testingProviderIds.has(p.id)"
-                    title="测试渠道"
+                    title="测试配置方案"
                     @click.stop="testProvider(p)"
                   >
                     <AppIcon name="radio" :size="12" />
@@ -716,7 +746,7 @@ onMounted(() => {
                     type="button"
                     class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
                     :disabled="copyingProviderIds.has(p.id)"
-                    title="复制渠道"
+                    title="复制配置方案"
                     @click.stop="copyProvider(p)"
                   >
                     <AppIcon name="copy" :size="12" />

@@ -14,8 +14,8 @@ interface Props {
 const props = defineProps<Props>();
 
 const emit = defineEmits<{
-  'ensure-sandbox': [id: string];
-  'reset-sandbox': [id: string];
+  'ensure-native-config': [id: string];
+  'reset-native-config': [id: string];
   'config': [id: string];
   'copy-cmd': [id: string];
   'install-cli': [id: string];
@@ -30,9 +30,9 @@ const status = computed(() => {
   return STATUS_LABELS[props.tool.status] || STATUS_LABELS.missing;
 });
 
-const sandboxedCls = computed(() => {
+const configuredCls = computed(() => {
   if (props.variant === 'engine') return props.engineReady ? 'connected' : '';
-  return props.tool?.status === 'sandboxed' ? 'connected' : '';
+  return props.tool?.status === 'configured' ? 'connected' : '';
 });
 
 const opacityCls = computed(() => {
@@ -46,10 +46,11 @@ const binaryInfo = computed(() => {
   return { ok: false, text: '插件形式' };
 });
 
-const sandboxInfo = computed(() => {
-  const s = props.tool?.sandbox;
-  if (s?.sandboxed) return { ok: true, text: `sandbox ✓ ${s.sandboxDir || ''}` };
-  return { ok: false, text: '沙箱待创建' };
+const nativeConfigInfo = computed(() => {
+  const s = props.tool?.nativeConfig;
+  const label = '主机配置';
+  if (s?.configured) return { ok: true, text: `${label} ✓ ${s.configDir || ''}` };
+  return { ok: false, text: `${label}待启用` };
 });
 
 const proxyInfo = computed(() => {
@@ -58,10 +59,10 @@ const proxyInfo = computed(() => {
     const ap = p.activeProvider;
     const upLabel = UPSTREAM_LABELS[ap.upstreamProtocol] || ap.upstreamProtocol;
     const modelPart = ap.model ? ` · ${ap.model}` : '';
-    const extra = p.providerCount > 1 ? ` (+${p.providerCount - 1} 渠道)` : '';
+    const extra = p.providerCount > 1 ? ` (+${p.providerCount - 1} 方案)` : '';
     return { ready: true, text: `🔌 ${ap.name || '默认'} · ${upLabel}${modelPart}`, extra };
   }
-  return { ready: false, text: '🔌 代理未配置', extra: '' };
+  return { ready: false, text: '🔌 模型接入未配置', extra: '' };
 });
 
 const readinessSteps = computed(() => props.tool?.readiness?.steps || []);
@@ -89,8 +90,8 @@ function runPrimaryAction(): void {
     emit('install-cli', tool.id);
   } else if (primaryAction.value === 'config_provider') {
     emit('config', tool.id);
-  } else if (primaryAction.value === 'ensure_sandbox') {
-    emit('ensure-sandbox', tool.id);
+  } else if (primaryAction.value === 'enable_native_config' || primaryAction.value === 'ensure_native_config') {
+    emit('ensure-native-config', tool.id);
   } else if (primaryAction.value === 'copy_launch') {
     emit('copy-cmd', tool.id);
   } else {
@@ -104,7 +105,7 @@ function runPrimaryAction(): void {
   <div
     v-if="variant === 'engine'"
     class="cli-card p-4 rounded-xl bg-white dark:bg-[#0b1324] md:col-span-2"
-    :class="sandboxedCls"
+    :class="configuredCls"
   >
     <div class="flex items-start justify-between gap-3">
       <div class="flex items-center gap-3 min-w-0">
@@ -130,7 +131,7 @@ function runPrimaryAction(): void {
         type="button"
         class="flex-1 h-7 rounded-lg border border-cyan-200 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400"
         @click="emit('config-engine')"
-      >⚙ 配置 API</button>
+      >⚙ 配置接入</button>
     </div>
   </div>
 
@@ -138,7 +139,7 @@ function runPrimaryAction(): void {
   <div
     v-else-if="tool"
     class="cli-card p-4 rounded-xl bg-white dark:bg-[#0b1324]"
-    :class="[sandboxedCls, opacityCls]"
+    :class="[configuredCls, opacityCls]"
   >
     <div class="flex items-start justify-between gap-3">
       <div class="flex items-center gap-3 min-w-0">
@@ -157,7 +158,7 @@ function runPrimaryAction(): void {
     <div class="mt-3 text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2">{{ tool.description }}</div>
 
     <div class="mt-2 flex items-center gap-1 text-[10px] text-slate-400 flex-wrap">
-      <span :class="sandboxInfo.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-cyan-600 dark:text-cyan-400'">{{ sandboxInfo.text }}</span>
+      <span :class="nativeConfigInfo.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-cyan-600 dark:text-cyan-400'">{{ nativeConfigInfo.text }}</span>
       <template v-if="tool.binary?.name">
         <span>·</span>
         <span :class="binaryInfo.ok ? 'text-emerald-600 dark:text-emerald-400' : ''">{{ binaryInfo.text }}</span>
@@ -194,11 +195,11 @@ function runPrimaryAction(): void {
         :disabled="primaryDisabled"
         @click="runPrimaryAction"
       >{{ primaryButtonLabel }}</button>
-      <button type="button" class="h-7 px-2 rounded-lg border border-cyan-200 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" title="配置 API 代理" @click="emit('config', tool.id)">API</button>
+      <button type="button" class="h-7 px-2 rounded-lg border border-cyan-200 bg-cyan-50 text-cyan-600 text-[11px] font-semibold hover:bg-cyan-100 dark:bg-cyan-500/10 dark:border-cyan-500/30 dark:text-cyan-400" title="配置原生文件" @click="emit('config', tool.id)">配置</button>
       <button type="button" class="h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-300 text-[11px] hover:border-cyan-300" title="手动指定可执行文件路径" @click="emit('set-binary', tool.id)">路径</button>
       <button v-if="tool.binary?.override" type="button" class="h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-300 text-[11px] hover:border-cyan-300" title="清除手动路径" @click="emit('clear-binary', tool.id)">清除</button>
       <button type="button" class="h-7 px-2 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-300 text-[11px] hover:border-cyan-300" title="运行接入诊断" @click="emit('diagnose', tool.id)">诊断</button>
-      <button type="button" class="h-7 px-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-600 text-[11px] font-semibold hover:bg-amber-100 dark:bg-amber-500/10 dark:border-amber-500/30 dark:text-amber-400" title="重置沙箱" @click="emit('reset-sandbox', tool.id)">重置</button>
+      <button type="button" class="h-7 px-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-600 text-[11px] font-semibold hover:bg-amber-100 dark:bg-amber-500/10 dark:border-amber-500/30 dark:text-amber-400" title="清除 1Shell 覆盖标记" @click="emit('reset-native-config', tool.id)">重置</button>
     </div>
 
     <div v-if="tool.install?.hint" class="mt-2 text-[10px] text-slate-400 leading-relaxed">{{ tool.install.hint }}</div>

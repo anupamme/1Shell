@@ -297,7 +297,7 @@ const enabledModelOptions = computed<AgentModelOption[]>(() => enabledProviders.
     key: modelKey(provider.id, model.id),
     providerId: provider.id,
     modelId: model.id || null,
-    providerName: provider.name || '未命名渠道',
+    providerName: provider.name || '未命名配置',
     label: model.displayName || model.apiModel || provider.model || '未指定模型',
     apiModel: model.apiModel || provider.model || '',
     contextTokenLimit: model.contextTokenLimit ?? provider.contextTokenLimit ?? null,
@@ -313,16 +313,9 @@ function findModelOption(providerId: string | null, modelId: string | null = nul
     || null;
 }
 
-function fmtTokenLimit(value?: number | null): string {
-  if (!value) return '';
-  return value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
-}
-
 function modelOptionMeta(option: AgentModelOption): string {
   const parts = [option.providerName];
   if (option.apiModel && option.apiModel !== option.label) parts.push(option.apiModel);
-  if (option.contextTokenLimit) parts.push(`ctx ${fmtTokenLimit(option.contextTokenLimit)}`);
-  if (option.maxOutputTokens) parts.push(`out ${fmtTokenLimit(option.maxOutputTokens)}`);
   return parts.join(' · ');
 }
 
@@ -1839,7 +1832,7 @@ function onSecretRefSubmit(secretRef: string): void {
               </div>
             </button>
             <div v-if="!enabledModelOptions.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
-              暂无启用的渠道 · <RouterLink to="/config/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
+              暂无启用的模型接入 · <RouterLink to="/config/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
             </div>
           </template>
 
@@ -2046,7 +2039,7 @@ function onSecretRefSubmit(secretRef: string): void {
                   <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="!activeProviderId ? 'bg-sky-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
                   <div class="min-w-0 flex-1">
                     <div class="text-xs font-semibold" :class="!activeProviderId ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">默认模型</div>
-                    <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600">使用当前系统默认渠道</div>
+                    <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600">使用当前系统默认模型接入</div>
                   </div>
                 </button>
                 <div v-if="enabledModelOptions.length" class="h-px bg-slate-100 dark:bg-white/[0.06] mx-3"></div>
@@ -2065,7 +2058,7 @@ function onSecretRefSubmit(secretRef: string): void {
                   </div>
                 </button>
                 <div v-if="!enabledModelOptions.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
-                  暂无启用的渠道 · <RouterLink to="/config/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
+                  暂无启用的模型接入 · <RouterLink to="/config/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
                 </div>
               </div>
             </div>

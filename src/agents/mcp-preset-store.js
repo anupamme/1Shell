@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * 用户给 CLI 沙箱添加的 MCP preset 持久化存储。
+ * 用户给 CLI 原生配置添加的 MCP preset 持久化存储。
  *
  * data/agent-mcp-presets.json:
  *   {
@@ -17,7 +17,7 @@
  *   - 同 cliId 同 presetId 重复 apply,后写覆盖前(用最新 config)
  *   - secret 字段(github token 等)以原文存(同 proxy-configs.json 的 apiKey),
  *     listApplied 时按 needsConfig 标记脱敏返回(*** 替换)
- *   - 没 apply 任何 preset 时,store 不影响沙箱生成
+ *   - 没 apply 任何 preset 时,store 不影响原生配置生成
  */
 
 const fs = require('fs');
@@ -63,7 +63,7 @@ function createMcpPresetStore({ dataDir }) {
     }));
   }
 
-  /** 获取 cliId 已应用的 preset 原始数据(含未脱敏 config) — 给 cli-sandbox 用 */
+  /** 获取 cliId 已应用的 preset 原始数据(含未脱敏 config) — 给原生配置写入器用 */
   function getAppliedRaw(cliId) {
     const all = _readAll();
     return Array.isArray(all[cliId]) ? all[cliId] : [];

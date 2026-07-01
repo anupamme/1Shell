@@ -3,22 +3,25 @@
 const { Router } = require('express');
 const { BRIDGE_TOKEN, PORT, PUBLIC_SERVER_URL } = require('../config/env');
 const { getAllManifests, getManifest, UPSTREAM_LABELS } = require('../agents/cli-manifest');
-const { getAllPresets, getPreset } = require('../agents/provider-presets');
+const { getAllPresets, getPreset, getPresetsForCli } = require('../agents/provider-presets');
 const { getAllMcpPresets, getMcpPreset } = require('../agents/mcp-presets');
 
 /**
- * Agent Setup Routes — 3.0 Sandbox
+ * Agent Setup Routes — native CLI config
  *
- * GET  /api/agent/scan                            扫描所有 CLI（含沙箱状态）
+ * GET  /api/agent/scan                            扫描所有 CLI（含配置状态）
  * GET  /api/agent/endpoints                       1Shell 端点信息
  * GET  /api/agent/diagnostics                     连通性诊断
  * GET  /api/agent/diagnostics/:cliId              单个 CLI 接入诊断
  * POST /api/agent/install/:cliId                  自动安装 CLI
  * PUT  /api/agent/binary/:cliId                   手动指定 CLI 可执行文件路径
  * DELETE /api/agent/binary/:cliId                 清除手动路径覆盖
- * POST /api/agent/sandbox/ensure/:cliId           确保沙箱就绪
- * POST /api/agent/sandbox/reset/:cliId            重置沙箱
- * GET  /api/agent/sandbox/status/:cliId           查询沙箱状态
+ * POST /api/agent/native-config/enable/:cliId     启用当前配置文件到原生 CLI 路径
+ * POST /api/agent/native-config/reset/:cliId      重置 1Shell 配置状态
+ * GET  /api/agent/native-config/status/:cliId     查询原生配置状态
+ * GET  /api/agent/config-files/:cliId             查看 1Shell 配置草稿/生成结果
+ * PUT  /api/agent/config-files/:cliId/:fileName   保存某个配置文件草稿
+ * DELETE /api/agent/config-files/:cliId/:fileName/override  清除手动草稿并重新生成
  * GET  /api/agent/launch-command/:cliId           获取启动命令
  * GET  /api/agent/providers/:cliId                列出某 CLI 的所有 Provider
  * POST /api/agent/providers/:cliId                添加 Provider
@@ -29,7 +32,7 @@ const { getAllMcpPresets, getMcpPreset } = require('../agents/mcp-presets');
  * PUT  /api/agent/providers/:cliId/:pid/activate    设为活跃
  * PUT  /api/agent/routes/:cliId                   设置入口路由（Provider + Model）
  */
-function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore } = {}) {
+function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetStore } = {}) {
   const router = Router();
 
   function resolveServerUrl(reqBody, req) {
@@ -64,15 +67,15 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
 
   // ─── 扫描所有 CLI 工具 ────────────────────────────────────────────────
   router.get('/agent/scan', (req, res) => {
-    if (!cliSandbox) {
-      return res.json({ ok: false, error: 'CLI 沙箱管理器未初始化' });
+    if (!nativeCliConfig) {
+      return res.json({ ok: false, error: 'CLI 配置管理器未初始化' });
     }
 
-    const tools = cliSandbox.getScanInfo();
+    const tools = nativeCliConfig.getScanInfo();
 
     const counts = {
       total: tools.length,
-      sandboxed: tools.filter(t => t.status === 'sandboxed').length,
+      configured: tools.filter(t => t.status === 'configured').length,
       detected: tools.filter(t => t.status === 'detected').length,
       missing: tools.filter(t => t.status === 'missing').length,
     };
@@ -119,11 +122,11 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
     return res.json({ ok: true, checks });
   });
 
-  // ─── 沙箱管理 ──────────────────────────────────────────────────────────
+  // ─── 原生配置管理 ───────────────────────────────────────────────────────
 
-  function requireSandbox(req, res) {
-    if (!cliSandbox) {
-      res.status(503).json({ ok: false, error: 'CLI 沙箱管理器未初始化' });
+  function requireNativeConfig(req, res) {
+    if (!nativeCliConfig) {
+      res.status(503).json({ ok: false, error: 'CLI 配置管理器未初始化' });
       return false;
     }
     return true;
@@ -164,6 +167,60 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
     const label = cli?.name || cliId;
     res.status(400).json({ ok: false, error: `${label} 不支持 ${upstream} 上游协议，可选: ${allowed.join(', ')}` });
     return false;
+  }
+
+  function scanNativeProviderForCli(cliId) {
+    if (!getManifest(cliId) || !nativeCliConfig?.scanNativeProviderConfig) {
+      return { found: false, imported: false };
+    }
+    const scan = nativeCliConfig.scanNativeProviderConfig(cliId);
+    if (!scan?.found || !scan.provider) {
+      return {
+        found: false,
+        imported: false,
+        files: scan?.files || [],
+        error: scan?.error || '',
+        reason: scan?.reason || '',
+      };
+    }
+    return {
+      found: true,
+      imported: false,
+      id: null,
+      files: scan.files || [],
+      reason: '发现本机配置，可点击重新读取导入到 1Shell 表单',
+    };
+  }
+
+  function importNativeProviderForCli(cliId) {
+    if (!getManifest(cliId) || !nativeCliConfig?.scanNativeProviderConfig || !proxyConfigStore?.upsertNativeProvider) {
+      return { found: false, imported: false };
+    }
+    const scan = nativeCliConfig.scanNativeProviderConfig(cliId);
+    if (!scan?.found || !scan.provider) {
+      return {
+        found: false,
+        imported: false,
+        files: scan?.files || [],
+        error: scan?.error || '',
+        reason: scan?.reason || '',
+      };
+    }
+    try {
+      const result = proxyConfigStore.upsertNativeProvider(cliId, scan.provider);
+      return {
+        found: true,
+        ...result,
+        files: scan.files || [],
+      };
+    } catch (err) {
+      return {
+        found: true,
+        imported: false,
+        files: scan.files || [],
+        error: err.message,
+      };
+    }
   }
 
   function normalizeApiV1Base(apiBase) {
@@ -253,22 +310,22 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
   }
 
   router.get('/agent/diagnostics/:cliId', (req, res) => {
-    if (!requireSandbox(req, res)) return;
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
     try {
-      return res.json({ ok: true, cliId, ...cliSandbox.getToolDiagnostics(cliId) });
+      return res.json({ ok: true, cliId, ...nativeCliConfig.getToolDiagnostics(cliId) });
     } catch (err) {
       return res.status(500).json({ ok: false, error: err.message });
     }
   });
 
   router.post('/agent/install/:cliId', async (req, res) => {
-    if (!requireSandbox(req, res)) return;
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
     try {
-      const result = await cliSandbox.installCli(cliId);
+      const result = await nativeCliConfig.installCli(cliId);
       return res.json({ ok: true, cliId, ...result });
     } catch (err) {
       return res.status(500).json({
@@ -281,11 +338,11 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
   });
 
   router.put('/agent/binary/:cliId', (req, res) => {
-    if (!requireSandbox(req, res)) return;
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
     try {
-      const tool = cliSandbox.setBinaryOverride(cliId, req.body?.path || req.body?.binaryPath || '');
+      const tool = nativeCliConfig.setBinaryOverride(cliId, req.body?.path || req.body?.binaryPath || '');
       return res.json({ ok: true, cliId, tool });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -293,58 +350,132 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
   });
 
   router.delete('/agent/binary/:cliId', (req, res) => {
-    if (!requireSandbox(req, res)) return;
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
     try {
-      const tool = cliSandbox.clearBinaryOverride(cliId);
+      const tool = nativeCliConfig.clearBinaryOverride(cliId);
       return res.json({ ok: true, cliId, tool });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
     }
   });
 
-  router.post('/agent/sandbox/ensure/:cliId', (req, res) => {
-    if (!requireSandbox(req, res)) return;
+  function enableNativeConfig(req, res) {
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
 
     try {
-      const dir = cliSandbox.ensureSandbox(cliId, { cwd: req.body?.cwd || process.cwd() });
-      const status = cliSandbox.getSandboxStatus(cliId);
-      return res.json({ ok: true, cliId, sandboxDir: dir, ...status });
+      const dir = nativeCliConfig.enableNativeConfig(cliId, {
+        cwd: req.body?.cwd || process.cwd(),
+        files: Array.isArray(req.body?.files) ? req.body.files : null,
+      });
+      const status = nativeCliConfig.getNativeConfigStatus(cliId);
+      return res.json({ ok: true, cliId, configDir: dir, ...status });
     } catch (err) {
       return res.status(500).json({ ok: false, error: err.message });
     }
-  });
+  }
 
-  router.post('/agent/sandbox/reset/:cliId', (req, res) => {
-    if (!requireSandbox(req, res)) return;
+  function resetNativeConfig(req, res) {
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
 
-    const ok = cliSandbox.resetSandbox(cliId);
+    const ok = nativeCliConfig.resetNativeConfig(cliId);
     return res.json({ ok, cliId });
-  });
+  }
 
-  router.get('/agent/sandbox/status/:cliId', (req, res) => {
-    if (!requireSandbox(req, res)) return;
+  function getNativeConfigStatus(req, res) {
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
 
-    const status = cliSandbox.getSandboxStatus(cliId);
+    const status = nativeCliConfig.getNativeConfigStatus(cliId);
     return res.json({ ok: true, cliId, ...status });
+  }
+
+  router.post('/agent/native-config/enable/:cliId', enableNativeConfig);
+  router.post('/agent/native-config/ensure/:cliId', enableNativeConfig);
+  router.post('/agent/native-config/reset/:cliId', resetNativeConfig);
+  router.get('/agent/native-config/status/:cliId', getNativeConfigStatus);
+
+  function buildConfigPreviewProvider(cliId, body = {}) {
+    const draft = body.provider && typeof body.provider === 'object' ? body.provider : {};
+    const providerId = typeof body.providerId === 'string' ? body.providerId : '';
+    const modelId = draft.activeModelId || draft.routeModelId || null;
+    const current = providerId && proxyConfigStore?.getProvider
+      ? (proxyConfigStore.getProvider(cliId, providerId, modelId) || {})
+      : {};
+    const merged = { ...draft };
+    if (!draft.apiKey && current.apiKey) merged.apiKey = current.apiKey;
+    return merged;
+  }
+
+  router.post('/agent/config-preview/:cliId', (req, res) => {
+    if (!requireNativeConfig(req, res)) return;
+    const { cliId } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    const draft = req.body?.provider || {};
+    const upstream = draft.upstreamProtocol || undefined;
+    if (!validateProviderUpstream(cliId, upstream, res)) return;
+    try {
+      const files = nativeCliConfig.previewConfigFiles(cliId, {
+        cwd: req.body?.cwd || process.cwd(),
+        activeProvider: buildConfigPreviewProvider(cliId, req.body || {}),
+      });
+      return res.json({ ok: true, cliId, files });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get('/agent/config-files/:cliId', (req, res) => {
+    if (!requireNativeConfig(req, res)) return;
+    const { cliId } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    try {
+      const files = nativeCliConfig.listConfigFiles(cliId, { cwd: req.query.cwd || process.cwd() });
+      return res.json({ ok: true, cliId, files });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.put('/agent/config-files/:cliId/:fileName', (req, res) => {
+    if (!requireNativeConfig(req, res)) return;
+    const { cliId, fileName } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    try {
+      const files = nativeCliConfig.writeConfigFile(cliId, fileName, req.body?.content || '');
+      return res.json({ ok: true, cliId, files });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.delete('/agent/config-files/:cliId/:fileName/override', (req, res) => {
+    if (!requireNativeConfig(req, res)) return;
+    const { cliId, fileName } = req.params;
+    if (!validateManifestCli(cliId, res)) return;
+    try {
+      const files = nativeCliConfig.clearConfigFileOverride(cliId, fileName, { cwd: req.body?.cwd || process.cwd() });
+      return res.json({ ok: true, cliId, files });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
   });
 
   router.get('/agent/launch-command/:cliId', (req, res) => {
-    if (!requireSandbox(req, res)) return;
+    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
     if (!validateManifestCli(cliId, res)) return;
 
     const shell = req.query.shell || (process.platform === 'win32' ? 'powershell' : 'bash');
     try {
-      const env = cliSandbox.buildLaunchEnv(cliId);
-      const command = redactLaunchCommand(cliSandbox.buildShellCommand(cliId, { shell }), env);
+      const env = nativeCliConfig.buildLaunchEnv(cliId, { prepareNative: false, useLocalEnv: true });
+      const command = redactLaunchCommand(nativeCliConfig.buildShellCommand(cliId, { shell, prepareNative: false, useLocalEnv: true }), env);
       return res.json({
         ok: true,
         cliId,
@@ -364,8 +495,16 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
 
   router.get('/agent/providers/:cliId', (req, res) => {
     if (!validateCli(req.params.cliId, res)) return;
+    const nativeImport = scanNativeProviderForCli(req.params.cliId);
     const result = proxyConfigStore.listProviders(req.params.cliId);
-    return res.json({ ok: true, ...result });
+    return res.json({ ok: true, ...result, nativeImport });
+  });
+
+  router.post('/agent/providers/:cliId/import-native', (req, res) => {
+    if (!validateCli(req.params.cliId, res)) return;
+    const nativeImport = importNativeProviderForCli(req.params.cliId);
+    const result = proxyConfigStore.listProviders(req.params.cliId);
+    return res.json({ ok: !nativeImport.error, ...result, nativeImport });
   });
 
   router.post('/agent/providers/:cliId', (req, res) => {
@@ -427,17 +566,25 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
 
   router.delete('/agent/providers/:cliId/:pid', (req, res) => {
     if (!validateCli(req.params.cliId, res)) return;
-    const ok = proxyConfigStore.deleteProvider(req.params.cliId, req.params.pid);
-    if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
-    return res.json({ ok: true });
+    try {
+      const ok = proxyConfigStore.deleteProvider(req.params.cliId, req.params.pid);
+      if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
   });
 
   router.put('/agent/providers/:cliId/:pid/activate', (req, res) => {
     if (!validateCli(req.params.cliId, res)) return;
-    const modelId = req.body?.modelId || req.body?.activeModelId || null;
-    const ok = proxyConfigStore.setActive(req.params.cliId, req.params.pid, modelId);
-    if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
-    return res.json({ ok: true });
+    try {
+      const modelId = req.body?.modelId || req.body?.activeModelId || null;
+      const ok = proxyConfigStore.setActive(req.params.cliId, req.params.pid, modelId);
+      if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
   });
 
   router.get('/agent/routes/:cliId', (req, res) => {
@@ -448,17 +595,29 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
 
   router.put('/agent/routes/:cliId', (req, res) => {
     if (!validateCli(req.params.cliId, res)) return;
-    const route = proxyConfigStore.setRoute(req.params.cliId, req.body || {});
-    if (!route) return res.status(404).json({ ok: false, error: 'Route 指向的 Provider 不存在' });
-    return res.json({ ok: true, activeRoute: route });
+    try {
+      const route = proxyConfigStore.setRoute(req.params.cliId, req.body || {});
+      if (!route) return res.status(404).json({ ok: false, error: 'Route 指向的 Provider 不存在' });
+      return res.json({ ok: true, activeRoute: route });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
   });
 
   // ─── Provider Preset 库(只读)──────────────────────────────────────────
-  router.get('/agent/provider-presets', (_req, res) => {
-    return res.json({ ok: true, presets: getAllPresets() });
+  router.get('/agent/provider-presets', (req, res) => {
+    const cliId = typeof req.query.cliId === 'string' ? req.query.cliId : '';
+    if (cliId && !resolveManifest(cliId)) {
+      return res.status(400).json({ ok: false, error: `未知 CLI: ${cliId}` });
+    }
+    return res.json({ ok: true, presets: cliId ? getPresetsForCli(cliId) : getAllPresets() });
   });
   router.get('/agent/provider-presets/:id', (req, res) => {
-    const preset = getPreset(req.params.id);
+    const cliId = typeof req.query.cliId === 'string' ? req.query.cliId : '';
+    if (cliId && !resolveManifest(cliId)) {
+      return res.status(400).json({ ok: false, error: `未知 CLI: ${cliId}` });
+    }
+    const preset = getPreset(req.params.id, cliId);
     if (!preset) return res.status(404).json({ ok: false, error: 'preset 不存在' });
     return res.json({ ok: true, preset });
   });
@@ -483,11 +642,6 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
     if (!getMcpPreset(presetId)) return res.status(404).json({ ok: false, error: `未知 MCP preset: ${presetId}` });
     try {
       mcpPresetStore.apply(body.cliId, presetId, body.config || {});
-      // 立即重写沙箱 config(下次启动 CLI 时新 entry 即生效)
-      try { cliSandbox?.ensureSandbox?.(body.cliId); } catch (err) {
-        // 沙箱重写失败不应该阻塞 apply ── apply 已写入 store,下次 ensureSandbox 自动生效
-        // (用户可能没有该 CLI 的有效配置,但仍可注册 preset 等待后续)
-      }
       return res.json({ ok: true });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -499,7 +653,6 @@ function createAgentSetupRouter({ proxyConfigStore, cliSandbox, mcpPresetStore }
     if (!validateCli(req.params.cliId, res)) return;
     const ok = mcpPresetStore.remove(req.params.cliId, req.params.presetId);
     if (!ok) return res.status(404).json({ ok: false, error: '该 CLI 未应用该 preset' });
-    try { cliSandbox?.ensureSandbox?.(req.params.cliId); } catch {}
     return res.json({ ok: true });
   });
 

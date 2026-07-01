@@ -7,7 +7,7 @@ const CLI_MANIFESTS = [
     icon: '✦',
     gradient: 'from-orange-400 to-pink-500',
     repo: 'anthropics/claude-code',
-    description: '将你的 OpenAI 兼容 API 或 Anthropic API 接入 Claude Code，无需修改本地配置。',
+    description: '将 Anthropic Messages 兼容 API 写入 Claude Code 原生配置，并注入 1Shell MCP。',
     binary: 'claude',
     binaries: ['claude'],
     versionArgs: ['--version'],
@@ -15,34 +15,26 @@ const CLI_MANIFESTS = [
       npmPackage: '@anthropic-ai/claude-code',
       command: 'npm install -g @anthropic-ai/claude-code',
       docsUrl: 'https://docs.anthropic.com/en/docs/claude-code',
-      hint: '未检测到时可点击一键安装；1Shell 会优先安装到自己的数据目录，避免 Linux/macOS sudo 权限问题。',
+      hint: '未检测到时可点击一键安装；1Shell 会执行全局 npm 安装，也可手动安装后指定可执行文件路径。',
     },
     supportedOS: ['windows', 'macos', 'linux'],
     clientProtocol: 'anthropic',
-    supportedUpstream: ['openai', 'anthropic'],
-    proxyPath: '/api/proxy/claude',
+    supportedUpstream: ['anthropic'],
 
-    sandbox: {
+    nativeConfig: {
       dirName: 'claude-code',
-      configDirEnv: 'CLAUDE_CONFIG_DIR',
       defaultConfigDir: '.claude',
       mcp: { transport: 'sse' },
       configFiles: [
         {
           name: 'settings.json',
           mergeStrategy: 'overwrite',
-          overwriteBuilder: 'env-overrides',
-          overrideEnvKeys: {
-            ANTHROPIC_AUTH_TOKEN: 'sk-1shell-proxy',
-            ANTHROPIC_BASE_URL: '{serverUrl}/api/proxy/claude',
-            ANTHROPIC_API_KEY: 'sk-1shell-proxy',
-          },
+          overwriteBuilder: 'claude-native-settings',
         },
         {
           name: 'config.json',
           mergeStrategy: 'overwrite',
-          overwriteBuilder: 'static',
-          content: { primaryApiKey: 'sk-1shell-proxy' },
+          overwriteBuilder: 'claude-native-config',
         },
         {
           name: 'mcp-config.json',
@@ -52,12 +44,6 @@ const CLI_MANIFESTS = [
           mcpEntryName: '1shell',
         },
       ],
-    },
-
-    proxyEnv: {
-      ANTHROPIC_BASE_URL: '{serverUrl}/api/proxy/claude',
-      ANTHROPIC_API_KEY: 'sk-1shell-proxy',
-      ANTHROPIC_AUTH_TOKEN: 'sk-1shell-proxy',
     },
 
     launchArgs: [],
@@ -72,7 +58,7 @@ const CLI_MANIFESTS = [
     icon: '◎',
     gradient: 'from-slate-700 to-slate-900',
     repo: 'openai/codex',
-    description: '将你的 OpenAI 兼容 API 或 Anthropic API 接入 Codex CLI，支持透传或协议转换。',
+    description: '将 OpenAI Responses 兼容 API 写入 Codex CLI 原生 config.toml。',
     binary: 'codex',
     binaries: ['codex'],
     versionArgs: ['--version'],
@@ -80,16 +66,14 @@ const CLI_MANIFESTS = [
       npmPackage: '@openai/codex',
       command: 'npm install -g @openai/codex',
       docsUrl: 'https://github.com/openai/codex',
-      hint: '未检测到时可点击一键安装；1Shell 会优先安装到自己的数据目录，避免 Linux/macOS sudo 权限问题。',
+      hint: '未检测到时可点击一键安装；1Shell 会执行全局 npm 安装，也可手动安装后指定可执行文件路径。',
     },
     supportedOS: ['windows', 'macos', 'linux'],
     clientProtocol: 'openai',
-    supportedUpstream: ['openai', 'anthropic'],
-    proxyPath: '/api/proxy/codex',
+    supportedUpstream: ['openai'],
 
-    sandbox: {
+    nativeConfig: {
       dirName: 'codex',
-      configDirEnv: 'CODEX_HOME',
       defaultConfigDir: '.codex',
       mcp: {
         transport: 'stdio-bridge',
@@ -105,8 +89,7 @@ const CLI_MANIFESTS = [
         {
           name: 'auth.json',
           mergeStrategy: 'overwrite',
-          overwriteBuilder: 'static',
-          content: { OPENAI_API_KEY: 'sk-1shell-proxy' },
+          overwriteBuilder: 'codex-native-auth',
         },
         {
           name: 'mcp.json',
@@ -114,11 +97,6 @@ const CLI_MANIFESTS = [
           mergePointer: 'mcpServers.1shell',
         },
       ],
-    },
-
-    proxyEnv: {
-      OPENAI_BASE_URL: '{serverUrl}/api/proxy/codex/v1',
-      OPENAI_API_KEY: 'sk-1shell-proxy',
     },
 
     launchArgs: [],
@@ -131,7 +109,7 @@ const CLI_MANIFESTS = [
     icon: '▣',
     gradient: 'from-emerald-400 to-teal-500',
     repo: 'opencode-ai/opencode',
-    description: '将你的 OpenAI 兼容 API 或 Anthropic API 接入 OpenCode，支持透传或协议转换。',
+    description: 'OpenCode 原生配置接入，旧 proxy 网关已移除。',
     binary: 'opencode',
     binaries: ['opencode', 'opencode-ai', '/usr/lib/node_modules/opencode-ai/bin/opencode'],
     versionArgs: ['--version'],
@@ -143,12 +121,11 @@ const CLI_MANIFESTS = [
     },
     supportedOS: ['windows', 'macos', 'linux'],
     clientProtocol: 'openai',
-    supportedUpstream: ['openai', 'anthropic'],
-    proxyPath: '/api/proxy/opencode',
+    supportedUpstream: ['openai'],
 
-    sandbox: {
+    nativeConfig: {
       dirName: 'opencode',
-      configDirEnv: 'XDG_CONFIG_HOME',
+      configHome: 'xdg',
       configSubDir: 'opencode',
       defaultConfigDir: '.opencode',
       mcp: {
@@ -158,16 +135,11 @@ const CLI_MANIFESTS = [
       },
       configFiles: [
         {
-          name: 'config.json',
-          mergeStrategy: 'deep-merge',
-          mergePointer: 'mcp.1shell',
+          name: 'opencode.json',
+          mergeStrategy: 'overwrite',
+          overwriteBuilder: 'opencode-native-config',
         },
       ],
-    },
-
-    proxyEnv: {
-      OPENAI_BASE_URL: '{serverUrl}/api/proxy/opencode/v1',
-      OPENAI_API_KEY: 'sk-1shell-proxy',
     },
 
     launchArgs: [],

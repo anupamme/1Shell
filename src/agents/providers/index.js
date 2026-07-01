@@ -5,36 +5,25 @@ const {
   AGENT_DEFAULT_PROVIDER,
 } = require('../../config/env');
 
-function createAgentProviders({ cliSandbox } = {}) {
+function createAgentProviders({ nativeCliConfig } = {}) {
   function createProviderFromManifest(manifest) {
     return {
       id: manifest.id,
       label: manifest.name,
-      command: manifest.binary,
-      args({ useLocalEnv } = {}) {
-        if (cliSandbox && !useLocalEnv) {
-          return cliSandbox.buildLaunchArgs(manifest.id, {
-            useLocalEnv: false,
-            cwd: process.cwd(),
-          });
+      command({ useLocalEnv } = {}) {
+        if (nativeCliConfig) {
+          return nativeCliConfig.getLaunchCommand?.(manifest.id) || manifest.binary;
         }
+        return manifest.binary;
+      },
+      args({ useLocalEnv } = {}) {
         return [...(manifest.launchArgs || [])];
       },
       env({ host, hostId, useLocalEnv } = {}) {
-        const base = {
+        return {
           FORCE_COLOR: '1',
           TERM: 'xterm-256color',
         };
-
-        if (cliSandbox && !useLocalEnv) {
-          const sandboxEnv = cliSandbox.buildLaunchEnv(manifest.id, {
-            useLocalEnv: false,
-            cwd: process.cwd(),
-          });
-          Object.assign(base, sandboxEnv);
-        }
-
-        return base;
       },
     };
   }
@@ -43,6 +32,12 @@ function createAgentProviders({ cliSandbox } = {}) {
   const providerMap = new Map(providers.map(p => [p.id, p]));
 
   function listProviders() {
+    const scanById = new Map();
+    if (nativeCliConfig?.getScanInfo) {
+      for (const tool of nativeCliConfig.getScanInfo()) {
+        scanById.set(tool.id, tool);
+      }
+    }
     return providers.map(p => {
       let configured = false;
       let activeProviderName = '';
@@ -51,8 +46,9 @@ function createAgentProviders({ cliSandbox } = {}) {
       let activeProviderId = '';
       let activeModelId = null;
       let models = [];
-      if (cliSandbox) {
-        const summary = cliSandbox.getProviderSummary?.(p.id) || {};
+      const scan = scanById.get(p.id);
+      if (nativeCliConfig) {
+        const summary = nativeCliConfig.getProviderSummary?.(p.id) || {};
         configured = Boolean(summary.providerReady);
         activeProviderId = summary.activeProvider?.id || '';
         activeProviderName = summary.activeProvider?.name || '';
@@ -65,6 +61,9 @@ function createAgentProviders({ cliSandbox } = {}) {
         id: p.id,
         label: p.label,
         isDefault: p.id === AGENT_DEFAULT_PROVIDER,
+        installed: scan?.binary?.installed !== false,
+        binaryPath: scan?.binary?.path || '',
+        binaryVersion: scan?.binary?.version || '',
         configured,
         activeProviderId,
         activeProviderName,

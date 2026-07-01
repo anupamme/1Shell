@@ -141,7 +141,7 @@ function createAgentPtyService({ hostService, providerRegistry }) {
       hostId: host.id,
       hostName: host.name,
       status: 'starting',
-      useLocalEnv: Boolean(useLocalEnv),
+      useLocalEnv: true,
       createdAt: nowIso(),
       isFinalized: false,
       lastError: null,
@@ -156,9 +156,11 @@ function createAgentPtyService({ hostService, providerRegistry }) {
 
     try {
       const isWin = os.platform() === 'win32';
-      let command = provider.command;
+      let command = typeof provider.command === 'function'
+        ? (provider.command({ host, hostId: host.id, useLocalEnv: true }) || provider.id)
+        : provider.command;
       const resolvedArgs = typeof provider.args === 'function'
-        ? (provider.args({ host, hostId: host.id, useLocalEnv }) || [])
+        ? (provider.args({ host, hostId: host.id, useLocalEnv: true }) || [])
         : (provider.args || []);
       let args = [...resolvedArgs];
 
@@ -172,10 +174,10 @@ function createAgentPtyService({ hostService, providerRegistry }) {
       }
 
       const resolvedProviderEnv = typeof provider.env === 'function'
-        ? (provider.env({ host, hostId: host.id, useLocalEnv }) || {})
+        ? (provider.env({ host, hostId: host.id, useLocalEnv: true }) || {})
         : (provider.env || {});
 
-      const sanitizedEnv = stripAiEnvVars(process.env, useLocalEnv);
+      const sanitizedEnv = stripAiEnvVars(process.env, true);
 
       const log = require('../../lib/logger');
       log.info('[agent-pty] spawn', {
@@ -183,7 +185,7 @@ function createAgentPtyService({ hostService, providerRegistry }) {
         providerId: provider.id,
         command,
         args,
-        useLocalEnv: Boolean(useLocalEnv),
+        useLocalEnv: true,
         envKeys: Object.keys(resolvedProviderEnv),
       });
 

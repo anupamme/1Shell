@@ -15,7 +15,7 @@ function commandHasTruncationMarker(command) {
   return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
 }
 
-function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, cliSandbox, harness, agentRuntime, skillRegistry, secretService }) {
+function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, nativeCliConfig, harness, agentRuntime, skillRegistry, secretService }) {
   const coreTools = createOneShellCoreTools({
     bridgeService,
     hostService,
@@ -1075,31 +1075,25 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     const goal = String(input.goal || '').trim();
     if (!goal) return err('goal 为空');
 
-    if (!cliSandbox) return err('CLI 沙箱未初始化，无法调用 Claude Code');
+    if (!nativeCliConfig) return err('CLI 配置管理器未初始化，无法调用 Claude Code');
 
     const os = require('os');
     const { execFile } = require('child_process');
     const isWin = os.platform() === 'win32';
 
-    try {
-      cliSandbox.ensureSandbox('claude-code', { cwd: ROOT_DIR });
-    } catch (e) {
-      return err(`沙箱初始化失败: ${e.message}`);
-    }
-
-    let command = 'claude';
+    let command = nativeCliConfig.getLaunchCommand?.('claude-code') || 'claude';
     let baseArgs = [];
     if (isWin) {
       const { findExecutableCommand } = require('../agents/windows-compat');
-      const resolved = findExecutableCommand('claude');
+      const resolved = findExecutableCommand(command);
       if (resolved) {
         command = resolved.command;
         baseArgs = resolved.args;
       }
     }
 
-    const launchArgs = cliSandbox.buildLaunchArgs('claude-code', { cwd: ROOT_DIR });
-    const launchEnv = cliSandbox.buildLaunchEnv('claude-code', { cwd: ROOT_DIR });
+    const launchArgs = nativeCliConfig.buildLaunchArgs('claude-code', { cwd: ROOT_DIR, prepareNative: false, useLocalEnv: true });
+    const launchEnv = nativeCliConfig.buildLaunchEnv('claude-code', { cwd: ROOT_DIR, prepareNative: false, useLocalEnv: true });
 
     let prompt = goal;
     if (input.hostId) {

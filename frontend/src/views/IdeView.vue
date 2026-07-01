@@ -447,7 +447,7 @@ async function saveEmptyTaskDraft(): Promise<void> {
           { key: 'host', label: '目标主机', type: 'host', required: true },
         ],
         steps: [
-          { title: '实践流程', instruction: '先让 1Shell AI 根据目标真实实践或沙箱实践可行方案。' },
+          { title: '实践流程', instruction: '先让 1Shell AI 根据目标真实实践或隔离演练可行方案。' },
           { title: '整理步骤', instruction: '把已经验证过的流程整理成可复用步骤。' },
           { title: '输出报告', instruction: '执行后总结输入、操作、结果和遗留问题。' },
         ],

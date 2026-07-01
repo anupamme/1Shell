@@ -9,6 +9,7 @@ const {
   PROVIDER_PRESETS,
   PRESET_CATEGORIES,
   getPreset,
+  getPresetsForCli,
   getPresetsByCategory,
 } = require('../src/agents/provider-presets');
 const { MCP_PRESETS, getMcpPreset } = require('../src/agents/mcp-presets');
@@ -54,6 +55,19 @@ assert.strictEqual(getPreset('deepseek')?.name, 'DeepSeek');
 assert.strictEqual(getPreset('anthropic')?.protocol, 'anthropic');
 assert.strictEqual(getPreset('not-exist'), null);
 
+// CLI 专用 preset 覆盖:同一供应商在不同 CLI 下应返回可直接写入原生配置的形态
+const deepseekClaude = getPreset('deepseek', 'claude-code');
+assert.strictEqual(deepseekClaude.protocol, 'anthropic');
+assert.strictEqual(deepseekClaude.apiBase, 'https://api.deepseek.com/anthropic');
+assert.deepStrictEqual(deepseekClaude.models, ['deepseek-v4-pro', 'deepseek-v4-flash']);
+assert.strictEqual(deepseekClaude.claudeModels.sonnet.model, 'deepseek-v4-pro');
+assert.strictEqual(deepseekClaude.claudeModels.haiku.model, 'deepseek-v4-flash');
+
+assert.deepStrictEqual(getPresetsForCli('codex'), [], 'Codex 只走 OpenAI/GPT 原生配置,不提供供应商模板');
+
+const deepseekOpenCode = getPresetsForCli('opencode').find(p => p.id === 'deepseek');
+assert.strictEqual(deepseekOpenCode.apiBase, 'https://api.deepseek.com/v1');
+
 // 至少 deepseek/openai/anthropic 有 reasoningModels
 assert.ok(getPreset('deepseek').reasoningModels.includes('deepseek-reasoner'));
 assert.ok(getPreset('openai').reasoningModels.some(p => p.startsWith('gpt-5')));
@@ -73,7 +87,7 @@ assert.ok(getMcpPreset('fetch'));
 assert.ok(getMcpPreset('github').needsToken === true, 'github preset 应标 needsToken');
 
 // ── reasoning 工具 ──
-assert.deepStrictEqual(EFFORT_LABELS, ['auto', 'low', 'medium', 'high']);
+assert.deepStrictEqual(EFFORT_LABELS, ['auto', 'low', 'medium', 'high', 'max', 'xhigh']);
 assert.ok(isValidEffort('low'));
 assert.ok(isValidEffort('auto'));
 assert.ok(!isValidEffort('extreme'));
@@ -104,12 +118,17 @@ assert.strictEqual(b2.thinking, undefined, 'invalid effort 不注入');
 const b3 = { model: 'gpt-5' };
 injectOpenAIReasoningEffort(b3, 'high');
 assert.strictEqual(b3.reasoning_effort, 'high');
+const b3Max = { model: 'gpt-5' };
+injectOpenAIReasoningEffort(b3Max, 'max');
+assert.strictEqual(b3Max.reasoning_effort, 'xhigh', 'Codex/OpenAI max 兼容旧值时应映射为 xhigh');
 const b4 = { model: 'gpt-5' };
 injectOpenAIReasoningEffort(b4, 'auto');
 assert.strictEqual(b4.reasoning_effort, undefined, 'auto 不注入(由模型自决)');
 
 // codexConfigTomlReasoningLine
 assert.strictEqual(codexConfigTomlReasoningLine('high'), 'model_reasoning_effort = "high"');
+assert.strictEqual(codexConfigTomlReasoningLine('xhigh'), 'model_reasoning_effort = "xhigh"');
+assert.strictEqual(codexConfigTomlReasoningLine('max'), 'model_reasoning_effort = "xhigh"');
 assert.strictEqual(codexConfigTomlReasoningLine('auto'), null);
 assert.strictEqual(codexConfigTomlReasoningLine('invalid'), null);
 

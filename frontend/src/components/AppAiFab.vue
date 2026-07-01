@@ -76,7 +76,7 @@ const MODULE_MAP: Record<string, ModuleContext> = {
   'config-features': { name: '程序配置', icon: 'wrench', hint: '当前在配置 / 程序页面。可管理 AI 任务和纯代码程序。' },
   'config-skills': { name: '扩展配置', icon: 'package', hint: '当前在配置 / 扩展页面。可管理 Skill、远程 MCP 和本地 MCP。' },
   'config-mcp': { name: 'MCP 配置', icon: 'plug', hint: '当前在配置 / MCP 页面。可管理 MCP 服务、远程开放与凭证。' },
-  'config-ai': { name: 'AI 配置', icon: 'cog', hint: '当前在配置 / AI 页面。可管理 AI 引擎与模型渠道。' },
+  'config-ai': { name: 'AI 配置', icon: 'cog', hint: '当前在配置 / AI 页面。可管理 AI 引擎与模型接入。' },
 };
 
 watch(

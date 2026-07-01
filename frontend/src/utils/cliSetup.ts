@@ -18,13 +18,19 @@ export interface ToolInfo {
     installed: boolean;
     version?: string;
     override?: boolean;
-    managed?: boolean;
     attempted?: string[];
     error?: string;
   };
-  sandbox?: {
-    sandboxed: boolean;
-    sandboxDir?: string;
+  nativeConfig?: {
+    configured: boolean;
+    configDir?: string;
+    mode?: 'host';
+    meta?: {
+      providerId?: string;
+      activeModelId?: string;
+      enabledBy?: string;
+      updatedAt?: string;
+    } | null;
     files?: Array<{ name: string; path: string; exists: boolean }>;
   };
   proxy?: {
@@ -34,7 +40,7 @@ export interface ToolInfo {
   readiness?: CliReadiness;
 }
 
-export type CliStatus = 'sandboxed' | 'detected' | 'missing';
+export type CliStatus = 'configured' | 'detected' | 'missing';
 
 export interface CliReadinessStep {
   id: string;
@@ -46,7 +52,7 @@ export interface CliReadinessStep {
 export interface CliReadiness {
   installed: boolean;
   providerReady: boolean;
-  sandboxReady: boolean;
+  configReady: boolean;
   bridgeTokenReady: boolean;
   mcpReady: boolean;
   launchReady: boolean;
@@ -56,7 +62,7 @@ export interface CliReadiness {
   nextAction?: { id: string; label: string };
 }
 
-export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'max' | 'xhigh';
 
 export interface ProviderModelInfo {
   id: string;
@@ -66,6 +72,11 @@ export interface ProviderModelInfo {
   reasoningEffort?: ReasoningEffort;
   contextTokenLimit?: number | null;
   maxOutputTokens?: number | null;
+}
+
+export interface ClaudeRoleModelInfo {
+  model?: string;
+  displayName?: string;
 }
 
 export interface ProviderRouteInfo {
@@ -89,8 +100,27 @@ export interface ProviderInfo {
   activeRoute?: ProviderRouteInfo | null;
   scope?: 'global' | 'local';
   models?: ProviderModelInfo[];
+  claudeModels?: {
+    sonnet?: ClaudeRoleModelInfo;
+    opus?: ClaudeRoleModelInfo;
+    fable?: ClaudeRoleModelInfo;
+    haiku?: ClaudeRoleModelInfo;
+  };
   presetId?: string;
   enabled?: boolean;
+  nativeSource?: string;
+  nativeProviderId?: string;
+}
+
+export interface NativeProviderImportInfo {
+  found: boolean;
+  imported: boolean;
+  changed?: boolean;
+  created?: boolean;
+  id?: string | null;
+  error?: string;
+  reason?: string;
+  files?: Array<{ name: string; path: string; exists: boolean }>;
 }
 
 export type PresetCategory = 'domestic' | 'overseas' | 'relay';
@@ -103,6 +133,13 @@ export interface ProviderPreset {
   apiKeyField: string;
   models: string[];
   reasoningModels: string[];
+  reasoningEffort?: ReasoningEffort;
+  claudeModels?: {
+    sonnet?: ClaudeRoleModelInfo;
+    opus?: ClaudeRoleModelInfo;
+    fable?: ClaudeRoleModelInfo;
+    haiku?: ClaudeRoleModelInfo;
+  };
   docsUrl?: string;
   category: PresetCategory;
   isTemplate?: boolean;
@@ -115,15 +152,17 @@ export const PRESET_CATEGORY_LABELS: Record<PresetCategory, string> = {
 };
 
 export const REASONING_EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string; hint: string }> = [
-  { value: 'auto',   label: '自动',  hint: '模型自决,不强制' },
-  { value: 'low',    label: '低',    hint: 'Anthropic: 4k budget / OpenAI: low' },
-  { value: 'medium', label: '中',    hint: 'Anthropic: 16k budget / OpenAI: medium' },
-  { value: 'high',   label: '高',    hint: 'Anthropic: 64k budget / OpenAI: high' },
+  { value: 'auto',   label: 'auto',   hint: '不写入固定档位,交给模型/CLI 默认策略' },
+  { value: 'low',    label: 'low',    hint: 'Claude Code: effortLevel low / Codex: low' },
+  { value: 'medium', label: 'medium', hint: 'Claude Code: effortLevel medium / Codex: medium' },
+  { value: 'high',   label: 'high',   hint: 'Claude Code: effortLevel high / Codex: high' },
+  { value: 'max',    label: 'max',    hint: 'Claude Code: CLAUDE_CODE_EFFORT_LEVEL=max' },
+  { value: 'xhigh',  label: 'xhigh',  hint: 'Codex: model_reasoning_effort=xhigh' },
 ];
 
 export interface ScanCounts {
   total: number;
-  sandboxed: number;
+  configured: number;
   detected: number;
   missing: number;
 }
@@ -168,6 +207,7 @@ export interface ProvidersResponse {
   providers: ProviderInfo[];
   activeProviderId?: string;
   activeRoute?: ProviderRouteInfo | null;
+  nativeImport?: NativeProviderImportInfo;
 }
 
 export interface LaunchCommandResponse {
@@ -178,10 +218,30 @@ export interface LaunchCommandResponse {
   vars?: Record<string, string>;
 }
 
-export interface SandboxOpResponse {
+export interface NativeConfigOpResponse {
   ok: boolean;
   cliId?: string;
-  sandboxDir?: string;
+  configDir?: string;
+  mode?: 'host';
+  error?: string;
+}
+
+export interface AgentConfigFileInfo {
+  name: string;
+  path: string;
+  exists: boolean;
+  editable: boolean;
+  overridden: boolean;
+  enabled?: boolean;
+  mergeStrategy?: string;
+  content: string;
+  preview?: boolean;
+}
+
+export interface AgentConfigFilesResponse {
+  ok: boolean;
+  cliId: string;
+  files: AgentConfigFileInfo[];
   error?: string;
 }
 
@@ -226,14 +286,14 @@ export interface StatusLabel {
 }
 
 export const STATUS_LABELS: Record<CliStatus, StatusLabel> = {
-  sandboxed: { text: '沙箱就绪', cls: 'status-connected', icon: '●' },
+  configured: { text: '配置就绪', cls: 'status-connected', icon: '●' },
   detected:  { text: '已检测',   cls: 'status-detected',  icon: '●' },
   missing:   { text: '未安装',   cls: 'status-missing',   icon: '○' },
 };
 
 export const FILTER_OPTIONS: Array<{ value: 'all' | CliStatus; label: string }> = [
   { value: 'all',       label: '全部' },
-  { value: 'sandboxed', label: '沙箱就绪' },
+  { value: 'configured', label: '配置就绪' },
   { value: 'detected',  label: '已检测' },
   { value: 'missing',   label: '未安装' },
 ];

@@ -1,12 +1,9 @@
-// useAgentPanel.ts — MainConsole 刀 5b · AI Agent 面板
-// 1:1 复刻 [public/agent-panel.js](public/agent-panel.js)（627 行）
-// 多会话 Map + 嵌入式 xterm（useAgentXterm multi-instance）+ Socket agent:* 事件 + Provider 切换 + MCP 一键接入
+// useAgentPanel.ts — MainConsole AI Agent 面板
+// 只负责在 1Shell 终端里启动 VPS 本机已安装的 Claude Code / Codex CLI。
 
 import { computed, ref, type ComputedRef, type Ref } from 'vue';
 
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
-import { useHostsStore } from '@/stores/hosts';
-import { useNotifyStore } from '@/stores/notify';
 import { useAgentXterm, type AgentXtermInstance } from '@/composables/useAgentXterm';
 
 interface MinimalSocket {
@@ -35,20 +32,15 @@ export interface ProviderModelMeta {
 export interface ProviderMeta {
   id: string;
   label: string;
-  configured: boolean;
+  configured?: boolean;
   isDefault?: boolean;
+  installed?: boolean;
+  binaryPath?: string;
   activeProviderId?: string;
   activeProviderName?: string;
   activeModelId?: string | null;
   model?: string;
   models?: ProviderModelMeta[];
-}
-
-export interface AgentModelOption {
-  id: string;
-  label: string;
-  apiModel: string;
-  active: boolean;
 }
 
 export interface AgentPanelApi {
@@ -57,20 +49,16 @@ export interface AgentPanelApi {
   readonly statusText: Ref<string>;
   readonly providers: Ref<ProviderMeta[]>;
   readonly selectedProviderId: Ref<string>;
-  readonly activeModelOptions: ComputedRef<AgentModelOption[]>;
-  readonly mcpConfigured: Ref<boolean>;
   readonly hasSessions: ComputedRef<boolean>;
 
   initialize(parentEl: HTMLElement): void;
-  startAgent(useLocalEnv: boolean): Promise<void>;
+  startAgent(): Promise<void>;
   stopAgent(): void;
   clearTerminal(): void;
   switchToSession(sessionKey: string): void;
   closeSession(sessionKey: string): void;
   newSession(): Promise<void>;
   setSelectedProvider(providerId: string): void;
-  setSelectedModel(modelId: string): Promise<void>;
-  setupMcp(): Promise<void>;
 }
 
 let _instance: AgentPanelApi | null = null;
@@ -84,15 +72,8 @@ export function _resetAgentPanelSingleton(): void {
   _instance = null;
 }
 
-function getCsrfToken(): string {
-  const m = document.cookie.match(/(?:^|;\s*)mvps_csrf_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : '';
-}
-
 function create(): AgentPanelApi {
   const sessionTerminal = useSessionTerminal();
-  const hosts = useHostsStore();
-  const notify = useNotifyStore();
   const xtermManager = useAgentXterm();
 
   const sessions = ref<Map<string, AgentSession>>(new Map());
@@ -100,35 +81,8 @@ function create(): AgentPanelApi {
   const statusText = ref('未启动');
   const providers = ref<ProviderMeta[]>([]);
   const selectedProviderId = ref('claude-code');
-  const mcpConfigured = ref(false);
 
   const hasSessions = computed(() => sessions.value.size > 0);
-  const activeModelOptions = computed<AgentModelOption[]>(() => {
-    const provider = providers.value.find((p) => p.id === selectedProviderId.value);
-    if (!provider) return [];
-    const models = (provider.models || [])
-      .filter((model) => model.enabled !== false && (model.apiModel || model.displayName || model.id))
-      .map((model) => {
-        const apiModel = model.apiModel || provider.model || '';
-        const label = model.displayName || apiModel || model.id;
-        return {
-          id: model.id || apiModel,
-          label,
-          apiModel,
-          active: Boolean(provider.activeModelId && model.id === provider.activeModelId) || (!provider.activeModelId && apiModel === provider.model),
-        };
-      });
-    if (models.length > 0) return models;
-    if (provider.model) {
-      return [{
-        id: provider.activeModelId || 'default',
-        label: provider.model,
-        apiModel: provider.model,
-        active: true,
-      }];
-    }
-    return [];
-  });
 
   let sessionCounter = 0;
   let socketBound = false;
@@ -309,16 +263,19 @@ function create(): AgentPanelApi {
       socket.emit('agent:providers', (result: { ok?: boolean; providers?: ProviderMeta[]; error?: string }) => {
         if (!result?.ok) {
           providerLoadPromise = null;
-          setStatus(result?.error || '加载 Provider 失败');
+          setStatus(result?.error || '加载 Agent 入口失败');
           resolve([]);
           return;
         }
-        providers.value = result.providers || [];
+        const cliProviders = (result.providers || []).filter((provider) => ['claude-code', 'codex'].includes(provider.id));
+        providers.value = cliProviders;
+        if (!cliProviders.some((provider) => provider.id === selectedProviderId.value) && cliProviders[0]) {
+          selectedProviderId.value = cliProviders[0].id;
+        }
         providersLoaded = true;
         providerLoadPromise = null;
-        void checkMcpStatus();
-        syncProviderRuntimeStatus(result.providers || []);
-        resolve(result.providers || []);
+        syncProviderRuntimeStatus(cliProviders);
+        resolve(cliProviders);
       });
     });
 
@@ -337,81 +294,29 @@ function create(): AgentPanelApi {
       return;
     }
 
-    if (selected.configured) {
-      const channel = selected.activeProviderName || '已配置渠道';
-      setStatus(`就绪 · ${channel}`);
-      return;
-    }
-
-    setStatus('未配置 API · 请先到 AI CLI 接入页配置');
+    setStatus(selected.installed === false ? `未检测到 · ${selected.label}` : `可启动 · ${selected.binaryPath || selected.label}`);
   }
 
-  async function checkMcpStatus(): Promise<boolean> {
-    try {
-      const res = await fetch(`/api/agent/sandbox/status/${encodeURIComponent(selectedProviderId.value)}`);
-      const json = await res.json() as { sandboxed?: boolean };
-      const sandboxed = Boolean(json?.sandboxed);
-      mcpConfigured.value = sandboxed;
-      return sandboxed;
-    } catch {
-      mcpConfigured.value = false;
-      return false;
-    }
-  }
-
-  async function ensureMcpSetup(): Promise<boolean> {
-    const configured = await checkMcpStatus();
-    if (configured) return false;
-
-    const meta = providers.value.find((p) => p.id === selectedProviderId.value);
-    const label = meta?.label || selectedProviderId.value;
-    appendSystemLine(`[Setup] 检测到 ${label} 沙箱未就绪，正在自动创建…`);
-
-    const res = await fetch(`/api/agent/sandbox/ensure/${encodeURIComponent(selectedProviderId.value)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-csrf-token': getCsrfToken() },
-      body: JSON.stringify({}),
-    });
-    const json = await res.json() as { ok?: boolean; error?: string; sandboxDir?: string };
-
-    if (!json.ok) {
-      throw new Error(json.error || '沙箱创建失败');
-    }
-
-    mcpConfigured.value = true;
-    appendSystemLine(`[Setup] ${label} 沙箱已就绪，新启动的会话将自动加载 1Shell 工具。`);
-    return true;
-  }
-
-  async function ensureProviderReadyForLaunch(): Promise<ProviderMeta> {
-    await loadProviders(true);
-    const selected = providers.value.find((p) => p.id === selectedProviderId.value);
-    if (!selected) {
-      throw new Error('当前 CLI 不存在，请刷新页面后重试');
-    }
-    if (!selected.configured) {
-      throw new Error('当前 CLI 未配置 API 渠道，请先到 AI CLI 接入页配置');
-    }
-    return selected;
-  }
-
-  async function startAgent(useLocalEnv: boolean): Promise<void> {
+  async function startAgent(): Promise<void> {
     const socket = getSocket();
     if (!socket) {
       throw new Error('当前环境未就绪，无法启动 Agent');
     }
 
     bindSocketEvents();
-    setStatus(useLocalEnv ? '本地启动中…' : '启动中…');
+    setStatus('启动中…');
 
-    try {
-      if (!useLocalEnv) {
-        await ensureProviderReadyForLaunch();
-      }
-      await ensureMcpSetup();
-    } catch (error) {
-      setStatus((error as Error).message || '启动 Agent 失败');
-      throw error;
+    await loadProviders(true);
+    const selected = providers.value.find((p) => p.id === selectedProviderId.value);
+    if (!selected) {
+      const message = '未找到可启动的 Claude Code 或 Codex';
+      setStatus(message);
+      throw new Error(message);
+    }
+    if (selected.installed === false) {
+      const message = `${selected.label} 未安装或不在 PATH 中`;
+      setStatus(message);
+      throw new Error(message);
     }
 
     const sessionKey = `s${++sessionCounter}`;
@@ -424,7 +329,7 @@ function create(): AgentPanelApi {
         hostId: 'local',
         cols: 100,
         rows: 28,
-        useLocalEnv,
+        useLocalEnv: true,
       }, (result: { ok?: boolean; session?: { id: string; providerId: string; status: string; providerLabel: string; useLocalEnv?: boolean }; error?: string }) => {
         if (!result?.ok) {
           setStatus(result?.error || '启动 Agent 失败');
@@ -440,7 +345,7 @@ function create(): AgentPanelApi {
           status: session.status,
           providerLabel: session.providerLabel,
           label,
-          useLocalEnv: Boolean(session.useLocalEnv),
+          useLocalEnv: true,
         });
 
         const sess = sessions.value.get(sessionKey);
@@ -452,7 +357,7 @@ function create(): AgentPanelApi {
         }
 
         switchToSession(sessionKey);
-        setStatus(`运行中 · ${session.providerLabel || 'Agent'}${useLocalEnv ? ' · 本地环境' : ''}`);
+        setStatus(`运行中 · ${session.providerLabel || 'Agent'}`);
         resolve();
       });
     });
@@ -468,67 +373,12 @@ function create(): AgentPanelApi {
   }
 
   async function newSession(): Promise<void> {
-    return startAgent(false);
+    return startAgent();
   }
 
   function setSelectedProvider(providerId: string): void {
     selectedProviderId.value = providerId;
     syncProviderRuntimeStatus(providers.value);
-    void checkMcpStatus();
-  }
-
-  async function setSelectedModel(modelId: string): Promise<void> {
-    const provider = providers.value.find((p) => p.id === selectedProviderId.value);
-    if (!provider?.activeProviderId) {
-      throw new Error('当前 CLI 没有可切换的活跃 API 渠道');
-    }
-    const option = activeModelOptions.value.find((item) => item.id === modelId);
-    if (!option) {
-      throw new Error('模型档案不存在');
-    }
-    if (option.active) return;
-
-    const res = await fetch(`/api/agent/providers/${encodeURIComponent(selectedProviderId.value)}/${encodeURIComponent(provider.activeProviderId)}/activate`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'x-csrf-token': getCsrfToken() },
-      body: JSON.stringify({ modelId }),
-    });
-    const json = await res.json() as { ok?: boolean; error?: string };
-    if (!json.ok) throw new Error(json.error || '模型切换失败');
-
-    await loadProviders(true);
-    const next = providers.value.find((p) => p.id === selectedProviderId.value);
-    const active = (next?.models || []).find((model) => model.id === modelId);
-    const label = active?.displayName || active?.apiModel || option.label;
-    appendSystemLine(`[1Shell] 模型已切换: ${label}`);
-    const activeSess = activeSessionKey.value ? sessions.value.get(activeSessionKey.value) : null;
-    if (activeSess?.status === 'ready' || activeSess?.status === 'starting') {
-      setStatus(`运行中 · ${next?.activeProviderName || next?.label || selectedProviderId.value}`);
-    } else {
-      syncProviderRuntimeStatus(providers.value);
-    }
-  }
-
-  async function setupMcp(): Promise<void> {
-    const meta = providers.value.find((p) => p.id === selectedProviderId.value);
-    const label = meta?.label || selectedProviderId.value;
-    appendSystemLine(`[Setup] 正在为 ${label} 创建沙箱…`);
-
-    const res = await fetch(`/api/agent/sandbox/ensure/${encodeURIComponent(selectedProviderId.value)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-csrf-token': getCsrfToken() },
-      body: JSON.stringify({}),
-    });
-    const json = await res.json() as { ok?: boolean; error?: string; sandboxDir?: string };
-
-    if (!json.ok) {
-      appendSystemLine(`[Setup] 沙箱创建失败：${json.error || '未知错误'}`);
-      throw new Error(json.error || '沙箱创建失败');
-    }
-
-    appendSystemLine(`[Setup] 沙箱已就绪：${json.sandboxDir || ''}`);
-    appendSystemLine('[Setup] 下次启动该 CLI 时将自动接入 1Shell MCP');
-    mcpConfigured.value = true;
   }
 
   function handleSocketLifecycle(type: string): void {
@@ -576,8 +426,6 @@ function create(): AgentPanelApi {
     statusText,
     providers,
     selectedProviderId,
-    activeModelOptions,
-    mcpConfigured,
     hasSessions,
     initialize,
     startAgent,
@@ -587,7 +435,5 @@ function create(): AgentPanelApi {
     closeSession,
     newSession,
     setSelectedProvider,
-    setSelectedModel,
-    setupMcp,
   };
 }

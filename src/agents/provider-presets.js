@@ -16,6 +16,7 @@
  *   reasoningModels — 该 provider 的 reasoning model 前缀,补 src/agents/reasoning.js 白名单
  *   docsUrl         — 官方文档链接
  *   category        — 'domestic' | 'overseas' | 'relay' — 分组用
+ *   claudeModels    — 可选,Claude Code 的 Sonnet/Opus/Fable/Haiku 原生映射
  *
  * 数据原则:
  *   - 只做"自动填",不做"模型清单的真理来源"
@@ -171,16 +172,62 @@ const PRESET_CATEGORIES = [
   { id: 'relay', label: '中转模板' },
 ];
 
-function getPreset(id) {
-  return PROVIDER_PRESETS.find(p => p.id === id) || null;
+// cc-switch 的核心经验:同一个供应商在不同 CLI 下不是同一份配置。
+// 例如 DeepSeek 给 Claude Code 走 /anthropic 和 deepseek-v4-*。
+// Codex 不进入模板体系,保持 OpenAI/GPT 原生配置。
+// 对具体 CLI 返回可直接写入其原生配置文件的覆盖值。
+const CLI_PRESET_OVERRIDES = {
+  'claude-code': {
+    deepseek: {
+      protocol: 'anthropic',
+      apiBase: 'https://api.deepseek.com/anthropic',
+      models: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+      reasoningModels: [],
+      claudeModels: {
+        sonnet: { model: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro' },
+        opus: { model: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro' },
+        fable: { model: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro' },
+        haiku: { model: 'deepseek-v4-flash', displayName: 'DeepSeek V4 Flash' },
+      },
+    },
+  },
+  opencode: {
+    deepseek: {
+      protocol: 'openai',
+      apiBase: 'https://api.deepseek.com/v1',
+      models: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+      reasoningModels: ['deepseek-v4-pro'],
+    },
+  },
+};
+
+function clonePreset(preset) {
+  return JSON.parse(JSON.stringify(preset));
+}
+
+function applyCliPresetOverride(preset, cliId) {
+  if (!preset) return null;
+  const cloned = clonePreset(preset);
+  const override = CLI_PRESET_OVERRIDES[cliId]?.[preset.id];
+  return override ? { ...cloned, ...clonePreset(override) } : cloned;
+}
+
+function getPreset(id, cliId = '') {
+  const preset = PROVIDER_PRESETS.find(p => p.id === id) || null;
+  return applyCliPresetOverride(preset, cliId);
 }
 
 function getAllPresets() {
-  return PROVIDER_PRESETS;
+  return PROVIDER_PRESETS.map(clonePreset);
 }
 
-function getPresetsByCategory(category) {
-  return PROVIDER_PRESETS.filter(p => p.category === category);
+function getPresetsForCli(cliId) {
+  if (cliId === 'codex') return [];
+  return PROVIDER_PRESETS.map(preset => applyCliPresetOverride(preset, cliId));
+}
+
+function getPresetsByCategory(category, cliId = '') {
+  return getPresetsForCli(cliId).filter(p => p.category === category);
 }
 
 module.exports = {
@@ -188,5 +235,6 @@ module.exports = {
   PRESET_CATEGORIES,
   getPreset,
   getAllPresets,
+  getPresetsForCli,
   getPresetsByCategory,
 };

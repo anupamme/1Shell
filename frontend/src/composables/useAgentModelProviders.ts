@@ -77,7 +77,7 @@ export function useAgentModelProviders() {
       key: modelKey(provider.id, model.id),
       providerId: provider.id,
       modelId: model.id || null,
-      providerName: provider.name || '未命名渠道',
+      providerName: provider.name || '未命名配置',
       label: model.displayName || model.apiModel || provider.model || '未指定模型',
       apiModel: model.apiModel || provider.model || '',
       reasoningEffort: model.reasoningEffort || provider.reasoningEffort,

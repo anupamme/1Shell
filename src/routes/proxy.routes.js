@@ -757,79 +757,6 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
     return p;
   }
 
-  // ─── Claude Code 端点 (clientProtocol = anthropic) ──────────────────
-
-  async function handleAnthropicClient(cliId, cliLabel, req, res) {
-    const provider = requireProvider(cliId, cliLabel, res);
-    if (!provider) return;
-
-    const body = req.body || {};
-    const isStream = body.stream === true;
-    const upstream = provider.upstreamProtocol || 'openai';
-    const requestAbort = createRequestAbort(req, res);
-
-    if (upstream === 'anthropic') {
-      // 透传到 Anthropic API
-      const targetModel = provider.model || body.model || '';
-      if (provider.model) body.model = provider.model;
-      maybeInjectReasoning(body, provider, targetModel, 'anthropic');
-      applyMaxOutputTokens(body, provider, 'anthropic');
-      try {
-        const upResp = await callAnthropicUpstream(provider.apiBase, provider.apiKey, body, undefined, requestAbort.signal);
-        if (isStream) {
-          streamPassthrough(res, upResp.body, 'text/event-stream', requestAbort.cleanup);
-        } else {
-          const data = await upResp.json();
-          requestAbort.cleanup();
-          res.status(upResp.status).json(data);
-        }
-      } catch (err) {
-        requestAbort.cleanup();
-        log.error(`${cliLabel} Anthropic 透传失败`, { error: err.message });
-        errResponse(res, 502, `代理请求失败: ${err.message}`, 'anthropic');
-      }
-    } else {
-      // upstream = openai → 转换 Anthropic → OpenAI
-      const targetModel = provider.model || 'gpt-4o';
-      const openaiTools = convertAnthropicToolsToOpenAI(body.tools);
-      const openaiBody = {
-        model: targetModel,
-        messages: anthropicToOpenAIMessages(body.system, body.messages),
-        max_tokens: body.max_tokens || provider.maxOutputTokens || 4096,
-        stream: isStream,
-      };
-      if (body.temperature != null) openaiBody.temperature = body.temperature;
-      if (body.top_p != null) openaiBody.top_p = body.top_p;
-      if (openaiTools && openaiTools.length > 0) {
-        openaiBody.tools = openaiTools;
-        openaiBody.tool_choice = 'auto';
-      }
-      maybeInjectReasoning(openaiBody, provider, targetModel, 'openai');
-      applyMaxOutputTokens(openaiBody, provider, 'openai-chat');
-      try {
-        const upResp = await callOpenAIUpstream(provider.apiBase, provider.apiKey, openaiBody, requestAbort.signal);
-        if (!upResp.ok) {
-          const errText = await upResp.text().catch(() => '');
-          requestAbort.cleanup();
-          return errResponse(res, upResp.status, `上游 API 返回 ${upResp.status}: ${errText.substring(0, 500)}`, 'anthropic');
-        }
-        if (isStream) {
-          streamOpenAIToAnthropic(res, upResp.body, body.model || targetModel, requestAbort.cleanup);
-        } else {
-          const data = await upResp.json();
-          requestAbort.cleanup();
-          res.json(openaiToAnthropicResponse(data, body.model || targetModel));
-        }
-      } catch (err) {
-        requestAbort.cleanup();
-        log.error(`${cliLabel} 代理请求失败`, { error: err.message });
-        errResponse(res, 502, `代理请求失败: ${err.message}`, 'anthropic');
-      }
-    }
-  }
-
-  router.post('/claude/v1/messages', (req, res) => handleAnthropicClient('claude-code', 'Claude Code', req, res));
-
   // ─── Skill Runner 专用端点 ─────────────────────────────────────────
   //   Skill SDK 模式下的内部回环调用。读 'skills' 槽位的 provider，
   //   未配置时回退到 'claude-code' 的 provider，实现"零配置开箱可用"。
@@ -914,147 +841,6 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
   }
 
   router.post('/skills/v1/messages', handleSkillsClient);
-
-  router.get('/claude/v1/models', (_req, res) => {
-    res.json(buildAnthropicProxyModelList(getActive('claude-code')));
-  });
-
-  // ─── Codex / OpenCode 端点 (clientProtocol = openai) ────────────────
-
-  async function handleOpenAIClient(cliId, cliLabel, req, res) {
-    const provider = requireProvider(cliId, cliLabel, res);
-    if (!provider) return;
-
-    const body = req.body || {};
-    const isStream = body.stream === true;
-    const upstream = provider.upstreamProtocol || 'openai';
-    const requestAbort = createRequestAbort(req, res);
-
-    if (upstream === 'openai') {
-      // 透传
-      if (provider.model) body.model = provider.model;
-      maybeInjectReasoning(body, provider, body.model || '', 'openai');
-      applyMaxOutputTokens(body, provider, 'openai-chat');
-      try {
-        const upResp = await callOpenAIUpstream(provider.apiBase, provider.apiKey, { ...body, stream: isStream }, requestAbort.signal);
-        if (!upResp.ok) {
-          const errText = await upResp.text().catch(() => '');
-          requestAbort.cleanup();
-          return errResponse(res, upResp.status, `上游 API 返回 ${upResp.status}: ${errText.substring(0, 500)}`, 'openai');
-        }
-        if (isStream) {
-          streamPassthrough(res, upResp.body, undefined, requestAbort.cleanup);
-        } else {
-          const data = await upResp.json();
-          requestAbort.cleanup();
-          res.json(data);
-        }
-      } catch (err) {
-        requestAbort.cleanup();
-        log.error(`${cliLabel} 透传失败`, { error: err.message });
-        errResponse(res, 502, `代理请求失败: ${err.message}`, 'openai');
-      }
-    } else if (upstream === 'anthropic') {
-      // OpenAI request → 转换为 Anthropic → 调上游 → 转回 OpenAI
-      const system = (body.messages || []).filter(m => m.role === 'system').map(m => m.content || '').join('\n') || undefined;
-      const anthropicTools = convertOpenAIToolsToAnthropic(body.tools);
-      const anthropicBody = {
-        model: provider.model || 'claude-sonnet-4-20250514',
-        max_tokens: body.max_tokens || body.max_completion_tokens || provider.maxOutputTokens || 4096,
-        system,
-        messages: openaiMessagesToAnthropic(body.messages),
-        stream: isStream,
-      };
-      if (body.temperature != null) anthropicBody.temperature = body.temperature;
-      if (body.top_p != null) anthropicBody.top_p = body.top_p;
-      if (anthropicTools && anthropicTools.length > 0) anthropicBody.tools = anthropicTools;
-      maybeInjectReasoning(anthropicBody, provider, anthropicBody.model, 'anthropic');
-      applyMaxOutputTokens(anthropicBody, provider, 'anthropic');
-      try {
-        const upResp = await callAnthropicUpstream(provider.apiBase, provider.apiKey, anthropicBody, undefined, requestAbort.signal);
-        if (!upResp.ok) {
-          const errText = await upResp.text().catch(() => '');
-          requestAbort.cleanup();
-          return errResponse(res, upResp.status, `上游 Anthropic API 返回 ${upResp.status}: ${errText.substring(0, 500)}`, 'openai');
-        }
-        if (isStream) {
-          streamAnthropicToOpenAI(res, upResp.body, requestAbort.cleanup);
-        } else {
-          const data = await upResp.json();
-          requestAbort.cleanup();
-          res.json(anthropicToOpenAIResponse(data));
-        }
-      } catch (err) {
-        requestAbort.cleanup();
-        log.error(`${cliLabel} Anthropic 转换失败`, { error: err.message });
-        errResponse(res, 502, `代理请求失败: ${err.message}`, 'openai');
-      }
-    } else {
-      errResponse(res, 400, `不支持的 upstreamProtocol: ${upstream}`, 'openai');
-    }
-  }
-
-  router.post('/codex/v1/chat/completions', (req, res) => handleOpenAIClient('codex', 'Codex', req, res));
-  router.post('/opencode/v1/chat/completions', (req, res) => handleOpenAIClient('opencode', 'OpenCode', req, res));
-
-  // ─── Codex Responses API 端点 (wire_api = responses) ───────────────
-  //   Codex v0.120+ 强制使用 Responses API，不再支持 wire_api="chat"。
-  //   当上游也是 OpenAI 兼容时直接透传；上游是 Anthropic 时暂不支持。
-
-  async function handleResponsesClient(cliId, cliLabel, req, res) {
-    const provider = requireProvider(cliId, cliLabel, res);
-    if (!provider) return;
-
-    const body = req.body || {};
-    const isStream = body.stream === true;
-    const upstream = provider.upstreamProtocol || 'openai';
-    const requestAbort = createRequestAbort(req, res);
-
-    if (upstream !== 'openai') {
-      requestAbort.cleanup();
-      return errResponse(res, 400, `Responses API 目前仅支持 OpenAI 兼容上游，当前上游协议: ${upstream}`, 'openai');
-    }
-
-    if (provider.model) body.model = provider.model;
-    maybeInjectReasoning(body, provider, body.model || '', 'openai');
-    applyMaxOutputTokens(body, provider, 'openai-responses');
-    try {
-      const upResp = await callOpenAIResponsesUpstream(provider.apiBase, provider.apiKey, body, requestAbort.signal);
-      if (!upResp.ok) {
-        const errText = await upResp.text().catch(() => '');
-        requestAbort.cleanup();
-        return errResponse(res, upResp.status, `上游 API 返回 ${upResp.status}: ${errText.substring(0, 500)}`, 'openai');
-      }
-      if (isStream) {
-        streamPassthrough(res, upResp.body, undefined, requestAbort.cleanup);
-      } else {
-        const data = await upResp.json();
-        requestAbort.cleanup();
-        res.json(data);
-      }
-    } catch (err) {
-      requestAbort.cleanup();
-      log.error(`${cliLabel} Responses API 透传失败`, { error: err.message });
-      errResponse(res, 502, `代理请求失败: ${err.message}`, 'openai');
-    }
-  }
-
-  router.post('/codex/v1/responses', (req, res) => handleResponsesClient('codex', 'Codex', req, res));
-  router.post('/codex/responses', (req, res) => handleResponsesClient('codex', 'Codex', req, res));
-  router.post('/opencode/v1/responses', (req, res) => handleResponsesClient('opencode', 'OpenCode', req, res));
-  router.post('/opencode/responses', (req, res) => handleResponsesClient('opencode', 'OpenCode', req, res));
-  router.get('/codex/v1/models', (_req, res) => proxyModelsList('codex', res));
-  router.get('/opencode/v1/models', (_req, res) => proxyModelsList('opencode', res));
-
-  function proxyModelsList(cliId, res) {
-    res.json(buildOpenAIProxyModelList(getActive(cliId)));
-  }
-
-  // ─── 兼容旧路径 /v1/messages → Claude ──────────────────────────────
-  router.post('/v1/messages', (req, res) => handleAnthropicClient('claude-code', 'Claude Code', req, res));
-  router.get('/v1/models', (_req, res) => {
-    res.json(buildAnthropicProxyModelList(getActive('claude-code')));
-  });
 
   return router;
 }
@@ -1281,7 +1067,41 @@ function createProxyConfigStore(dataDir) {
 
   function normalizeReasoningEffort(value) {
     const v = String(value || '').trim().toLowerCase();
-    return ['auto', 'low', 'medium', 'high'].includes(v) ? v : 'auto';
+    return ['auto', 'low', 'medium', 'high', 'max', 'xhigh'].includes(v) ? v : 'auto';
+  }
+
+  function normalizeClaudeRoleModel(input = {}) {
+    const source = input && typeof input === 'object' ? input : { model: input };
+    const model = String(source.model ?? source.apiModel ?? '').trim();
+    const displayName = String(source.displayName ?? source.name ?? model.replace(/\s*\[1m\]\s*$/i, '')).trim();
+    return { model, displayName: displayName || model };
+  }
+
+  function normalizeClaudeModels(input) {
+    const source = input && typeof input === 'object' ? input : {};
+    const roles = ['sonnet', 'opus', 'fable', 'haiku'];
+    const out = {};
+    let hasAny = false;
+    for (const role of roles) {
+      const normalized = normalizeClaudeRoleModel(source[role]);
+      out[role] = normalized;
+      if (normalized.model || normalized.displayName) hasAny = true;
+    }
+    return hasAny ? out : null;
+  }
+
+  function setClaudeProviderOptions(provider, source) {
+    if (hasOwn(source, 'claudeModels')) {
+      const normalized = normalizeClaudeModels(source.claudeModels);
+      if (normalized) provider.claudeModels = normalized;
+      else delete provider.claudeModels;
+    }
+    if (typeof source.enableToolSearch === 'boolean') {
+      provider.enableToolSearch = source.enableToolSearch;
+    }
+    if (typeof source.includeCoAuthoredBy === 'boolean') {
+      provider.includeCoAuthoredBy = source.includeCoAuthoredBy;
+    }
   }
 
   function normalizeOptionalPositiveInteger(value, fieldName) {
@@ -1501,7 +1321,93 @@ function createProxyConfigStore(dataDir) {
       routeModelId: modelId || null,
       scope,
       models: (projected.models || []).map(maskModelProfile),
+      claudeModels: normalizeClaudeModels(projected.claudeModels) || undefined,
+      enableToolSearch: projected.enableToolSearch === true,
+      includeCoAuthoredBy: typeof projected.includeCoAuthoredBy === 'boolean' ? projected.includeCoAuthoredBy : undefined,
+      nativeSource: projected.nativeSource || '',
+      nativeProviderId: projected.nativeProviderId || '',
     };
+  }
+
+  function makeNativeProviderId(cliId, imported) {
+    const raw = String(imported?.nativeProviderId || imported?.codexProviderId || imported?.opencodeProviderId || imported?.name || 'default')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    return `native-${cliId}-${raw || 'default'}`;
+  }
+
+  function findNativeProvider(cli, imported, desiredId) {
+    const nativeProviderId = String(imported?.nativeProviderId || '').trim();
+    return (cli.providers || []).find((provider) => {
+      if (!provider) return false;
+      if (provider.id === desiredId) return true;
+      return provider.nativeSource === 'host-config'
+        && provider.nativeCliId === imported.nativeCliId
+        && String(provider.nativeProviderId || '').trim() === nativeProviderId;
+    }) || null;
+  }
+
+  function applyImportedProvider(target, imported) {
+    if (!imported?.apiBase) throw new Error('原生配置缺少 apiBase，无法导入到配置界面');
+    target.name = String(imported.name || target.name || 'Native Provider').trim();
+    target.apiBase = normalizeProviderApiBase(imported.apiBase);
+    if (typeof imported.apiKey === 'string' && imported.apiKey.trim()) {
+      target.apiKey = imported.apiKey.trim();
+    } else if (!target.apiKey) {
+      target.apiKey = '';
+    }
+    target.upstreamProtocol = imported.upstreamProtocol || target.upstreamProtocol || 'openai';
+    target.presetId = String(imported.presetId || target.presetId || '').trim();
+    target.enabled = imported.enabled !== false;
+    target.nativeSource = 'host-config';
+    target.nativeCliId = imported.nativeCliId;
+    target.nativeProviderId = String(imported.nativeProviderId || '').trim() || 'default';
+    if (typeof imported.codexProviderId === 'string') target.codexProviderId = imported.codexProviderId.trim();
+    if (typeof imported.opencodeProviderId === 'string') target.opencodeProviderId = imported.opencodeProviderId.trim();
+    setClaudeProviderOptions(target, imported);
+    if (Array.isArray(imported.models) && imported.models.length) {
+      target.models = imported.models.map((model) => normalizeModelProfile(model));
+      target.activeModelId = imported.activeModelId || target.activeModelId || target.models[0]?.id || null;
+    } else {
+      target.model = String(imported.model || target.model || '').trim();
+      target.reasoningEffort = normalizeReasoningEffort(imported.reasoningEffort);
+      updateActiveModelFromLegacyFields(target, {
+        model: target.model,
+        reasoningEffort: target.reasoningEffort,
+      });
+    }
+    if (typeof imported.activeModelId === 'string') target.activeModelId = imported.activeModelId;
+    persistActiveModelProjection(target);
+  }
+
+  function upsertNativeProvider(cliId, importedProvider) {
+    if (!importedProvider || typeof importedProvider !== 'object') {
+      return { imported: false, changed: false, id: null };
+    }
+    const all = _readAll();
+    const cli = _ensureCli(all, cliId);
+    const desiredId = makeNativeProviderId(cliId, importedProvider);
+    const imported = {
+      ...importedProvider,
+      nativeCliId: cliId,
+      nativeProviderId: String(importedProvider.nativeProviderId || desiredId).trim(),
+    };
+    let provider = findNativeProvider(cli, imported, desiredId);
+    const created = !provider;
+    if (!provider) {
+      provider = { id: desiredId };
+      cli.providers.push(provider);
+    }
+    applyImportedProvider(provider, imported);
+    if (!cli.activeRoute?.providerId && !cli.activeProviderId) {
+      cli.activeProviderId = provider.id;
+      cli.activeRoute = { providerId: provider.id, modelId: provider.activeModelId || null };
+    }
+    persistActiveRoute(cli, getProviderRecordsForCli(all, cli));
+    _writeAll(all);
+    return { imported: true, changed: true, created, id: provider.id };
   }
 
   /** 列出某 CLI 的所有 Provider（脱敏） */
@@ -1556,6 +1462,7 @@ function createProxyConfigStore(dataDir) {
       presetId: (data.presetId || '').trim(),
       enabled: true,
     };
+    setClaudeProviderOptions(provider, data);
     if (Array.isArray(data.models)) {
       provider.models = data.models.map((model) => normalizeModelProfile(model));
       provider.activeModelId = data.activeModelId || provider.models[0]?.id || null;
@@ -1608,6 +1515,7 @@ function createProxyConfigStore(dataDir) {
     if (typeof partial.apiBase === 'string') p.apiBase = normalizeProviderApiBase(partial.apiBase);
     if (typeof partial.apiKey === 'string') p.apiKey = partial.apiKey.trim();
     if (typeof partial.upstreamProtocol === 'string') p.upstreamProtocol = partial.upstreamProtocol;
+    setClaudeProviderOptions(p, partial);
     if (Array.isArray(partial.models)) {
       p.models = partial.models.map((model) => normalizeModelProfile(model));
       p.activeModelId = partial.activeModelId || p.activeModelId || p.models[0]?.id || null;
@@ -1700,7 +1608,7 @@ function createProxyConfigStore(dataDir) {
     return result;
   }
 
-  return { listProviders, getActiveProvider, getProvider, addProvider, copyProvider, updateProvider, deleteProvider, setActive, setRoute, getAllSummary, maskKey };
+  return { listProviders, getActiveProvider, getProvider, addProvider, copyProvider, updateProvider, deleteProvider, setActive, setRoute, upsertNativeProvider, getAllSummary, maskKey };
 }
 
 module.exports = {

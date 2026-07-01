@@ -20,16 +20,9 @@ const emit = defineEmits<{
   select: [providerId: string | null, modelId?: string | null];
 }>();
 
-function fmtTokenLimit(value?: number | null): string {
-  if (!value) return '';
-  return value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
-}
-
 function modelMeta(option: AgentModelOption): string {
-  const parts = [option.providerName || '未命名渠道'];
+  const parts = [option.providerName || '未命名配置'];
   if (option.apiModel && option.apiModel !== option.label) parts.push(option.apiModel);
-  if (option.contextTokenLimit) parts.push(`ctx ${fmtTokenLimit(option.contextTokenLimit)}`);
-  if (option.maxOutputTokens) parts.push(`out ${fmtTokenLimit(option.maxOutputTokens)}`);
   return parts.join(' · ');
 }
 </script>
@@ -74,7 +67,7 @@ function modelMeta(option: AgentModelOption): string {
     </button>
 
     <div v-if="loading" class="ide-model-slash-empty">读取模型配置中...</div>
-    <div v-else-if="!options.length" class="ide-model-slash-empty">暂无可用模型，前往 AI 配置添加渠道</div>
+    <div v-else-if="!options.length" class="ide-model-slash-empty">暂无可用模型，前往 AI 配置添加模型接入</div>
   </div>
 </template>
 
