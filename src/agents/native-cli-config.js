@@ -14,7 +14,6 @@ function createNativeCliConfig({
   bridgeToken,
   port,
   proxyConfigStore,
-  claudeCodeSkillRegistry,
   mcpPresetStore,
   logger,
   homeDir = os.homedir(),
@@ -420,7 +419,6 @@ function createNativeCliConfig({
       writeConfigTargetText(cliId, configFile.name, targetPath, incoming.get(configFile.name));
     }
 
-    runPostEnableHooks(manifest, cliId);
     writeManifestMeta(cliId, { updatedAt: new Date().toISOString(), enabledBy: 'files' });
     return dir;
   }
@@ -475,7 +473,6 @@ function createNativeCliConfig({
       }
     }
 
-    runPostEnableHooks(manifest, cliId);
     writeManifestMeta(cliId, {
       updatedAt: new Date().toISOString(),
       enabledBy: 'generated',
@@ -483,108 +480,6 @@ function createNativeCliConfig({
       activeModelId: resolvedProvider?.activeModelId || resolvedProvider?.routeModelId || '',
     });
     return dir;
-  }
-
-  function runPostEnableHooks(manifest, cliId) {
-    for (const hookId of (manifest.postEnsureHooks || [])) {
-      const hook = POST_ENSURE_HOOKS[hookId];
-      if (!hook) {
-        logger?.warn?.(`[native-cli-config] 未知 postEnsureHook: ${hookId} (cliId=${cliId})`);
-        continue;
-      }
-      try {
-        hook(cliId);
-      } catch (err) {
-        logger?.warn?.(`[native-cli-config] postEnsureHook '${hookId}' 失败: ${err.message}`);
-      }
-    }
-  }
-
-  function syncClaudeCodeSkills() {
-    if (!claudeCodeSkillRegistry?.listSkills) return;
-
-      const dir = getConfigDir('claude-code');
-    const skillsDir = path.join(dir, 'skills');
-    const metaPath = path.join(skillsDir, '.1shell-managed.json');
-    const previous = safeReadJSON(metaPath);
-    const previousDirs = Array.isArray(previous?.dirs) ? previous.dirs : [];
-
-    for (const name of previousDirs) {
-      const target = path.join(skillsDir, safeSkillSegment(name));
-      if (isInside(skillsDir, target) && fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
-    }
-
-    const synced = [];
-    for (const pkg of claudeCodeSkillRegistry.listSkills()) {
-      if (pkg.enabled === false || !pkg.sourceDir || !Array.isArray(pkg.skills)) continue;
-      for (const skill of pkg.skills) {
-        const sourcePath = path.resolve(pkg.sourceDir, skill.path || 'SKILL.md');
-        const sourceDir = path.dirname(sourcePath);
-        const sourceRoot = path.resolve(pkg.sourceDir);
-        if (!isInside(sourceRoot, sourcePath) || !fs.existsSync(sourcePath)) continue;
-
-        const dirName = uniqueSkillDirName(pkg, skill, synced);
-        const targetDir = path.join(skillsDir, dirName);
-        fs.rmSync(targetDir, { recursive: true, force: true });
-        copySkillDir(sourceDir, targetDir);
-        synced.push(dirName);
-      }
-    }
-
-    fs.mkdirSync(skillsDir, { recursive: true });
-    safeWriteJSON(metaPath, { updatedAt: new Date().toISOString(), dirs: synced });
-  }
-
-  function uniqueSkillDirName(pkg, skill, synced) {
-    const base = safeSkillSegment(pkg.skills.length === 1 ? (skill.id || pkg.id) : `${pkg.id}-${skill.id}`);
-    let name = base;
-    let counter = 2;
-    while (synced.includes(name)) {
-      name = `${base}-${counter}`;
-      counter += 1;
-    }
-    return name;
-  }
-
-  function copySkillDir(sourceDir, targetDir) {
-    fs.mkdirSync(path.dirname(targetDir), { recursive: true });
-    fs.cpSync(sourceDir, targetDir, {
-      recursive: true,
-      force: true,
-      filter: shouldCopySkillPath,
-    });
-  }
-
-  function shouldCopySkillPath(src) {
-    const parts = path.resolve(src).split(path.sep);
-    return !parts.some((part) => part === '.git' || part === 'node_modules');
-  }
-
-  function safeSkillSegment(value) {
-    return String(value || 'skill').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'skill';
-  }
-
-  function isInside(root, target) {
-    const rel = path.relative(path.resolve(root), path.resolve(target));
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-  }
-
-  function getClaudeCodeActivationPrompt() {
-    if (!hasEnabledClaudeCodeSkill('using-superpowers')) return '';
-    return [
-      'This 1Shell internal Claude Code session has the Superpowers skills installed.',
-      'Before starting any non-trivial goal, use the using-superpowers skill and follow its guidance for choosing relevant skills.',
-      'Do not execute repository hook scripts unless the user explicitly asks for that specific action.',
-    ].join('\n');
-  }
-
-  function hasEnabledClaudeCodeSkill(skillId) {
-    if (!claudeCodeSkillRegistry?.listSkills) return false;
-    const target = safeSkillSegment(skillId);
-    return claudeCodeSkillRegistry.listSkills().some((pkg) => {
-      if (pkg.enabled === false || !Array.isArray(pkg.skills)) return false;
-      return pkg.skills.some((skill) => safeSkillSegment(skill.id || skill.name) === target);
-    });
   }
 
   function resolveOverrideEnv(configFile) {
@@ -629,13 +524,9 @@ function createNativeCliConfig({
   }
 
   // launchArgsBuilder 注册表 — 接 (cliId, manifest, ctx),返回追加的 arg 数组
-  // ctx 含:cwd、nativeConfigDir、helpers(getClaudeMcpConfigPath / getClaudeCodeActivationPrompt)
   const LAUNCH_ARGS_BUILDERS = {
     'claude-mcp-args': (cliId, manifest, ctx) => {
-      const extra = ['--strict-mcp-config', '--mcp-config', getClaudeMcpConfigPath()];
-      const activationPrompt = getClaudeCodeActivationPrompt();
-      if (activationPrompt) extra.push('--append-system-prompt', activationPrompt);
-      return extra;
+      return ['--strict-mcp-config', '--mcp-config', getClaudeMcpConfigPath()];
     },
   };
 
@@ -694,11 +585,6 @@ function createNativeCliConfig({
     if (!/[\s"']/.test(value)) return value;
     return shell === 'powershell' ? `& ${quotePowerShellArg(value)}` : quoteShellArg(value);
   }
-
-  // postEnsureHooks 注册表 — 接 (cliId),在 ensureNativeConfig 写完所有 config 后跑
-  const POST_ENSURE_HOOKS = {
-    'sync-claude-skills': () => syncClaudeCodeSkills(),
-  };
 
   // overwriteBuilder 注册表 — 每个 builder 接 (cliId, configFile),返回 JSON 对象
   const OVERWRITE_BUILDERS = {

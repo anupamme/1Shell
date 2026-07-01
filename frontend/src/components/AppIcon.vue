@@ -112,6 +112,12 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <circle cx="12" cy="12" r="1.5" />
     </template>
 
+    <!-- 搜索 -->
+    <template v-else-if="name === 'search'">
+      <circle cx="11" cy="11" r="7" />
+      <path d="M20 20l-4-4" />
+    </template>
+
     <!-- 探针：信号塔 -->
     <template v-else-if="name === 'radio'">
       <circle cx="12" cy="12" r="1.5" />

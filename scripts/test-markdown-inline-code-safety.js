@@ -78,7 +78,7 @@ assert.ok(
 );
 const partialStreamText = streamingPlainText([
   '## 主机信息',
-  '- 主机名：`gs-weidu12123-lax-1',
+  '- 主机名：`demo-host-lax-1',
   '- CPU 使用率：约 **1.64',
   '- Load：`0.19`',
 ].join('\n'));
@@ -86,7 +86,7 @@ assert.strictEqual(
   partialStreamText,
   [
     '主机信息',
-    '- 主机名：gs-weidu12123-lax-1',
+    '- 主机名：demo-host-lax-1',
     '- CPU 使用率：约 1.64',
     '- Load：0.19',
   ].join('\n'),

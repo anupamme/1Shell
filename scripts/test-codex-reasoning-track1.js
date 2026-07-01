@@ -40,7 +40,6 @@ function withNativeConfigHarness(reasoningEffort) {
         getActiveProvider: () => provider,
         listProviders: () => ({ providers: [provider], activeProviderId: 'p' }),
       },
-      claudeCodeSkillRegistry: null,
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     });
     nativeConfig.ensureNativeConfig('codex', { cwd: '/track1-cwd' });

@@ -2,50 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const { parseFrontmatter } = require('./registry');
-
-function previewClaudeCodeSkillConversion({ packageInfo, skillsDir }) {
-  const sourceSkills = getConvertibleSkills(packageInfo);
-  const used = new Set();
-  return {
-    packageId: packageInfo.id,
-    packageName: packageInfo.name || packageInfo.id,
-    conversions: sourceSkills.map((skill) => buildConversionPreview({ packageInfo, skill, skillsDir, used })),
-  };
-}
-
-function convertClaudeCodeSkillPackage({ packageInfo, skillsDir }) {
-  const preview = previewClaudeCodeSkillConversion({ packageInfo, skillsDir });
-  const converted = [];
-
-  for (const item of preview.conversions) {
-    const sourcePath = path.resolve(packageInfo.sourceDir, item.sourcePath);
-    const sourceDir = path.dirname(sourcePath);
-    const targetDir = path.join(skillsDir, item.targetId);
-    if (!isInside(skillsDir, targetDir)) throw new Error(`目标 Skill 路径不合法: ${item.targetId}`);
-    if (!isInside(packageInfo.sourceDir, sourcePath)) throw new Error(`源 Skill 路径不合法: ${item.sourcePath}`);
-    if (!fs.existsSync(sourcePath)) throw new Error(`源 SKILL.md 不存在: ${item.sourcePath}`);
-    if (fs.existsSync(targetDir)) throw new Error(`目标 1Shell Skill 已存在: ${item.targetId}`);
-
-    fs.mkdirSync(path.dirname(targetDir), { recursive: true });
-    fs.cpSync(sourceDir, targetDir, {
-      recursive: true,
-      force: false,
-      errorOnExist: true,
-      filter: shouldCopySkillPath,
-    });
-
-    fs.writeFileSync(path.join(targetDir, 'SKILL.md'), buildConvertedSkillMd({ sourcePath, item, packageInfo }), 'utf8');
-    converted.push({ ...item, targetDir });
-  }
-
-  return { ...preview, converted };
-}
 
 function buildSkillAdaptationSource({ packageInfo }) {
   const files = collectPackageFiles(packageInfo.sourceDir, 20, 50000);
   const lines = [];
-  lines.push(`# Claude Code Skill Package: ${packageInfo.name || packageInfo.id}`);
+  lines.push(`# External Skill Package: ${packageInfo.name || packageInfo.id}`);
   lines.push(`packageId: ${packageInfo.id}`);
   if (packageInfo.description) lines.push(`description: ${packageInfo.description}`);
   if (packageInfo.repoUrl) lines.push(`repoUrl: ${packageInfo.repoUrl}`);
@@ -106,51 +67,6 @@ function commitSkillAdaptationProposal({ proposal, skillsDir }) {
   return { ...proposal, targetId, targetDir, files };
 }
 
-function getConvertibleSkills(packageInfo) {
-  if (!packageInfo?.sourceDir || !Array.isArray(packageInfo.skills)) return [];
-  return packageInfo.skills
-    .filter((skill) => skill?.path && fs.existsSync(path.resolve(packageInfo.sourceDir, skill.path)))
-    .filter((skill) => isInside(packageInfo.sourceDir, path.resolve(packageInfo.sourceDir, skill.path)));
-}
-
-function buildConversionPreview({ packageInfo, skill, skillsDir, used }) {
-  const sourcePath = path.resolve(packageInfo.sourceDir, skill.path);
-  const raw = fs.readFileSync(sourcePath, 'utf8');
-  const { meta } = parseFrontmatter(raw);
-  const name = String(meta.name || skill.name || skill.id || packageInfo.name || packageInfo.id).trim();
-  const description = String(meta.description || skill.description || packageInfo.description || '').trim();
-  const targetId = uniqueSkillId(safeSegment(skill.id || name || packageInfo.id), skillsDir, used);
-  used.add(targetId);
-  return {
-    sourceSkillId: skill.id || path.basename(path.dirname(sourcePath)),
-    sourcePath: String(skill.path).replace(/\\/g, '/'),
-    targetId,
-    name,
-    description,
-    tags: normalizeTags(meta.tags || skill.tags || packageInfo.tags),
-  };
-}
-
-function buildConvertedSkillMd({ sourcePath, item, packageInfo }) {
-  const raw = fs.readFileSync(sourcePath, 'utf8');
-  const { body } = parseFrontmatter(raw);
-  const tags = Array.from(new Set(['converted', 'claude-code-skill', ...normalizeTags(item.tags)]));
-  const frontmatter = [
-    '---',
-    `name: ${quoteYaml(item.name || item.targetId)}`,
-    'icon: "skill"',
-    'hidden: false',
-    'forceLocal: true',
-    `description: ${quoteYaml(item.description || `Converted from Claude Code Skill ${packageInfo.id}`)}`,
-    'category: imported',
-    'tags:',
-    ...tags.map((tag) => `  - ${quoteYaml(tag)}`),
-    '---',
-    '',
-  ].join('\n');
-  return `${frontmatter}${String(body || '').trim()}\n`;
-}
-
 function uniqueSkillId(base, skillsDir, used) {
   const cleanBase = safeSegment(base) || 'imported-skill';
   let id = cleanBase;
@@ -197,7 +113,7 @@ function scanCompatibilitySignals(files) {
   if (/\b(Read|Edit|Bash|Grep|Glob|Write)\b/.test(text)) signals.push('检测到 Claude Code 工具名，需要改写为 1Shell AI 的能力描述。');
   if (/mcp__/i.test(text)) signals.push('检测到 MCP 工具引用，需要在 1Shell 仓库中单独配置 MCP。');
   if (/worktree|git worktree/i.test(text)) signals.push('检测到 git worktree 开发流程，通常只适合 Claude Code。');
-  if (signals.length === 0) signals.push('未检测到明显 Claude Code 重型运行时依赖。');
+  if (signals.length === 0) signals.push('未检测到明显外部 agent 运行时依赖。');
   return signals;
 }
 
@@ -239,16 +155,16 @@ function buildFallbackAdaptedSkillMd({ parsed, packageInfo }) {
     'icon: "skill"',
     'hidden: false',
     'forceLocal: true',
-    `description: ${quoteYaml(parsed.description || `AI adapted from Claude Code Skill ${packageInfo.id}`)}`,
+    `description: ${quoteYaml(parsed.description || `AI adapted from external Skill ${packageInfo.id}`)}`,
     'category: imported',
     'tags:',
     '  - "ai-adapted"',
-    '  - "claude-code-skill"',
+    '  - "external-skill"',
     '---',
     '',
     `# ${parsed.name || packageInfo.name || targetId}`,
     '',
-    parsed.report || '这个 Skill 由 Claude Code Skill AI 适配生成。',
+    parsed.report || '这个 Skill 由外部 Skill AI 适配生成。',
     '',
   ].join('\n');
 }
@@ -257,17 +173,8 @@ function isTextLikeFile(name) {
   return /(^SKILL\.md$|\.(md|txt|json|yaml|yml)$)/i.test(name);
 }
 
-function normalizeTags(tags) {
-  return Array.isArray(tags) ? tags.map((tag) => String(tag).trim()).filter(Boolean) : [];
-}
-
 function quoteYaml(value) {
   return JSON.stringify(String(value || ''));
-}
-
-function shouldCopySkillPath(src) {
-  const parts = path.resolve(src).split(path.sep);
-  return !parts.some((part) => part === '.git' || part === 'node_modules');
 }
 
 function safeSegment(value) {
@@ -282,7 +189,5 @@ function isInside(root, target) {
 module.exports = {
   buildSkillAdaptationSource,
   commitSkillAdaptationProposal,
-  convertClaudeCodeSkillPackage,
   normalizeSkillAdaptationProposal,
-  previewClaudeCodeSkillConversion,
 };

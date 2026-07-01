@@ -2,7 +2,7 @@
 
 > 状态:4.7 方向调整版。当前结论:只写本机原生配置，删除 1Shell 管理配置路径。
 > 制定日期:2026-06-30
-> 进入 4.7 前备份:`/srv/mindfs-workspaces/backups/1Shell-4.6.7-before-4.7-native-config-20260630-184409.tar.gz`
+> 进入 4.7 前备份:`<workspace-backup-path>/1Shell-4.6.7-before-4.7-native-config-20260630-184409.tar.gz`
 > 参考对象:cc-switch。借鉴核心是"直接管理各 Agent CLI 的原生配置文件",不是复制它的全部产品形态。
 
 ---
@@ -443,7 +443,7 @@ wire_api = "responses"
 requires_openai_auth = true
 experimental_bearer_token = "..."
 
-[projects.'/srv/mindfs-workspaces/1Shell']
+[projects.'/path/to/1Shell']
 trust_level = "trusted"
 
 [windows]

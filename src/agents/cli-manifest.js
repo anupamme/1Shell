@@ -48,7 +48,6 @@ const CLI_MANIFESTS = [
 
     launchArgs: [],
     launchArgsBuilder: 'claude-mcp-args',
-    postEnsureHooks: ['sync-claude-skills'],
     extraEnv: { CLAUDE_CODE_ENTRYPOINT: '1shell-agent-panel' },
   },
 

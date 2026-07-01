@@ -137,26 +137,12 @@ Avoid these mistakes:
 
 ## Recommended Next Implementation
 
-### 1. Add a Real Task-Authoring Skill
+### 1. Keep Task Authoring Out of 1Shell Skills
 
-Create a dedicated 1Shell skill, probably:
-
-- `data/skills/oneshell-task-authoring/SKILL.md`
-
-Purpose:
-
-- Only used for `/task`.
-- Teaches the authoring flow:
-  - understand task goal
-  - propose simulation/real practice plan
-  - collect test inputs/secrets
-  - execute and iterate
-  - verify
-  - package successful path
-
-Do not load this skill globally.
-
-The IDE `/task` entry should load this skill body or invoke a skill-loading helper only for task sessions. The normal 1Shell AI must stay pure.
+2026-07-01 update: the old hidden task-authoring Skill was removed. Do not
+revive `/task` behavior through a bundled 1Shell Skill or forced skill injection.
+1Shell AI is now a real agent, and task authoring should stay in the IDE
+entry/capability/tool policy layer instead of appearing as an imported Skill.
 
 ### 2. Keep Tool-Level Evidence Gate
 
@@ -261,8 +247,6 @@ Likely files:
   - keep `task_authoring` capability only for `entry === 'task'`
 - `src/harness/capabilities.js`
   - keep task tools scoped to task authoring capability
-- `data/skills/oneshell-task-authoring/SKILL.md`
-  - new task authoring skill, if we revive skill influence for `/task`
 - `scripts/test-task-authoring-capability.js`
   - extend or add a new test for evidence gating
 

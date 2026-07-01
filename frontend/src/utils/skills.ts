@@ -1,39 +1,3 @@
-export interface SkillInfo {
-  id: string;
-  name?: string;
-  description?: string;
-  icon?: string;
-  tags?: string[];
-  category?: 'system' | string;
-}
-
-export interface ClaudeCodeSkillEntry {
-  id: string;
-  name?: string;
-  description?: string;
-  path?: string;
-  tags?: string[];
-  userInvocable?: boolean;
-}
-
-export interface ClaudeCodeSkillInfo {
-  id: string;
-  kind?: 'claude-code-skill' | string;
-  name?: string;
-  description?: string;
-  tags?: string[];
-  enabled?: boolean;
-  builtin?: boolean;
-  system?: boolean;
-  deletable?: boolean;
-  repoUrl?: string;
-  installDir?: string;
-  sourceDir?: string;
-  importedAt?: string;
-  updatedAt?: string;
-  skills?: ClaudeCodeSkillEntry[];
-}
-
 export interface McpInfo {
   id: string;
   name: string;
@@ -55,23 +19,8 @@ export interface McpInfo {
   toolCount?: number;
 }
 
-export interface SkillsResponse {
-  skills: SkillInfo[];
-}
-
 export interface McpServersResponse {
   servers: McpInfo[];
-}
-
-export interface ClaudeCodeSkillsResponse {
-  skills: ClaudeCodeSkillInfo[];
-}
-
-export type TabKey = 'overview' | 'skill' | 'mcp' | 'local';
-
-/** 与老版 warehouse-page.js:129-130 一致：本地 = 显式 type='local' 或 有 command */
-export function isLocalMcp(m: McpInfo): boolean {
-  return m.type === 'local' || !!m.command;
 }
 
 /** 输入框逗号串 → 去空 trim 数组 */

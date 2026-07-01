@@ -23,7 +23,7 @@
 
 ## manifest 字段
 
-在 [src/agents/cli-manifest.js](/srv/mindfs-workspaces/1Shell/src/agents/cli-manifest.js) 追加 manifest。核心字段如下：
+在 [src/agents/cli-manifest.js](../src/agents/cli-manifest.js) 追加 manifest。核心字段如下：
 
 ```js
 {
@@ -79,12 +79,11 @@ nativeConfig: {
 
 ## 生成器
 
-配置生成逻辑在 [src/agents/native-cli-config.js](/srv/mindfs-workspaces/1Shell/src/agents/native-cli-config.js)。
+配置生成逻辑在 [src/agents/native-cli-config.js](../src/agents/native-cli-config.js)。
 
 - `overwriteBuilder` 用于 JSON 对象生成。
 - `template` 用于 TOML 或其它文本配置。
 - `launchArgsBuilder` 只在 CLI 必须追加动态启动参数时使用。
-- `postEnsureHooks` 只用于写完配置后的必要副作用，例如同步 Claude Code skills。
 
 加新 Agent 时优先只改 manifest。只有当该 CLI 的配置格式需要代码生成时，才添加新的 builder。
 

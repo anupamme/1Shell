@@ -50,7 +50,6 @@ function createHostNativeConfigHarness(dataDir, homeDir) {
       getActiveProvider: (cliId) => makeProvider(cliId),
       listProviders: (cliId) => ({ providers: [makeProvider(cliId)], activeProviderId: makeProvider(cliId).id }),
     },
-    claudeCodeSkillRegistry: null,
     mcpPresetStore: null,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   });

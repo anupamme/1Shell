@@ -69,7 +69,6 @@ try {
     bridgeToken: 'BRIDGE_TOKEN_FOR_MODEL_ROUTING_TEST',
     port: 3399,
     proxyConfigStore,
-    claudeCodeSkillRegistry: null,
     mcpPresetStore: null,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   });

@@ -1015,22 +1015,10 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
   function resolveSessionSkillContext({ message, context, entry }) {
     try {
       const normalizedEntry = normalizePromptEntry(entry);
-      const forcedSkillIds = normalizedEntry === 'task' ? ['oneshell-task-authoring'] : [];
-      const existingSkillIds = []
-        .concat(context?.activeSkillIds || [])
-        .concat(context?.skillIds || [])
-        .concat(context?.skillId || [])
-        .filter(Boolean);
-      const skillContext = forcedSkillIds.length > 0
-        ? {
-          ...(context && typeof context === 'object' && !Array.isArray(context) ? context : {}),
-          activeSkillIds: [...new Set(existingSkillIds.concat(forcedSkillIds))],
-        }
-        : context;
       return resolveAiSkillContext({
         skillRegistry,
         message,
-        context: skillContext,
+        context,
         entry: normalizedEntry,
       });
     } catch (err) {

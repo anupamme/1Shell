@@ -100,7 +100,7 @@ function buildAiSkillPrompt(skills = [], {
   if (!selected.length) return '';
 
   // 渐进式披露（progressive disclosure）：
-  //   - inline：被显式点名 / 系统强制的 skill（如 task authoring 工作手册）直接给全文，立即可用。
+  //   - inline：被显式点名的 skill 直接给全文，立即可用。
   //   - catalog：用户启用的其余 skill 只列 name + description + id，由 agent 自己判断是否需要，
   //     再用 load_skill 读完整 SKILL.md。这与 Claude Code / Codex 的通用 skill 用法一致，
   //     skill 文件跨 agent 通用，且只有 metadata 常驻上下文、正文按需加载。

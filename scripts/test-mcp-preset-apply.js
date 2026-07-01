@@ -37,7 +37,6 @@ function makeNativeConfigHarness(tmpDir, mcpPresetStore) {
       getActiveProvider: () => makeStubProvider(),
       listProviders: () => ({ providers: [makeStubProvider()], activeProviderId: 'p' }),
     },
-    claudeCodeSkillRegistry: null,
     mcpPresetStore,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   });

@@ -5,51 +5,12 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { parseFrontmatter } = require('./registry');
 
-const BUILTIN_CLAUDE_CODE_SKILL_IDS = new Set([
-  'oneshell-skill-authoring',
-]);
-
-function createClaudeCodeSkillRegistry({ dataDir, logger } = {}) {
-  const rootDir = path.join(dataDir, 'claude-code-skills');
-
-  function listSkills() {
-    ensureRoot();
-    return fs.readdirSync(rootDir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => readPackage(rootDir, entry.name))
-      .filter(Boolean)
-      .sort((a, b) => String(b.updatedAt || b.importedAt || '').localeCompare(String(a.updatedAt || a.importedAt || '')));
-  }
-
-  function getSkill(id) {
-    return readPackage(rootDir, assertSafeId(id));
-  }
-
-  async function inspect(input = {}) {
-    const repo = normalizeGitHubRepoUrl(input.repoUrl);
-    const id = assertMutableId(input.id || `${repo.owner}-${repo.repo}`);
-    const packageDir = path.join(rootDir, id);
-    const sourceDir = path.join(packageDir, 'source');
-    await ensureRepo(repo.cloneUrl, sourceDir);
-    const discovered = discoverSkills(sourceDir);
-    const readme = readFirstText(sourceDir, ['README.md', 'readme.md', 'README.MD']);
-    return {
-      id,
-      repoUrl: repo.webUrl,
-      installDir: packageDir,
-      sourceDir,
-      name: packageName(repo, discovered),
-      description: packageDescription(repo, discovered, readme),
-      tags: ['claude-code-skill'],
-      enabled: true,
-      skills: discovered,
-      warnings: discovered.length ? [] : ['未在仓库中发现 SKILL.md；仍可托管，但不会显示可用 Skill 入口。'],
-    };
-  }
+function createSkillImportStager({ dataDir, logger } = {}) {
+  const rootDir = path.join(dataDir, 'skill-import-staging');
 
   async function register(input = {}) {
     const repo = normalizeGitHubRepoUrl(input.repoUrl);
-    const id = assertMutableId(input.id || `${repo.owner}-${repo.repo}`);
+    const id = assertSafeId(input.id || `${repo.owner}-${repo.repo}`);
     const packageDir = path.join(rootDir, id);
     const sourceDir = path.join(packageDir, 'source');
     await ensureRepo(repo.cloneUrl, sourceDir);
@@ -59,11 +20,11 @@ function createClaudeCodeSkillRegistry({ dataDir, logger } = {}) {
     const previous = readJson(path.join(packageDir, 'manifest.json'));
     const manifest = {
       id,
-      kind: 'claude-code-skill',
+      kind: 'skill-import-stage',
       name: String(input.name || packageName(repo, discovered)).trim(),
       description: String(input.description || packageDescription(repo, discovered, readFirstText(sourceDir, ['README.md', 'readme.md', 'README.MD']))).trim(),
-      tags: Array.isArray(input.tags) ? input.tags.map(String).filter(Boolean) : ['claude-code-skill'],
-      enabled: input.enabled != null ? input.enabled !== false : previous?.enabled !== false,
+      tags: Array.isArray(input.tags) ? input.tags.map(String).filter(Boolean) : ['github-skill'],
+      enabled: true,
       repoUrl: repo.webUrl,
       installDir: packageDir,
       sourceDir,
@@ -77,30 +38,8 @@ function createClaudeCodeSkillRegistry({ dataDir, logger } = {}) {
     return manifest;
   }
 
-  function reload() {
-    return listSkills().length;
-  }
-
-  function updateSkill(id, patch = {}) {
+  function deleteImport(id) {
     const safeId = assertSafeId(id);
-    const current = readPackage(rootDir, safeId);
-    if (!current) return null;
-    const packageDir = path.join(rootDir, safeId);
-    const next = {
-      ...current,
-      enabled: patch.enabled != null ? patch.enabled !== false : current.enabled !== false,
-      updatedAt: new Date().toISOString(),
-    };
-    if (typeof patch.name === 'string' && patch.name.trim()) next.name = patch.name.trim();
-    if (typeof patch.description === 'string') next.description = patch.description.trim();
-    if (Array.isArray(patch.tags)) next.tags = patch.tags.map(String).filter(Boolean);
-    fs.mkdirSync(packageDir, { recursive: true });
-    fs.writeFileSync(path.join(packageDir, 'manifest.json'), JSON.stringify(next, null, 2), 'utf8');
-    return next;
-  }
-
-  function deleteSkill(id) {
-    const safeId = assertMutableId(id);
     const dir = path.join(rootDir, safeId);
     if (!fs.existsSync(dir)) return false;
     fs.rmSync(dir, { recursive: true, force: true });
@@ -140,7 +79,7 @@ function createClaudeCodeSkillRegistry({ dataDir, logger } = {}) {
         maxBuffer: 8 * 1024 * 1024,
         windowsHide: true,
       }, (error, stdout, stderr) => {
-        if (error) logger?.warn?.(`[claude-skill-import] ${command} failed: ${error.message}`);
+        if (error) logger?.warn?.(`[skill-ai-import] ${command} failed: ${error.message}`);
         resolve({
           exitCode: error ? (error.code || 1) : 0,
           stdout: stdout || '',
@@ -154,7 +93,7 @@ function createClaudeCodeSkillRegistry({ dataDir, logger } = {}) {
     fs.mkdirSync(rootDir, { recursive: true });
   }
 
-  return { listSkills, getSkill, inspect, register, reload, updateSkill, deleteSkill };
+  return { register, deleteImport };
 }
 
 function discoverSkills(sourceDir) {
@@ -197,44 +136,6 @@ function skillFilesUnder(dir) {
     .map((entry) => path.join(dir, entry.name, 'SKILL.md'));
 }
 
-function readPackage(rootDir, id) {
-  const safeId = assertSafeId(id);
-  const packageDir = path.join(rootDir, safeId);
-  const manifestPath = path.join(packageDir, 'manifest.json');
-  const manifest = readJson(manifestPath);
-  if (manifest) return withBuiltinFlags(manifest, safeId);
-  if (!fs.existsSync(packageDir)) return null;
-  const sourceDir = path.join(packageDir, 'source');
-  return {
-    id: safeId,
-    kind: 'claude-code-skill',
-    name: safeId,
-    description: '',
-    tags: ['claude-code-skill'],
-    enabled: true,
-    installDir: packageDir,
-    sourceDir,
-    skills: fs.existsSync(sourceDir) ? discoverSkills(sourceDir) : [],
-    builtin: BUILTIN_CLAUDE_CODE_SKILL_IDS.has(safeId),
-    deletable: !BUILTIN_CLAUDE_CODE_SKILL_IDS.has(safeId),
-  };
-}
-
-function withBuiltinFlags(skill, id) {
-  if (!skill) return skill;
-  const builtin = BUILTIN_CLAUDE_CODE_SKILL_IDS.has(id);
-  if (!builtin) return skill;
-  return { ...skill, builtin: true, system: true, deletable: false };
-}
-
-function assertMutableId(value) {
-  const id = assertSafeId(value);
-  if (!BUILTIN_CLAUDE_CODE_SKILL_IDS.has(id)) return id;
-  const error = new Error('系统默认 Claude Code Skill 不允许删除或覆盖');
-  error.statusCode = 403;
-  throw error;
-}
-
 function normalizeGitHubRepoUrl(raw) {
   let url;
   try {
@@ -264,7 +165,7 @@ function packageName(repo, discovered) {
 
 function packageDescription(repo, discovered, readme) {
   if (discovered.length === 1 && discovered[0].description) return discovered[0].description;
-  return firstParagraph(readme) || `Claude Code Skill imported from ${repo.webUrl}`;
+  return firstParagraph(readme) || `Skill imported from ${repo.webUrl}`;
 }
 
 function readFirstText(dir, names) {
@@ -319,4 +220,4 @@ function quoteWinArg(value) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-module.exports = { createClaudeCodeSkillRegistry };
+module.exports = { createSkillImportStager };

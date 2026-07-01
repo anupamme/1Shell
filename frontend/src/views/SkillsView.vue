@@ -1,450 +1,1006 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useApiClient, ApiError } from '@/composables/useApiClient';
 import { useNotifyStore } from '@/stores/notify';
-import { useConfirm } from '@/composables/useConfirm';
-import { getCachedPageState, isPageStateFresh, readStorageState, setCachedPageState, writeStorageState } from '@/composables/usePageState';
-import {
-  isLocalMcp,
-  type McpInfo,
-  type McpServersResponse,
-  type SkillInfo,
-  type SkillsResponse,
-  type TabKey,
-} from '@/utils/skills';
 import AppIcon from '@/components/AppIcon.vue';
-import SkillCard from '@/components/skills/SkillCard.vue';
-import McpCard from '@/components/skills/McpCard.vue';
-import LocalMcpCard from '@/components/skills/LocalMcpCard.vue';
 import McpModal from '@/components/skills/McpModal.vue';
 import LocalMcpModal from '@/components/skills/LocalMcpModal.vue';
 import DeployMcpModal from '@/components/skills/DeployMcpModal.vue';
-import DeployClaudeSkillModal from '@/components/skills/DeployClaudeSkillModal.vue';
+import SkillAiImportModal from '@/components/skills/SkillAiImportModal.vue';
+import { type McpInfo, type McpServersResponse } from '@/utils/skills';
+import ClaudeIconUrl from '@/assets/agent-icons/claude.svg?url';
+import OpenAiIconUrl from '@/assets/agent-icons/openai.svg?url';
+import OpenCodeIconUrl from '@/assets/agent-icons/opencode.svg?url';
+import GeminiIconUrl from '@/assets/agent-icons/gemini.svg?url';
 
 const { requestJson } = useApiClient();
 const notify = useNotifyStore();
-const { confirm } = useConfirm();
 
-interface SkillsCache {
-  skills: SkillInfo[];
-  allMcpServers: McpInfo[];
+type CapabilityKind = 'mcp' | 'skill';
+type MatrixTab = CapabilityKind;
+
+interface CapabilityAgent {
+  id: string;
+  label: string;
+  icon?: string;
+  kind?: string;
+  installed?: boolean;
+  configured?: boolean;
+  status?: string;
+  supports?: Record<CapabilityKind, boolean>;
 }
 
-const SKILLS_PREFS_KEY = '1shell.skills.prefs.v2';
-const SKILLS_CACHE_KEY = 'skills.page.cache.v1';
-const SKILLS_CACHE_TTL_MS = 45_000;
-
-// ── 数据 ──────────────────────────────────────────
-const storedTab = readStorageState<TabKey | 'claude'>(SKILLS_PREFS_KEY, 'overview');
-const currentTab = ref<TabKey>(storedTab === 'claude' ? 'overview' : storedTab);
-const skills = ref<SkillInfo[]>([]);
-const allMcpServers = ref<McpInfo[]>([]);
-const skillLoadError = ref<string | null>(null);
-const mcpLoadError = ref<string | null>(null);
-
-const remoteMcps = computed(() => allMcpServers.value.filter((m) => !isLocalMcp(m)));
-const localMcps  = computed(() => allMcpServers.value.filter((m) => isLocalMcp(m)));
-const extensionTotal = computed(() => skills.value.length + remoteMcps.value.length + localMcps.value.length);
-
-function saveSkillsCache(): void {
-  setCachedPageState<SkillsCache>(SKILLS_CACHE_KEY, {
-    skills: skills.value,
-    allMcpServers: allMcpServers.value,
-  });
+interface CapabilityRow {
+  id: string;
+  kind: CapabilityKind;
+  name: string;
+  description?: string;
+  tags?: string[];
+  category?: string;
+  source?: string;
+  transport?: string;
+  origin?: string;
+  originPaths?: string[];
+  foundIn?: string[];
+  runtimeStatus?: string;
+  runtimeError?: string;
+  toolCount?: number;
+  managed?: boolean;
+  external?: boolean;
+  readonly?: boolean;
+  importable?: boolean;
+  exposure: Record<string, boolean>;
 }
 
-function restoreSkillsCache(): boolean {
-  const entry = getCachedPageState<SkillsCache>(SKILLS_CACHE_KEY);
-  if (!entry) return false;
-  skills.value = entry.value.skills || [];
-  allMcpServers.value = entry.value.allMcpServers || [];
-  return true;
+interface CapabilityResponse {
+  ok: boolean;
+  agents: CapabilityAgent[];
+  capabilities: CapabilityRow[];
 }
 
-// ── Modal 控制 ───────────────────────────────────
+interface ScanResponse {
+  ok: boolean;
+  scan?: {
+    mcpCount: number;
+    skillCount: number;
+    installedSkillCount?: number;
+    unmanagedSkillCount?: number;
+    warnings?: string[];
+  };
+}
+
+const activeTab = ref<MatrixTab>('mcp');
+const query = ref('');
+const agents = ref<CapabilityAgent[]>([]);
+const mcpRows = ref<CapabilityRow[]>([]);
+const skillRows = ref<CapabilityRow[]>([]);
+const loading = ref(false);
+const loadError = ref('');
+const togglingKey = ref('');
+const importingKey = ref('');
+const scanning = ref(false);
+const lastScanSummary = ref('');
+
 const mcpModalOpen = ref(false);
 const editingMcp = ref<McpInfo | null>(null);
 const localModalOpen = ref(false);
 const deployModalOpen = ref(false);
-const deployClaudeSkillModalOpen = ref(false);
+const skillAiImportModalOpen = ref(false);
+const legacyMcpServers = ref<McpInfo[]>([]);
+const oneShellIconUrl = `${import.meta.env.BASE_URL}logo.png`;
 
-// ── API ──────────────────────────────────────────
-async function loadSkills(): Promise<void> {
+const AGENT_ICON_URLS: Record<string, string> = {
+  'oneshell-ai': oneShellIconUrl,
+  'claude-code': ClaudeIconUrl,
+  codex: OpenAiIconUrl,
+  opencode: OpenCodeIconUrl,
+  gemini: GeminiIconUrl,
+};
+
+const activeRows = computed(() => activeTab.value === 'mcp' ? mcpRows.value : skillRows.value);
+const filteredRows = computed(() => {
+  const term = query.value.trim().toLowerCase();
+  if (!term) return activeRows.value;
+  return activeRows.value.filter((row) => {
+    const haystack = [
+      row.name,
+      row.id,
+      row.description,
+      row.source,
+      row.transport,
+      row.origin,
+      ...(row.originPaths || []),
+      ...(row.foundIn || []),
+      ...(row.tags || []),
+    ].join(' ').toLowerCase();
+    return haystack.includes(term);
+  });
+});
+
+const mcpCount = computed(() => mcpRows.value.length);
+const skillCount = computed(() => skillRows.value.length);
+const exposedMcpCount = computed(() => countExposed(mcpRows.value));
+const exposedSkillCount = computed(() => countExposed(skillRows.value));
+const activeAgentColumns = computed(() => agents.value.filter((agent) => agent.supports?.[activeTab.value] !== false));
+const matrixGridStyle = computed(() => ({
+  gridTemplateColumns: `minmax(18rem, 1fr) repeat(${Math.max(activeAgentColumns.value.length, 1)}, 3.25rem) 2.75rem`,
+}));
+
+function countExposed(rows: CapabilityRow[]): number {
+  return rows.filter((row) => Object.values(row.exposure || {}).some(Boolean)).length;
+}
+
+async function loadMatrix(): Promise<void> {
+  loading.value = true;
+  loadError.value = '';
   try {
-    const data = await requestJson<SkillsResponse>('/api/skills');
-    skills.value = data.skills || [];
-    skillLoadError.value = null;
-    saveSkillsCache();
+    const [mcp, skills] = await Promise.all([
+      requestJson<CapabilityResponse>('/api/host-capabilities/mcp'),
+      requestJson<CapabilityResponse>('/api/host-capabilities/skills'),
+    ]);
+    agents.value = mcp.agents?.length ? mcp.agents : (skills.agents || []);
+    mcpRows.value = mcp.capabilities || [];
+    skillRows.value = skills.capabilities || [];
   } catch (err) {
-    skillLoadError.value = err instanceof Error ? err.message : '加载失败';
+    loadError.value = err instanceof Error ? err.message : '加载失败';
+  } finally {
+    loading.value = false;
   }
 }
 
-async function loadMcps(): Promise<void> {
+async function loadLegacyMcps(): Promise<void> {
   try {
     const data = await requestJson<McpServersResponse>('/api/mcp-servers');
-    allMcpServers.value = data.servers || [];
-    mcpLoadError.value = null;
-    saveSkillsCache();
-  } catch (err) {
-    mcpLoadError.value = err instanceof Error ? err.message : '加载失败';
+    legacyMcpServers.value = data.servers || [];
+  } catch {
+    legacyMcpServers.value = [];
   }
 }
 
 async function reloadAll(): Promise<void> {
-  await Promise.all([loadSkills(), loadMcps()]);
+  await Promise.all([loadMatrix(), loadLegacyMcps()]);
 }
 
-// ── 删除 ────────────────────────────────────────
-async function onDeleteSkill(id: string): Promise<void> {
-  const s = skills.value.find((x) => x.id === id);
-  if (!s) return;
-  const ok = await confirm({
-    title: '删除 Skill',
-    message: `删除 Skill "${s.name || id}"？\n整个目录（SKILL.md + rules/ + workflows/ + references/）将被删除，不可恢复。`,
-    okText: '删除',
-  });
-  if (!ok) return;
+async function scanHost(): Promise<void> {
+  scanning.value = true;
   try {
-    await requestJson(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    notify.success('已删除');
-    await loadSkills();
+    const data = await requestJson<ScanResponse>('/api/host-capabilities/scan', { method: 'POST' });
+    const scan = data.scan;
+    const warningCount = scan?.warnings?.length || 0;
+    const externalSkillCount = scan?.skillCount ?? 0;
+    const summary = `${scan?.mcpCount || 0} 个 MCP，${externalSkillCount} 个外部 Skill`;
+    lastScanSummary.value = warningCount ? `${summary}，${warningCount} 个警告` : summary;
+    notify.success(`扫描完成：${lastScanSummary.value}`);
+    await reloadAll();
   } catch (err) {
-    const msg = err instanceof ApiError || err instanceof Error ? err.message : '删除失败';
+    const msg = err instanceof ApiError || err instanceof Error ? err.message : '扫描失败';
     notify.error(msg, 5000);
+  } finally {
+    scanning.value = false;
   }
 }
 
-async function onUpdateMcp(id: string, patch: Partial<McpInfo>): Promise<void> {
+async function toggleExposure(row: CapabilityRow, agent: CapabilityAgent): Promise<void> {
+  if (!canManageExposure(row)) {
+    notify.info('外部发现项需要先导入 1Shell 管理，才能调整暴露范围');
+    return;
+  }
+  const next = !Boolean(row.exposure?.[agent.id]);
+  const key = `${row.kind}:${row.id}:${agent.id}`;
+  if (togglingKey.value) return;
+  togglingKey.value = key;
+  row.exposure = { ...(row.exposure || {}), [agent.id]: next };
   try {
-    const data = await requestJson<{ server?: McpInfo }>(`/api/mcp-servers/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      body: JSON.stringify(patch),
-    });
-    if (data.server) {
-      allMcpServers.value = allMcpServers.value.map((m) => m.id === id ? data.server! : m);
-      saveSkillsCache();
-    } else {
-      await loadMcps();
-    }
+    const data = await requestJson<{ ok: boolean; capability?: CapabilityRow; error?: string }>(
+      `/api/host-capabilities/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}/exposure/${encodeURIComponent(agent.id)}`,
+      { method: 'PUT', body: JSON.stringify({ enabled: next }) },
+    );
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    if (data.capability) replaceRow(data.capability);
+    notify.success(next ? '已暴露给 Agent' : '已取消暴露');
   } catch (err) {
-    const msg = err instanceof ApiError || err instanceof Error ? err.message : '更新失败';
+    row.exposure = { ...(row.exposure || {}), [agent.id]: !next };
+    const msg = err instanceof ApiError || err instanceof Error ? err.message : '保存失败';
     notify.error(msg, 5000);
+  } finally {
+    togglingKey.value = '';
   }
 }
 
-async function onDeleteMcp(id: string): Promise<void> {
-  const m = allMcpServers.value.find((x) => x.id === id);
-  if (!m) return;
-  const ok = await confirm({
-    title: '删除 MCP',
-    message: `删除 MCP "${m.name}"？`,
-    okText: '删除',
-  });
-  if (!ok) return;
+async function importCapability(row: CapabilityRow): Promise<void> {
+  const key = `${row.kind}:${row.id}`;
+  if (importingKey.value) return;
+  importingKey.value = key;
   try {
-    await requestJson(`/api/mcp-servers/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    notify.success('已删除');
-    await loadMcps();
+    const data = await requestJson<{ ok: boolean; capability?: CapabilityRow; error?: string }>(
+      `/api/host-capabilities/${encodeURIComponent(row.kind)}/${encodeURIComponent(row.id)}/import`,
+      { method: 'POST' },
+    );
+    if (!data.ok) throw new Error(data.error || '导入失败');
+    notify.success('已导入 1Shell 管理');
+    await reloadAll();
   } catch (err) {
-    const msg = err instanceof ApiError || err instanceof Error ? err.message : '删除失败';
+    const msg = err instanceof ApiError || err instanceof Error ? err.message : '导入失败';
     notify.error(msg, 5000);
+  } finally {
+    importingKey.value = '';
   }
 }
 
-// ── Modal 打开 ───────────────────────────────────
+function replaceRow(row: CapabilityRow): void {
+  const target = row.kind === 'mcp' ? mcpRows : skillRows;
+  target.value = target.value.map((item) => item.id === row.id ? row : item);
+}
+
 function openNewMcp(): void {
   editingMcp.value = null;
   mcpModalOpen.value = true;
 }
-function openEditMcp(id: string): void {
-  const m = remoteMcps.value.find((x) => x.id === id);
-  if (!m) return;
-  editingMcp.value = m;
+
+function openLocalModal(): void {
+  localModalOpen.value = true;
+}
+
+function openDeployModal(): void {
+  deployModalOpen.value = true;
+}
+
+function openSkillImport(): void {
+  skillAiImportModalOpen.value = true;
+}
+
+function openEditMcp(row: CapabilityRow): void {
+  const item = legacyMcpServers.value.find((mcp) => mcp.id === row.id);
+  if (!item) {
+    notify.info('该 MCP 来自 preset 或外部发现，当前阶段只能调整暴露范围');
+    return;
+  }
+  editingMcp.value = item;
   mcpModalOpen.value = true;
 }
-function openLocalModal(): void  { localModalOpen.value = true; }
-function openDeployModal(): void { deployModalOpen.value = true; }
-function openDeployClaudeSkillModal(): void { deployClaudeSkillModalOpen.value = true; }
 
-watch(currentTab, (tab) => writeStorageState(SKILLS_PREFS_KEY, tab));
+function agentClass(agent: CapabilityAgent): string {
+  if (agent.id === 'oneshell-ai') return 'agent-oneshell';
+  if (agent.id === 'claude-code') return 'agent-claude';
+  if (agent.id === 'codex') return 'agent-codex';
+  if (agent.id === 'opencode') return 'agent-opencode';
+  return 'agent-generic';
+}
+
+function agentIconUrl(agent: CapabilityAgent): string {
+  return AGENT_ICON_URLS[agent.id] || '';
+}
+
+function agentFallback(agent: CapabilityAgent): string {
+  const label = agent.label || agent.id;
+  return label.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function agentTitle(agent: CapabilityAgent): string {
+  const parts = [agent.label || agent.id];
+  if (agent.installed === false) parts.push('未安装');
+  else if (agent.configured === false) parts.push('未配置');
+  return parts.join(' · ');
+}
+
+function sourceLabel(row: CapabilityRow): string {
+  const map: Record<string, string> = {
+    managed: '1Shell 管理',
+    preset: 'Preset',
+    oneshell: '1Shell 内置',
+    imported: '已导入',
+    installed: '外部安装',
+    external: '外部发现',
+    unmanaged: '未管理',
+  };
+  return map[row.source || ''] || row.source || '未知来源';
+}
+
+function sourceClass(row: CapabilityRow): string {
+  return `source-${row.source || 'unknown'}`;
+}
+
+function typeLabel(row: CapabilityRow): string {
+  if (row.kind === 'skill') return row.category || 'skill';
+  if (row.transport === 'stdio') return 'stdio';
+  if (row.transport === 'remote') return 'remote';
+  return row.transport || 'mcp';
+}
+
+function rowMetaLine(row: CapabilityRow): string {
+  const parts: string[] = [];
+  if (row.kind === 'mcp' && row.transport) parts.push(typeLabel(row));
+  if (row.kind === 'mcp' && Number(row.toolCount || 0) > 0) parts.push(`${row.toolCount} tools`);
+  if (row.runtimeStatus && row.runtimeStatus !== typeLabel(row)) parts.push(row.runtimeStatus);
+  return parts.slice(0, 3).join(' / ');
+}
+
+function isToggleBusy(row: CapabilityRow, agent: CapabilityAgent): boolean {
+  return togglingKey.value === `${row.kind}:${row.id}:${agent.id}`;
+}
+
+function isImportBusy(row: CapabilityRow): boolean {
+  return importingKey.value === `${row.kind}:${row.id}`;
+}
+
+function canManageExposure(row: CapabilityRow): boolean {
+  return row.managed !== false && row.readonly !== true;
+}
 
 onMounted(() => {
-  const restored = restoreSkillsCache();
-  if (!restored || !isPageStateFresh(SKILLS_CACHE_KEY, SKILLS_CACHE_TTL_MS)) void reloadAll();
+  void reloadAll();
 });
 </script>
 
 <template>
   <div class="flex flex-col flex-1 min-w-0 h-full p-2 gap-2">
-    <!-- 顶栏 -->
-    <header class="shrink-0 h-14 flex items-center px-5 bg-shell-panel rounded-2xl border border-slate-200 dark:border-[#1e293b] dark:bg-[#0f172a] shadow-sm text-slate-700 dark:text-slate-200">
-      <div class="flex items-center gap-3 shrink-0">
-        <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-          <AppIcon name="package" :size="20" />
+    <header class="matrix-header">
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="header-logo">
+          <AppIcon name="package" :size="17" />
         </span>
-        <div>
-          <div class="text-base font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-            扩展
-            <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300 font-semibold">Extensions</span>
-          </div>
-          <div class="text-[11px] text-slate-400">Skill、远程 MCP 与本地 MCP 的统一入口</div>
-        </div>
+        <h1 class="text-base font-bold text-slate-800 dark:text-slate-100 truncate">扩展</h1>
       </div>
-      <div class="flex-1"></div>
+      <div class="flex items-center gap-2 shrink-0">
+        <button type="button" class="matrix-action secondary" :disabled="loading" @click="reloadAll">
+          <AppIcon name="restart" :size="13" />
+          <span>刷新</span>
+        </button>
+        <button type="button" class="matrix-action secondary" :disabled="scanning" @click="scanHost">
+          <AppIcon name="target" :size="13" />
+          <span>{{ scanning ? '扫描中' : '扫描' }}</span>
+        </button>
+        <button v-if="activeTab === 'skill'" type="button" class="matrix-action primary" @click="openSkillImport">
+          <AppIcon name="robot" :size="13" />
+          <span>AI 导入</span>
+        </button>
+        <template v-else>
+          <button type="button" class="matrix-action secondary" @click="openLocalModal">
+            <AppIcon name="box" :size="13" />
+            <span>本地 MCP</span>
+          </button>
+          <button type="button" class="matrix-action secondary" @click="openDeployModal">
+            <AppIcon name="robot" :size="13" />
+            <span>AI 部署</span>
+          </button>
+          <button type="button" class="matrix-action primary" @click="openNewMcp">
+            <AppIcon name="plus" :size="13" />
+            <span>添加 MCP</span>
+          </button>
+        </template>
+      </div>
     </header>
 
-    <!-- Tab 切换 -->
-    <div class="shrink-0 bg-shell-panel rounded-2xl border border-slate-200 dark:border-[#1e293b] dark:bg-[#0f172a] px-4 flex items-center gap-2 text-slate-700 dark:text-slate-200">
-      <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'overview' }" @click="currentTab = 'overview'">
-        <AppIcon name="library" :size="14" />
-        <span>总览</span>
-      </button>
-      <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'skill' }" @click="currentTab = 'skill'">
-        <AppIcon name="package" :size="14" />
-        <span>Skill（<span>{{ skills.length }}</span>）</span>
-      </button>
-      <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'mcp' }" @click="currentTab = 'mcp'">
-        <AppIcon name="plug" :size="14" />
-        <span>MCP Server（<span>{{ remoteMcps.length }}</span>）</span>
-      </button>
-      <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'local' }" @click="currentTab = 'local'">
-        <AppIcon name="box" :size="14" />
-        <span>本地 MCP（<span>{{ localMcps.length }}</span>）</span>
-      </button>
-      <div class="flex-1"></div>
-      <button
-        v-if="currentTab === 'skill'"
-        type="button"
-        class="text-[11px] px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500 to-blue-500 text-white hover:opacity-90 cursor-pointer"
-        @click="openDeployClaudeSkillModal"
-      >+ 导入 Skill</button>
-      <button
-        v-if="currentTab === 'mcp'"
-        type="button"
-        class="text-[11px] px-3 py-1.5 rounded-lg bg-blue-500 text-white hover:bg-blue-600 cursor-pointer"
-        @click="openNewMcp"
-      >+ 添加 MCP</button>
-      <button
-        v-if="currentTab === 'local'"
-        type="button"
-        class="text-[11px] px-3 py-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 cursor-pointer"
-        @click="openLocalModal"
-      >+ 添加本地 MCP</button>
-      <button
-        v-if="currentTab === 'local'"
-        type="button"
-        class="text-[11px] px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500 to-blue-500 text-white hover:opacity-90 inline-flex items-center gap-1.5 cursor-pointer"
-        @click="openDeployModal"
-      >
-        <AppIcon name="robot" :size="12" />
-        <span>AI 部署</span>
-      </button>
-    </div>
+    <section class="matrix-toolbar">
+      <div class="segmented" role="tablist" aria-label="Capability type">
+        <button type="button" class="segment" :class="{ active: activeTab === 'mcp' }" @click="activeTab = 'mcp'">
+          <AppIcon name="plug" :size="14" />
+          <span>MCP</span>
+          <b>{{ mcpCount }}</b>
+        </button>
+        <button type="button" class="segment" :class="{ active: activeTab === 'skill' }" @click="activeTab = 'skill'">
+          <AppIcon name="puzzle" :size="14" />
+          <span>Skill</span>
+          <b>{{ skillCount }}</b>
+        </button>
+      </div>
 
-    <!-- 主体面板 -->
-    <main class="flex-1 min-h-0 bg-shell-panel rounded-2xl border border-slate-200 dark:border-[#1e293b] dark:bg-[#0f172a] overflow-auto p-4 text-slate-700 dark:text-slate-200">
-      <!-- 总览 -->
-      <div v-show="currentTab === 'overview'" class="min-h-full grid grid-cols-1 2xl:grid-cols-[minmax(0,1.45fr)_minmax(22rem,0.75fr)] gap-4">
-        <section class="rounded-2xl border border-slate-200 dark:border-[#1e293b] bg-white/75 dark:bg-[#0b1324] p-5 flex flex-col gap-5">
-          <div class="flex items-start justify-between gap-4">
-            <div class="min-w-0">
-              <div class="text-xl font-bold text-slate-800 dark:text-slate-100">扩展能力总览</div>
-              <div class="mt-2 max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">
-                这里收纳可复用 Skill、远程 MCP Server 和本地 MCP。先从一个入口开始，导入后会在对应标签里出现可维护的能力卡片。
-              </div>
-            </div>
-            <div class="shrink-0 h-9 px-3 rounded-full bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300 text-xs font-bold flex items-center">
-              {{ extensionTotal }} 项资产
-            </div>
-          </div>
+      <label class="search-box">
+        <AppIcon name="search" :size="13" />
+        <input v-model="query" type="search" placeholder="名称、标签、来源" />
+      </label>
+    </section>
 
-          <div class="grid grid-cols-1 xl:grid-cols-3 gap-3">
-            <button
-              type="button"
-              class="text-left min-h-[9.5rem] rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827] p-4 hover:border-sky-300 dark:hover:border-sky-500/40 transition-colors cursor-pointer"
-              @click="openDeployClaudeSkillModal"
-            >
-              <span class="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-                <AppIcon name="puzzle" :size="20" />
-              </span>
-              <span class="mt-3 block text-sm font-bold text-slate-800 dark:text-slate-100">导入 Skill</span>
-              <span class="mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400">
-                托管标准 SKILL.md，并由 1Shell runner 在目标主机上执行。
-              </span>
-              <span class="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-blue-600 dark:text-blue-300">
-                开始导入 <AppIcon name="arrow-right" :size="13" />
-              </span>
-            </button>
-
-            <button
-              type="button"
-              class="text-left min-h-[9.5rem] rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827] p-4 hover:border-emerald-300 dark:hover:border-emerald-500/40 transition-colors cursor-pointer"
-              @click="openNewMcp"
-            >
-              <span class="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300 flex items-center justify-center">
-                <AppIcon name="plug" :size="20" />
-              </span>
-              <span class="mt-3 block text-sm font-bold text-slate-800 dark:text-slate-100">添加远程 MCP</span>
-              <span class="mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400">
-                登记 URL 类 MCP Server，供 Agent 通过统一工具体系调用。
-              </span>
-              <span class="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-300">
-                添加 MCP <AppIcon name="arrow-right" :size="13" />
-              </span>
-            </button>
-
-            <button
-              type="button"
-              class="text-left min-h-[9.5rem] rounded-xl border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-[#111827] p-4 hover:border-violet-300 dark:hover:border-violet-500/40 transition-colors cursor-pointer"
-              @click="openDeployModal"
-            >
-              <span class="w-10 h-10 rounded-xl bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300 flex items-center justify-center">
-                <AppIcon name="box" :size="20" />
-              </span>
-              <span class="mt-3 block text-sm font-bold text-slate-800 dark:text-slate-100">部署本地 MCP</span>
-              <span class="mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400">
-                从 GitHub 受控部署，或在本地 MCP 标签中手动注册命令。
-              </span>
-              <span class="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-violet-600 dark:text-violet-300">
-                AI 部署 <AppIcon name="arrow-right" :size="13" />
-              </span>
-            </button>
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-auto">
-            <div class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#111827] p-4">
-              <div class="text-2xl font-bold text-slate-800 dark:text-slate-100">{{ skills.length }}</div>
-              <div class="mt-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Skill</div>
-            </div>
-            <div class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#111827] p-4">
-              <div class="text-2xl font-bold text-slate-800 dark:text-slate-100">{{ remoteMcps.length }}</div>
-              <div class="mt-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Remote MCP</div>
-            </div>
-            <div class="rounded-xl border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#111827] p-4">
-              <div class="text-2xl font-bold text-slate-800 dark:text-slate-100">{{ localMcps.length }}</div>
-              <div class="mt-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Local MCP</div>
-            </div>
-          </div>
-        </section>
-
-        <aside class="grid grid-rows-[auto_1fr] gap-4">
-          <section class="rounded-2xl border border-slate-200 dark:border-[#1e293b] bg-white/75 dark:bg-[#0b1324] p-5">
-            <div class="text-sm font-bold text-slate-800 dark:text-slate-100">导入后会出现什么</div>
-            <div class="mt-4 space-y-3">
-              <div class="flex gap-3 rounded-xl bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-[#1e293b] p-3">
-                <span class="w-7 h-7 rounded-lg bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-300 text-xs font-bold flex items-center justify-center">1</span>
-                <div class="min-w-0">
-                  <div class="text-xs font-bold text-slate-700 dark:text-slate-200">能力卡片</div>
-                  <div class="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">展示名称、描述、来源、状态和维护入口。</div>
-                </div>
-              </div>
-              <div class="flex gap-3 rounded-xl bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-[#1e293b] p-3">
-                <span class="w-7 h-7 rounded-lg bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-300 text-xs font-bold flex items-center justify-center">2</span>
-                <div class="min-w-0">
-                  <div class="text-xs font-bold text-slate-700 dark:text-slate-200">执行上下文</div>
-                  <div class="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">保留目标主机、命令、URL、GitHub 来源等必要信息。</div>
-                </div>
-              </div>
-              <div class="flex gap-3 rounded-xl bg-slate-50 dark:bg-[#111827] border border-slate-200 dark:border-[#1e293b] p-3">
-                <span class="w-7 h-7 rounded-lg bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-300 text-xs font-bold flex items-center justify-center">3</span>
-                <div class="min-w-0">
-                  <div class="text-xs font-bold text-slate-700 dark:text-slate-200">Agent 可调用</div>
-                  <div class="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">扩展进入 1Shell 的工具和 Skill 体系，供任务与 Agent 使用。</div>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="rounded-2xl border border-dashed border-slate-300 dark:border-[#334155] bg-slate-50/80 dark:bg-[#0b1324] p-5 flex flex-col items-center justify-center text-center min-h-[18rem]">
-            <span class="w-14 h-14 rounded-2xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-              <AppIcon name="package" :size="28" />
+    <main class="matrix-panel">
+      <div v-if="loadError" class="state-message text-red-500">
+        {{ loadError }}
+      </div>
+      <div v-else-if="loading && activeRows.length === 0" class="state-message">
+        正在加载扩展矩阵
+      </div>
+      <div v-else-if="filteredRows.length === 0" class="state-message">
+        没有匹配的 {{ activeTab === 'mcp' ? 'MCP' : 'Skill' }}
+      </div>
+      <div v-else class="matrix-table">
+        <div class="matrix-row matrix-head" :style="matrixGridStyle">
+          <div class="capability-col"></div>
+          <div
+            v-for="agent in activeAgentColumns"
+            :key="agent.id"
+            class="agent-col agent-head-col"
+            :title="agentTitle(agent)"
+          >
+            <span class="agent-head" :class="[agentClass(agent), { unavailable: agent.installed === false || agent.configured === false }]">
+              <img v-if="agentIconUrl(agent)" class="agent-logo" :src="agentIconUrl(agent)" :alt="agent.label || agent.id" draggable="false" />
+              <span v-else class="agent-fallback">{{ agentFallback(agent) }}</span>
             </span>
-            <div class="mt-3 text-sm font-bold text-slate-700 dark:text-slate-200">
-              {{ extensionTotal === 0 ? '还没有扩展资产' : '扩展资产已就绪' }}
+          </div>
+          <div class="action-col"></div>
+        </div>
+
+        <div v-for="row in filteredRows" :key="`${row.kind}:${row.id}`" class="matrix-row" :style="matrixGridStyle">
+          <div class="capability-col min-w-0">
+            <div class="capability-title-line">
+              <span class="capability-name truncate">{{ row.name || row.id }}</span>
+              <span v-if="row.source" class="source-chip" :class="sourceClass(row)">{{ sourceLabel(row) }}</span>
             </div>
-            <div class="mt-2 max-w-xs text-xs leading-5 text-slate-500 dark:text-slate-400">
-              {{ extensionTotal === 0 ? '选择左侧任一入口开始导入；后续列表会按类型分流到对应标签。' : '可切换到对应标签查看、编辑、启停或删除已有扩展。' }}
+            <div v-if="rowMetaLine(row)" class="capability-facts truncate">
+              {{ rowMetaLine(row) }}
             </div>
-          </section>
-        </aside>
-      </div>
+          </div>
 
-      <!-- Skill -->
-      <div v-show="currentTab === 'skill'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        <div v-if="skillLoadError" class="col-span-full text-red-500 text-center py-10 text-xs">加载失败: {{ skillLoadError }}</div>
-        <div v-else-if="skills.length === 0" class="col-span-full min-h-[18rem] flex flex-col items-center justify-center text-center text-[12px] text-slate-400">
-          <span class="w-12 h-12 rounded-2xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center mb-3">
-            <AppIcon name="puzzle" :size="24" />
-          </span>
-          <div class="text-sm font-bold text-slate-700 dark:text-slate-200">暂无 Skill</div>
-          <div class="mt-1 leading-5">可导入或维护 Skill，并由 1Shell runner 在目标主机上执行。</div>
-        </div>
-        <SkillCard
-          v-for="s in skills"
-          :key="s.id"
-          :skill="s"
-          @delete="onDeleteSkill"
-        />
-      </div>
+          <div v-for="agent in activeAgentColumns" :key="agent.id" class="agent-col">
+            <button
+              type="button"
+              class="agent-toggle"
+              :class="[agentClass(agent), { on: row.exposure?.[agent.id], busy: isToggleBusy(row, agent), readonly: !canManageExposure(row) }]"
+              :title="!canManageExposure(row) ? '外部发现项，导入后可管理暴露范围' : `${row.exposure?.[agent.id] ? '取消暴露给' : '暴露给'} ${agent.label}`"
+              :aria-label="!canManageExposure(row) ? `${row.name || row.id} 暂不可管理` : `${row.exposure?.[agent.id] ? '取消暴露给' : '暴露给'} ${agent.label}`"
+              :aria-pressed="Boolean(row.exposure?.[agent.id])"
+              :disabled="Boolean(togglingKey) || !canManageExposure(row)"
+              @click="toggleExposure(row, agent)"
+            >
+              <img v-if="agentIconUrl(agent)" class="agent-logo" :src="agentIconUrl(agent)" :alt="agent.label || agent.id" draggable="false" />
+              <span v-else class="agent-fallback">{{ agentFallback(agent) }}</span>
+            </button>
+          </div>
 
-      <!-- MCP 远程 -->
-      <div v-show="currentTab === 'mcp'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        <div v-if="mcpLoadError" class="col-span-full text-red-500 text-center py-10 text-xs">加载失败: {{ mcpLoadError }}</div>
-        <div v-else-if="remoteMcps.length === 0" class="col-span-full min-h-[18rem] flex flex-col items-center justify-center text-center text-[12px] text-slate-400">
-          <span class="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300 flex items-center justify-center mb-3">
-            <AppIcon name="plug" :size="24" />
-          </span>
-          <div class="text-sm font-bold text-slate-700 dark:text-slate-200">尚未登记 MCP Server</div>
-          <div class="mt-1 leading-5">点右上角 "+ 添加 MCP" 登记一个远程 URL 类 MCP。</div>
+          <div class="action-col">
+            <button
+              v-if="row.importable && row.managed === false"
+              type="button"
+              class="row-action"
+              title="导入 1Shell 管理"
+              :disabled="Boolean(importingKey)"
+              @click="importCapability(row)"
+            >
+              <AppIcon name="download" :size="14" />
+            </button>
+            <button
+              v-else-if="row.kind === 'mcp'"
+              type="button"
+              class="row-action"
+              title="编辑 MCP"
+              @click="openEditMcp(row)"
+            >
+              <AppIcon name="toolbox" :size="14" />
+            </button>
+          </div>
         </div>
-        <McpCard
-          v-for="m in remoteMcps"
-          :key="m.id"
-          :mcp="m"
-          @edit="openEditMcp"
-          @update="onUpdateMcp"
-          @delete="onDeleteMcp"
-        />
-      </div>
-
-      <!-- 本地 MCP -->
-      <div v-show="currentTab === 'local'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        <!-- 与老版一致：本地 pane 在错误时不显示错误信息（共用 loadMcps 但仅 pane-mcp 写错误） -->
-        <div v-if="localMcps.length === 0" class="col-span-full min-h-[18rem] flex flex-col items-center justify-center text-center text-[12px] text-slate-400">
-          <span class="w-12 h-12 rounded-2xl bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300 flex items-center justify-center mb-3">
-            <AppIcon name="box" :size="24" />
-          </span>
-          <div class="text-sm font-bold text-slate-700 dark:text-slate-200">尚未添加本地 MCP</div>
-          <div class="mt-1 leading-5">点右上角 "+ 添加本地 MCP" 手动注册，或用 "AI 部署" 从 GitHub 一键部署。</div>
-        </div>
-        <LocalMcpCard
-          v-for="m in localMcps"
-          :key="m.id"
-          :mcp="m"
-          @update="onUpdateMcp"
-          @delete="onDeleteMcp"
-        />
       </div>
     </main>
 
-    <!-- Modals -->
     <McpModal
       v-model:open="mcpModalOpen"
       :editing="editingMcp"
-      @saved="loadMcps"
+      @saved="reloadAll"
     />
     <LocalMcpModal
       v-model:open="localModalOpen"
-      @saved="loadMcps"
+      @saved="reloadAll"
     />
     <DeployMcpModal
       v-model:open="deployModalOpen"
-      @saved="loadMcps"
+      @saved="reloadAll"
     />
-    <DeployClaudeSkillModal
-      v-model:open="deployClaudeSkillModalOpen"
+    <SkillAiImportModal
+      v-model:open="skillAiImportModalOpen"
       @saved="reloadAll"
     />
   </div>
 </template>
+
+<style scoped>
+.matrix-header {
+  min-height: 3.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 0.5rem;
+  background: rgb(255 255 255 / 0.92);
+  color: rgb(51 65 85);
+}
+
+:global(.dark) .matrix-header {
+  border-color: rgb(30 41 59);
+  background: rgb(15 23 42);
+  color: rgb(226 232 240);
+}
+
+.header-logo {
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(219 234 254);
+  border-radius: 0.5rem;
+  color: rgb(2 132 199);
+  background: rgb(239 246 255);
+}
+
+:global(.dark) .header-logo {
+  border-color: rgb(14 165 233 / 0.26);
+  color: rgb(125 211 252);
+  background: rgb(14 165 233 / 0.12);
+}
+
+.matrix-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(14rem, 24rem);
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 0.5rem;
+  background: rgb(255 255 255 / 0.92);
+}
+
+:global(.dark) .matrix-toolbar {
+  border-color: rgb(30 41 59);
+  background: rgb(15 23 42);
+}
+
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 0.5rem;
+  background: rgb(248 250 252);
+}
+
+:global(.dark) .segmented {
+  border-color: rgb(30 41 59);
+  background: rgb(2 6 23 / 0.45);
+}
+
+.segment {
+  min-height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0 0.75rem;
+  border-right: 1px solid rgb(226 232 240);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: rgb(100 116 139);
+}
+
+.segment:last-child {
+  border-right: 0;
+}
+
+.segment.active {
+  background: white;
+  color: rgb(15 23 42);
+}
+
+:global(.dark) .segment {
+  border-color: rgb(30 41 59);
+}
+
+:global(.dark) .segment.active {
+  background: rgb(30 41 59);
+  color: rgb(248 250 252);
+}
+
+.segment b {
+  min-width: 1.1rem;
+  padding: 0 0.25rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  color: rgb(100 116 139);
+  background: rgb(241 245 249);
+}
+
+:global(.dark) .segment b {
+  color: rgb(203 213 225);
+  background: rgb(15 23 42);
+}
+
+.search-box {
+  min-height: 2rem;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.625rem;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 0.5rem;
+  background: rgb(248 250 252);
+  color: rgb(148 163 184);
+}
+
+:global(.dark) .search-box {
+  border-color: rgb(30 41 59);
+  background: rgb(2 6 23 / 0.5);
+}
+
+.search-box input {
+  min-width: 0;
+  height: 2rem;
+  background: transparent;
+  outline: none;
+  font-size: 0.75rem;
+  color: rgb(30 41 59);
+}
+
+:global(.dark) .search-box input {
+  color: rgb(226 232 240);
+}
+
+.matrix-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 0.5rem;
+  background: rgb(255 255 255 / 0.94);
+}
+
+:global(.dark) .matrix-panel {
+  border-color: rgb(30 41 59);
+  background: rgb(15 23 42);
+}
+
+.matrix-table {
+  width: 100%;
+  min-width: 36rem;
+}
+
+.matrix-row {
+  display: grid;
+  align-items: center;
+  min-height: 3.375rem;
+  border-bottom: 1px solid rgb(226 232 240);
+}
+
+.matrix-row:last-child {
+  border-bottom: 0;
+}
+
+.matrix-row:not(.matrix-head):hover {
+  background: rgb(248 250 252 / 0.72);
+}
+
+:global(.dark) .matrix-row {
+  border-color: rgb(30 41 59);
+}
+
+:global(.dark) .matrix-row:not(.matrix-head):hover {
+  background: rgb(30 41 59 / 0.35);
+}
+
+.matrix-head {
+  min-height: 2.875rem;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgb(248 250 252);
+}
+
+:global(.dark) .matrix-head {
+  background: rgb(2 6 23);
+}
+
+.capability-col,
+.agent-col,
+.action-col {
+  min-width: 0;
+}
+
+.capability-col {
+  padding: 0 0.875rem;
+}
+
+.agent-col,
+.action-col {
+  display: flex;
+  justify-content: center;
+  padding: 0 0.35rem;
+}
+
+.agent-head-col {
+  align-self: stretch;
+  align-items: center;
+}
+
+.capability-title-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.capability-name {
+  min-width: 0;
+  font-size: 0.875rem;
+  font-weight: 750;
+  color: rgb(15 23 42);
+}
+
+:global(.dark) .capability-name {
+  color: rgb(248 250 252);
+}
+
+.capability-facts {
+  min-width: 0;
+  margin-top: 0.125rem;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: rgb(100 116 139);
+}
+
+:global(.dark) .capability-facts {
+  color: rgb(148 163 184);
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 6.5rem;
+  min-height: 1.125rem;
+  padding: 0 0.375rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  color: rgb(100 116 139);
+  background: rgb(241 245 249);
+}
+
+.source-chip.source-managed {
+  color: rgb(4 120 87);
+  background: rgb(236 253 245);
+}
+
+.source-chip.source-oneshell {
+  color: rgb(2 132 199);
+  background: rgb(239 246 255);
+}
+
+.source-chip.source-preset {
+  color: rgb(79 70 229);
+  background: rgb(238 242 255);
+}
+
+.source-chip.source-external {
+  color: rgb(100 116 139);
+  border-color: rgb(226 232 240);
+  background: rgb(248 250 252);
+}
+
+.source-chip.source-installed,
+.source-chip.source-unmanaged {
+  color: rgb(79 70 229);
+  background: rgb(238 242 255);
+}
+
+:global(.dark) .source-chip {
+  color: rgb(203 213 225);
+  border-color: rgb(30 41 59);
+  background: rgb(30 41 59);
+}
+
+.agent-head,
+.agent-toggle {
+  width: 2.15rem;
+  height: 2.15rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 999px;
+  background: white;
+}
+
+.agent-head.unavailable {
+  opacity: 0.45;
+}
+
+.agent-toggle {
+  color: rgb(148 163 184);
+  opacity: 0.38;
+  transition: transform 0.14s ease, opacity 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.agent-toggle:hover {
+  transform: translateY(-1px);
+  opacity: 0.72;
+}
+
+.agent-toggle.on {
+  opacity: 1;
+}
+
+.agent-toggle.busy {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.agent-toggle.readonly {
+  cursor: not-allowed;
+  opacity: 0.24;
+}
+
+.agent-toggle.readonly.on {
+  opacity: 1;
+}
+
+.agent-toggle.readonly:hover {
+  transform: none;
+}
+
+.agent-logo {
+  width: 1.18rem;
+  height: 1.18rem;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.agent-oneshell .agent-logo {
+  width: 1.45rem;
+  height: 1.45rem;
+  border-radius: 0.375rem;
+}
+
+.agent-fallback {
+  font-size: 0.6875rem;
+  font-weight: 800;
+  line-height: 1;
+  color: rgb(100 116 139);
+}
+
+.agent-head.agent-oneshell,
+.agent-oneshell.on {
+  border-color: rgb(191 219 254);
+  background: rgb(239 246 255);
+}
+
+.agent-head.agent-claude,
+.agent-claude.on {
+  border-color: rgb(254 215 170);
+  background: rgb(255 247 237);
+}
+
+.agent-head.agent-codex,
+.agent-codex.on {
+  border-color: rgb(167 243 208);
+  background: rgb(236 253 245);
+}
+
+.agent-head.agent-opencode,
+.agent-opencode.on {
+  border-color: rgb(199 210 254);
+  background: rgb(238 242 255);
+}
+
+.agent-head.agent-generic,
+.agent-generic.on {
+  border-color: rgb(226 232 240);
+  background: rgb(248 250 252);
+}
+
+:global(.dark) .agent-head,
+:global(.dark) .agent-toggle {
+  border-color: rgb(30 41 59);
+  background: rgb(15 23 42);
+}
+
+:global(.dark) .agent-codex .agent-logo,
+:global(.dark) .agent-opencode .agent-logo {
+  filter: invert(1);
+}
+
+:global(.dark) .agent-head.agent-oneshell,
+:global(.dark) .agent-oneshell.on {
+  border-color: rgb(14 165 233 / 0.3);
+  background: rgb(14 165 233 / 0.14);
+}
+
+:global(.dark) .agent-head.agent-claude,
+:global(.dark) .agent-claude.on {
+  border-color: rgb(249 115 22 / 0.3);
+  background: rgb(249 115 22 / 0.14);
+}
+
+:global(.dark) .agent-head.agent-codex,
+:global(.dark) .agent-codex.on {
+  border-color: rgb(34 197 94 / 0.3);
+  background: rgb(34 197 94 / 0.14);
+}
+
+:global(.dark) .agent-head.agent-opencode,
+:global(.dark) .agent-opencode.on {
+  border-color: rgb(99 102 241 / 0.34);
+  background: rgb(99 102 241 / 0.16);
+}
+
+.matrix-action,
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 2rem;
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 750;
+}
+
+.matrix-action {
+  padding: 0 0.75rem;
+}
+
+.matrix-action:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.matrix-action.primary {
+  color: white;
+  background: rgb(37 99 235);
+}
+
+.matrix-action.secondary {
+  color: rgb(51 65 85);
+  border: 1px solid rgb(226 232 240);
+  background: rgb(248 250 252);
+}
+
+:global(.dark) .matrix-action.secondary {
+  color: rgb(226 232 240);
+  border-color: rgb(30 41 59);
+  background: rgb(2 6 23 / 0.5);
+}
+
+.row-action {
+  width: 2rem;
+  color: rgb(100 116 139);
+}
+
+.row-action:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.row-action:hover {
+  background: rgb(241 245 249);
+  color: rgb(15 23 42);
+}
+
+:global(.dark) .row-action:hover {
+  background: rgb(30 41 59);
+  color: rgb(248 250 252);
+}
+
+.state-message {
+  min-height: 18rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 0.8125rem;
+  color: rgb(100 116 139);
+}
+
+@media (max-width: 960px) {
+  .matrix-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .matrix-toolbar {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

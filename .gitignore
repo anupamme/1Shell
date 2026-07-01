@@ -20,10 +20,19 @@ data/*.json
 data/bridge-token.json
 data/audit.log
 data/cli-sandbox/
+data/cli-config-backups/
+data/host-capabilities/
 data/host-preferences.json
 data/local-mcp/
+data/native-cli-config/
+data/skill-import-staging/
 data/geoip/
 data/claude-code-skills/
+
+# Runtime/imported Skills. Keep source templates tracked.
+data/skills/*
+!data/skills/_templates/
+!data/skills/_templates/**
 
 # User generated content
 data/programs/
@@ -45,6 +54,7 @@ __pycache__/
 # Local tooling and debug output
 .ace-tool/
 .agents/
+.mindfs/
 .playwright-mcp/
 .spec-workflow/
 .claude/

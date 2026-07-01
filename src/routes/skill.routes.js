@@ -7,10 +7,8 @@ const { ROOT_DIR } = require('../config/env');
 const {
   buildSkillAdaptationSource,
   commitSkillAdaptationProposal,
-  convertClaudeCodeSkillPackage,
   normalizeSkillAdaptationProposal,
-  previewClaudeCodeSkillConversion,
-} = require('../skills/claude-code-skill-converter');
+} = require('../skills/skill-ai-adapter');
 
 /**
  * Skill Library Routes
@@ -20,7 +18,7 @@ const {
  *   GET  /api/skills/:id      详情
  *   POST /api/skills/reload   重扫
  */
-function createSkillRouter({ libraryService, skillRunner, claudeCodeSkillRegistry, aiService }) {
+function createSkillRouter({ libraryService, skillRunner, skillImportStager, aiService }) {
   const router = express.Router();
 
   const stripDir = (obj) => { if (!obj) return obj; const { dir, ...rest } = obj; return rest; };
@@ -66,29 +64,56 @@ function createSkillRouter({ libraryService, skillRunner, claudeCodeSkillRegistr
     }
   });
 
-  // 一气导入：从 GitHub clone → 转换成 1Shell 标准 SKILL.md → 落进唯一的 skill 库。
-  // 中转区（claude-code-skills）只作为 clone 暂存的实现细节，导入成功后清理。
-  router.post('/skills/import', async (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Skill 导入功能未启用' });
+  // AI 导入：GitHub clone → 读取源 Skill → AI 适配成 1Shell 原生 Skill → 落库。
+  // 中转区只作为本次导入的临时 clone 位置，成功或失败都会清理。
+  router.post('/skills/ai-import', async (req, res) => {
+    if (!skillImportStager) return res.status(503).json({ ok: false, error: 'Skill AI 导入功能未启用' });
+    if (!aiService?.requestSkillAdaptation) return res.status(503).json({ ok: false, error: 'AI 适配服务不可用' });
+
     let stagedId = null;
     try {
-      const pkg = await claudeCodeSkillRegistry.register(req.body || {});
+      const pkg = await skillImportStager.register(req.body || {});
       stagedId = pkg?.id || null;
       if (!Array.isArray(pkg?.skills) || pkg.skills.length === 0) {
-        if (stagedId) { try { claudeCodeSkillRegistry.deleteSkill(stagedId); } catch { /* ignore */ } }
-        return res.status(400).json({ ok: false, error: '未在仓库中发现标准 SKILL.md，无法导入。' });
+        const error = new Error('未在仓库中发现标准 SKILL.md，无法进行 Skill AI 导入。');
+        error.statusCode = 400;
+        throw error;
       }
-      const result = convertClaudeCodeSkillPackage({
-        packageInfo: pkg,
-        skillsDir: path.join(ROOT_DIR, 'data', 'skills'),
-      });
+
+      const skillsDir = path.join(ROOT_DIR, 'data', 'skills');
+      const source = buildSkillAdaptationSource({ packageInfo: pkg });
+      const raw = await aiService.requestSkillAdaptation({ source });
+      const proposal = normalizeSkillAdaptationProposal(raw, { packageInfo: pkg, skillsDir });
+      const result = commitSkillAdaptationProposal({ proposal, skillsDir });
       libraryService.reload();
-      // 已落 native 库，清理中转暂存（builtin 不可删，导入的都不是 builtin）。
-      try { claudeCodeSkillRegistry.deleteSkill(stagedId); } catch { /* ignore */ }
-      return res.status(201).json({ ok: true, imported: result.converted || [] });
+
+      const skill = libraryService.getSkill(result.targetId);
+      return res.status(201).json({
+        ok: true,
+        skill: stripDir(skill) || {
+          id: result.targetId,
+          name: result.name,
+          description: result.description,
+          category: 'imported',
+          tags: [],
+        },
+        proposal: {
+          packageId: proposal.packageId,
+          targetId: result.targetId,
+          name: proposal.name,
+          description: proposal.description,
+          compatibility: proposal.compatibility,
+          recommended: proposal.recommended,
+          warnings: proposal.warnings,
+          report: proposal.report,
+        },
+      });
     } catch (err) {
-      if (stagedId) { try { claudeCodeSkillRegistry.deleteSkill(stagedId); } catch { /* ignore */ } }
       return res.status(err.statusCode || 400).json({ ok: false, error: err.message });
+    } finally {
+      if (stagedId) {
+        try { skillImportStager.deleteImport(stagedId); } catch { /* ignore cleanup failures */ }
+      }
     }
   });
 
@@ -103,124 +128,6 @@ function createSkillRouter({ libraryService, skillRunner, claudeCodeSkillRegistr
       return res.json({ ok: true, skill: stripDir(skill) });
     } catch (err) {
       return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  // ── Claude Code Skill 托管仓库 ─────────────────────
-  router.get('/claude-code-skills', (_req, res) => {
-    if (!claudeCodeSkillRegistry) return res.json({ ok: true, skills: [] });
-    res.json({ ok: true, skills: claudeCodeSkillRegistry.listSkills() });
-  });
-
-  router.get('/claude-code-skills/:id', (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    const item = claudeCodeSkillRegistry.getSkill(req.params.id);
-    if (!item) return res.status(404).json({ ok: false, error: 'Claude Code Skill 不存在' });
-    res.json({ ok: true, skill: item });
-  });
-
-  router.post('/claude-code-skills/import/inspect', async (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    try {
-      const result = await claudeCodeSkillRegistry.inspect(req.body || {});
-      res.json({ ok: true, ...result });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.post('/claude-code-skills/import/register', async (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    try {
-      const skill = await claudeCodeSkillRegistry.register(req.body || {});
-      res.status(201).json({ ok: true, skill });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.post('/claude-code-skills/:id/convert/preview', (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    try {
-      const item = claudeCodeSkillRegistry.getSkill(req.params.id);
-      if (!item) return res.status(404).json({ ok: false, error: 'Claude Code Skill 不存在' });
-      const result = previewClaudeCodeSkillConversion({
-        packageInfo: item,
-        skillsDir: path.join(ROOT_DIR, 'data', 'skills'),
-      });
-      res.json({ ok: true, ...result });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.post('/claude-code-skills/:id/convert', (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    try {
-      const item = claudeCodeSkillRegistry.getSkill(req.params.id);
-      if (!item) return res.status(404).json({ ok: false, error: 'Claude Code Skill 不存在' });
-      const result = convertClaudeCodeSkillPackage({
-        packageInfo: item,
-        skillsDir: path.join(ROOT_DIR, 'data', 'skills'),
-      });
-      libraryService.reload();
-      res.status(201).json({ ok: true, ...result });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.post('/claude-code-skills/:id/adapt/preview', async (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    if (!aiService?.requestSkillAdaptation) return res.status(503).json({ ok: false, error: 'AI 适配服务不可用' });
-    try {
-      const item = claudeCodeSkillRegistry.getSkill(req.params.id);
-      if (!item) return res.status(404).json({ ok: false, error: 'Claude Code Skill 不存在' });
-      const skillsDir = path.join(ROOT_DIR, 'data', 'skills');
-      const source = buildSkillAdaptationSource({ packageInfo: item });
-      const raw = await aiService.requestSkillAdaptation({ source });
-      const proposal = normalizeSkillAdaptationProposal(raw, { packageInfo: item, skillsDir });
-      res.json({ ok: true, proposal });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.post('/claude-code-skills/:id/adapt/commit', (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    try {
-      const item = claudeCodeSkillRegistry.getSkill(req.params.id);
-      if (!item) return res.status(404).json({ ok: false, error: 'Claude Code Skill 不存在' });
-      const result = commitSkillAdaptationProposal({
-        proposal: req.body?.proposal || {},
-        skillsDir: path.join(ROOT_DIR, 'data', 'skills'),
-      });
-      libraryService.reload();
-      res.status(201).json({ ok: true, skill: result });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.put('/claude-code-skills/:id', (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    try {
-      const skill = claudeCodeSkillRegistry.updateSkill(req.params.id, req.body || {});
-      if (!skill) return res.status(404).json({ ok: false, error: 'Claude Code Skill 不存在' });
-      res.json({ ok: true, skill });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.delete('/claude-code-skills/:id', (req, res) => {
-    if (!claudeCodeSkillRegistry) return res.status(503).json({ ok: false, error: 'Claude Code Skill 仓库未启用' });
-    try {
-      const ok = claudeCodeSkillRegistry.deleteSkill(req.params.id);
-      if (!ok) return res.status(404).json({ ok: false, error: 'Claude Code Skill 不存在' });
-      res.json({ ok: true });
-    } catch (err) {
-      res.status(err.statusCode || 400).json({ ok: false, error: err.message });
     }
   });
 

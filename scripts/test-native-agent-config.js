@@ -28,7 +28,6 @@ function createNativeConfigHarness(dataDir, providerByCli) {
         return provider ? { providers: [provider], activeProviderId: provider.id } : { providers: [], activeProviderId: null };
       },
     },
-    claudeCodeSkillRegistry: null,
     mcpPresetStore: null,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   });
