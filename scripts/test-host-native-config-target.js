@@ -99,7 +99,7 @@ try {
 
   nativeConfig.ensureNativeConfig('codex', { cwd: '/host-native-cwd' });
   assert.ok(fs.existsSync(path.join(homeDir, '.codex', 'config.toml')), 'Codex config.toml should be written to host home');
-  assert.ok(fs.existsSync(path.join(homeDir, '.codex', 'auth.json')), 'Codex auth.json should be written to host home');
+  assert.strictEqual(fs.existsSync(path.join(homeDir, '.codex', 'auth.json')), false, 'Codex auth.json should not be written to host home');
   const codexBackupRoot = path.join(dataDir, 'cli-config-backups', 'codex');
   const codexBackups = fs.existsSync(codexBackupRoot)
     ? fs.readdirSync(codexBackupRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => path.join(codexBackupRoot, entry.name, 'config.toml'))
@@ -110,6 +110,7 @@ try {
   );
   const codexEnv = nativeConfig.buildLaunchEnv('codex', { cwd: '/host-native-cwd' });
   assert.strictEqual(codexEnv.CODEX_HOME, undefined, 'host mode should not inject CODEX_HOME');
+  assert.strictEqual(codexEnv.OPENAI_API_KEY, makeProvider('codex').apiKey, 'host mode should inject Codex API key at launch time');
 
   nativeConfig.ensureNativeConfig('opencode', { cwd: '/host-native-cwd' });
   assert.ok(fs.existsSync(path.join(homeDir, '.config', 'opencode', 'opencode.json')), 'OpenCode config should be written to XDG host path');

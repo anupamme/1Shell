@@ -77,6 +77,7 @@ const configFileError = ref<string | null>(null);
 const configDraftDirty = ref(false);
 let configPreviewTimer: ReturnType<typeof setTimeout> | null = null;
 let configPreviewSeq = 0;
+const SHOW_CONFIG_FILE_DRAFTS = false;
 
 const CLAUDE_ONE_M_MARKER = '[1M]';
 const CLAUDE_MODEL_ROLES: Array<{ id: ClaudeRole; label: string; supportsOneM: boolean }> = [
@@ -282,7 +283,7 @@ const activeConfigFile = computed<AgentConfigFileInfo | null>(() => (
   configFiles.value.find((file) => file.name === activeConfigFileName.value) || configFiles.value[0] || null
 ));
 
-const showConfigEditor = computed(() => Boolean(props.cliId && props.cliId !== SKILLS_SLOT_ID));
+const showConfigEditor = computed(() => SHOW_CONFIG_FILE_DRAFTS && Boolean(props.cliId && props.cliId !== SKILLS_SLOT_ID));
 
 function syncConfigDraft(file: AgentConfigFileInfo | null): void {
   activeConfigFileName.value = file?.name || '';
@@ -291,15 +292,17 @@ function syncConfigDraft(file: AgentConfigFileInfo | null): void {
 }
 
 async function loadConfigFiles(): Promise<void> {
-  if (!props.cliId || props.cliId === SKILLS_SLOT_ID) {
+  const cliId = props.cliId;
+  if (!showConfigEditor.value || !cliId) {
     configFiles.value = [];
+    configFileError.value = null;
     syncConfigDraft(null);
     return;
   }
   loadingConfigFiles.value = true;
   configFileError.value = null;
   try {
-    const resp = await requestJson<AgentConfigFilesResponse>(`/api/agent/config-files/${encodeURIComponent(props.cliId)}`);
+    const resp = await requestJson<AgentConfigFilesResponse>(`/api/agent/config-files/${encodeURIComponent(cliId)}`);
     configFiles.value = resp.files || [];
     const current = configFiles.value.find((file) => file.name === activeConfigFileName.value) || configFiles.value[0] || null;
     syncConfigDraft(current);
@@ -384,7 +387,6 @@ const isSkillsSlot = computed(() => props.cliId === SKILLS_SLOT_ID);
 const isClaudeCode = computed(() => props.cliId === 'claude-code');
 const isCodex = computed(() => props.cliId === 'codex');
 const isNativeCli = computed(() => Boolean(props.cliId && props.cliId !== SKILLS_SLOT_ID));
-const nativeConfigFileNames = computed(() => configFiles.value.map((file) => file.name).join(' / '));
 const title = computed(() => {
   if (!props.cliId) return '配置模型接入';
   if (isSkillsSlot.value) return '配置 1Shell AI 引擎';
@@ -392,8 +394,7 @@ const title = computed(() => {
 });
 const subtitle = computed(() => {
   if (isSkillsSlot.value) return '驱动主控台 AI / IDE AgentRun / Skill 执行（支持 OpenAI 兼容 / Anthropic）';
-  const files = nativeConfigFileNames.value || 'settings.json / config.toml / opencode.json';
-  return `编辑 1Shell 内的配置文件草稿: ${files}；在配置方案列表点击“启用”才会替换 CLI 原生配置`;
+  return '保存 1Shell 配置方案后，在配置方案列表点击“启用”才会写入对应 CLI 的原生配置。';
 });
 
 const nativeImportText = computed(() => {
@@ -618,7 +619,8 @@ function mergePreviewConfigFiles(previewFiles: AgentConfigFileInfo[]): void {
 }
 
 async function refreshConfigPreview({ force = false } = {}): Promise<void> {
-  if (!props.open || !props.cliId || props.cliId === SKILLS_SLOT_ID) return;
+  const cliId = props.cliId;
+  if (!props.open || !showConfigEditor.value || !cliId) return;
 
   let provider: Record<string, unknown>;
   try {
@@ -632,7 +634,7 @@ async function refreshConfigPreview({ force = false } = {}): Promise<void> {
   previewingConfigFiles.value = true;
   try {
     const resp = await requestJson<AgentConfigFilesResponse>(
-      `/api/agent/config-preview/${encodeURIComponent(props.cliId)}`,
+      `/api/agent/config-preview/${encodeURIComponent(cliId)}`,
       {
         method: 'POST',
         body: JSON.stringify({
@@ -653,7 +655,7 @@ async function refreshConfigPreview({ force = false } = {}): Promise<void> {
 }
 
 function scheduleConfigPreview({ fromForm = false } = {}): void {
-  if (!props.open || !props.cliId || props.cliId === SKILLS_SLOT_ID) return;
+  if (!props.open || !showConfigEditor.value) return;
   if (fromForm) {
     configDraftDirty.value = false;
   }
@@ -805,7 +807,7 @@ const presetHint = computed(() => (
           </span>
         </div>
         <div v-if="isNativeCli" class="rounded-lg border border-sky-200 dark:border-sky-500/30 bg-sky-50/70 dark:bg-sky-500/5 px-3 py-2 text-[10px] text-sky-700 dark:text-sky-200">
-          当前窗口只编辑 1Shell 的配置草稿；回到配置方案列表点击“启用”才会替换 Claude Code / Codex / OpenCode 的原生配置文件。
+          当前窗口只编辑 1Shell 的配置方案；回到配置方案列表点击“启用”才会写入对应 CLI 的原生配置。
         </div>
         <div v-if="isNativeCli" class="flex items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] px-3 py-2">
           <span
@@ -880,7 +882,7 @@ const presetHint = computed(() => (
         <div v-if="isClaudeCode" class="flex flex-col gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] p-3">
           <div class="flex items-center justify-between">
             <label class="text-[10px] font-semibold text-slate-400 uppercase">Claude Code 模型映射</label>
-            <span class="text-[9px] text-slate-400">settings.json</span>
+            <span class="text-[9px] text-slate-400">角色映射</span>
           </div>
           <div class="grid grid-cols-1 gap-2">
             <div v-for="role in CLAUDE_MODEL_ROLES" :key="role.id" class="grid grid-cols-1 sm:grid-cols-[72px_1fr_auto] gap-1.5 items-center">
@@ -928,76 +930,10 @@ const presetHint = computed(() => (
             </button>
           </div>
           <div class="text-[10px] text-slate-400">
-            <span v-if="isClaudeCode">Claude Code 写入 settings.json；最大强度使用 max。</span>
-            <span v-else-if="isCodex">Codex 写入 config.toml；最高档为 xhigh。</span>
+            <span v-if="isClaudeCode">最大强度使用 max。</span>
+            <span v-else-if="isCodex">最高档为 xhigh。</span>
             <span v-else>仅对支持思考的模型生效。</span>
           </div>
-        </div>
-
-        <!-- Native config files -->
-        <div v-if="showConfigEditor" class="flex flex-col gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] p-3">
-          <div class="flex items-center justify-between gap-2">
-            <label class="text-[10px] font-semibold text-slate-400 uppercase">配置文件草稿</label>
-            <button
-              type="button"
-              class="h-6 px-2 rounded-md border border-slate-200 dark:border-slate-700 text-[10px] text-slate-500 hover:text-cyan-500 hover:border-cyan-300 disabled:opacity-50"
-              :disabled="loadingConfigFiles || previewingConfigFiles"
-              @click="reloadConfigFilesAndPreview"
-            >
-              刷新
-            </button>
-          </div>
-          <div v-if="loadingConfigFiles" class="text-[10px] text-slate-400">正在读取配置文件...</div>
-          <div v-else-if="configFileError" class="text-[10px] text-red-500">{{ configFileError }}</div>
-          <template v-else-if="configFiles.length > 0 && activeConfigFile">
-            <div class="flex flex-wrap gap-1.5">
-              <div
-                v-for="file in configFiles"
-                :key="file.name"
-                class="inline-flex items-center rounded-md border overflow-hidden border-slate-200 dark:border-slate-700"
-              >
-                <button
-                  type="button"
-                  class="h-7 px-2.5 text-[10px] border transition-colors"
-                  :class="file.name === activeConfigFileName
-                    ? 'bg-cyan-500 border-cyan-500 text-white'
-                    : 'bg-white dark:bg-[#111827] border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-300 hover:border-cyan-400'"
-                  @click="selectConfigFile(file.name)"
-                >
-                  {{ file.name }}<span v-if="file.overridden"> *</span>
-                </button>
-              </div>
-            </div>
-            <div class="text-[10px] font-mono text-slate-400 break-all">{{ activeConfigFile.path }}</div>
-            <textarea
-              v-model="configDraft"
-              spellcheck="false"
-              @input="markConfigDraftDirty"
-              class="min-h-48 max-h-80 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] text-[11px] font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400 resize-y"
-            ></textarea>
-            <div class="flex items-center gap-2">
-              <button
-                type="button"
-                class="h-7 px-3 rounded-md bg-cyan-500 text-white text-[10px] font-semibold hover:bg-cyan-600 disabled:opacity-50"
-                :disabled="savingConfigFile"
-                @click="saveConfigFile()"
-              >
-                保存草稿
-              </button>
-              <button
-                type="button"
-                class="h-7 px-3 rounded-md border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-300 text-[10px] hover:border-cyan-300 disabled:opacity-50"
-                :disabled="savingConfigFile || !activeConfigFile.overridden"
-                @click="resetConfigFileOverride"
-              >
-                按表单重生成
-              </button>
-              <span v-if="activeConfigFile.overridden" class="text-[10px] text-amber-600 dark:text-amber-400">手动覆盖</span>
-              <span v-else-if="previewingConfigFiles" class="text-[10px] text-slate-400">同步预览中...</span>
-              <span v-else class="text-[10px] text-slate-400">跟随上方表单同步</span>
-            </div>
-          </template>
-          <div v-else class="text-[10px] text-slate-400">暂无配置文件</div>
         </div>
 
         <!-- 启动命令提示（CLI 原生配置模式） -->

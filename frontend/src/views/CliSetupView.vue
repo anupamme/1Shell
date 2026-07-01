@@ -15,6 +15,7 @@ import {
   type InstallCliResponse,
   type BinaryOverrideResponse,
   type CliDiagnosticsResponse,
+  UPSTREAM_LABELS,
 } from '@/utils/cliSetup';
 
 // ── tab definitions ──
@@ -23,13 +24,14 @@ interface TabDef {
   label: string;
   desc: string;
   supportedUpstream: UpstreamProtocol[];
+  icon: string;
 }
 
 const TABS: TabDef[] = [
-  { id: SKILLS_SLOT_ID, label: '1Shell AI',   desc: 'Agent · Skill 引擎',         supportedUpstream: ['anthropic', 'openai'] },
-  { id: 'claude-code',   label: 'Claude Code', desc: 'Anthropic 官方 CLI',          supportedUpstream: ['anthropic'] },
-  { id: 'codex',          label: 'Codex',       desc: 'OpenAI 官方 CLI',             supportedUpstream: ['openai'] },
-  { id: 'opencode',       label: 'OpenCode',   desc: '开源终端 AI 助手',             supportedUpstream: ['openai'] },
+  { id: SKILLS_SLOT_ID, label: '1Shell AI',   desc: 'Agent · Skill 引擎', supportedUpstream: ['anthropic', 'openai'], icon: 'spark' },
+  { id: 'claude-code',   label: 'Claude Code', desc: 'Anthropic 官方 CLI', supportedUpstream: ['anthropic'], icon: 'terminal' },
+  { id: 'codex',          label: 'Codex',       desc: 'OpenAI 官方 CLI',    supportedUpstream: ['openai'], icon: 'robot' },
+  { id: 'opencode',       label: 'OpenCode',   desc: '开源终端 AI 助手',    supportedUpstream: ['openai'], icon: 'console' },
 ];
 
 // ── state ──
@@ -63,6 +65,15 @@ const activeTab = computed(() => TABS.find(t => t.id === activeTabId.value) || T
 const isSkillsTab = computed(() => activeTabId.value === SKILLS_SLOT_ID);
 
 const currentTool = computed(() => tools.value.find(t => t.id === activeTabId.value) || null);
+const cliTabs = computed(() => TABS.filter(t => t.id !== SKILLS_SLOT_ID));
+const configuredCliCount = computed(() => tools.value.filter(t => t.status === 'configured').length);
+const detectedCliCount = computed(() => tools.value.filter(t => t.status === 'detected').length);
+const missingCliCount = computed(() => tools.value.filter(t => t.status === 'missing').length);
+const activeProvider = computed(() => providers.value.find(p => p.id === activeProviderId.value) || null);
+const enabledProviderCount = computed(() => providers.value.filter(p => p.enabled !== false).length);
+const readyProviderCount = computed(() => providers.value.filter(p => p.enabled !== false && p.apiKeySet).length);
+const nativeConfigFiles = computed(() => currentTool.value?.nativeConfig?.files || []);
+const nativeEnabledProviderId = computed(() => currentTool.value?.nativeConfig?.meta?.providerId || null);
 
 const toolStatus = computed(() => {
   const t = currentTool.value;
@@ -87,6 +98,12 @@ const modalProps = computed(() => {
 });
 
 const enabledCount = computed(() => providers.value.filter(p => p.enabled !== false).length);
+
+const activeProviderSummary = computed(() => {
+  const p = activeProvider.value;
+  if (!p) return '尚未选择默认方案';
+  return `${providerModelLabel(p)} · ${providerBaseLabel(p)}`;
+});
 
 interface ProviderCopyResponse {
   ok: boolean;
@@ -409,6 +426,69 @@ function fmtBase(url: string): string {
   catch { return url.replace(/https?:\/\//, '').replace(/\/+$/, ''); }
 }
 
+function getTool(tabId: string): ToolInfo | null {
+  return tools.value.find(t => t.id === tabId) || null;
+}
+
+function tabStatusText(tab: TabDef): string {
+  if (tab.id === SKILLS_SLOT_ID) return `${enabledProviderCount.value} 启用`;
+  const tool = getTool(tab.id);
+  if (!tool) return scanning.value ? '扫描中' : '待扫描';
+  if (tool.status === 'configured') return '就绪';
+  if (tool.status === 'detected') return '已检测';
+  return '未安装';
+}
+
+function tabStatusClass(tab: TabDef): string {
+  if (tab.id === SKILLS_SLOT_ID) {
+    return enabledProviderCount.value > 0
+      ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/25'
+      : 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-white/[0.05] dark:text-slate-400 dark:border-white/[0.08]';
+  }
+  const status = getTool(tab.id)?.status;
+  if (status === 'configured') return 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/25';
+  if (status === 'detected') return 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:border-sky-500/25';
+  if (status === 'missing') return 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/25';
+  return 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-white/[0.05] dark:text-slate-400 dark:border-white/[0.08]';
+}
+
+function statusDotClass(status?: string): string {
+  if (status === 'configured') return 'bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.14)]';
+  if (status === 'detected') return 'bg-sky-500 shadow-[0_0_0_3px_rgba(14,165,233,0.14)]';
+  if (status === 'missing') return 'bg-amber-500 shadow-[0_0_0_3px_rgba(245,158,11,0.14)]';
+  return 'bg-slate-300 dark:bg-slate-600';
+}
+
+function toolStatusTextClass(status?: string): string {
+  if (status === 'configured') return 'text-emerald-600 dark:text-emerald-300';
+  if (status === 'detected') return 'text-sky-600 dark:text-sky-300';
+  if (status === 'missing') return 'text-amber-600 dark:text-amber-300';
+  return 'text-slate-500 dark:text-slate-400';
+}
+
+function providerModelLabel(p: ProviderInfo): string {
+  return p.model || p.activeModelId || p.routeModelId || '未指定模型';
+}
+
+function providerBaseLabel(p: ProviderInfo): string {
+  return p.apiBase ? fmtBase(p.apiBase) : '未设置 API Base';
+}
+
+function providerProtocolLabel(p: ProviderInfo): string {
+  return UPSTREAM_LABELS[p.upstreamProtocol] || p.upstreamProtocol;
+}
+
+function providerKeyText(p: ProviderInfo): string {
+  if (p.enabled === false) return '已禁用';
+  return p.apiKeySet ? 'Key 就绪' : '缺少 Key';
+}
+
+function providerKeyClass(p: ProviderInfo): string {
+  if (p.enabled === false) return 'text-slate-500 bg-slate-100 border-slate-200 dark:bg-white/[0.05] dark:text-slate-400 dark:border-white/[0.08]';
+  if (p.apiKeySet) return 'text-emerald-700 bg-emerald-50 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/25';
+  return 'text-amber-700 bg-amber-50 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/25';
+}
+
 // ── lifecycle ──
 function switchTab(cliId: string): void {
   if (activeTabId.value === cliId) return;
@@ -424,118 +504,183 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="h-full flex bg-stone-50 dark:bg-[#0b0f19]">
-    <!-- ═══ 左侧：竖排 tab 导航 ═══ -->
-    <nav class="w-48 shrink-0 flex flex-col border-r border-slate-200 dark:border-white/[0.05] bg-white dark:bg-[#0f1321] select-none">
-      <div class="px-4 py-3">
-        <h3 class="text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-3">模型接入</h3>
+  <div class="h-full min-w-0 flex flex-col lg:flex-row overflow-hidden bg-[#eef3f8] text-slate-700 dark:bg-[#050814] dark:text-slate-200">
+    <nav class="w-full lg:w-[276px] shrink-0 flex flex-col border-b lg:border-b-0 lg:border-r border-slate-200/80 dark:border-white/[0.07] bg-white/80 dark:bg-[#0a0f1d]/95 backdrop-blur-xl select-none">
+      <div class="px-5 pt-5 pb-4 border-b border-slate-200/70 dark:border-white/[0.06]">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-slate-950 text-white dark:bg-white dark:text-slate-950 flex items-center justify-center shadow-sm">
+            <AppIcon name="spark" :size="18" />
+          </div>
+          <div class="min-w-0">
+            <h1 class="text-sm font-bold text-slate-950 dark:text-white">模型接入</h1>
+            <p class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">AI 引擎与原生 CLI 配置</p>
+          </div>
+        </div>
+
+        <div class="hidden sm:grid mt-4 grid-cols-2 gap-2">
+          <div class="rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-white/70 dark:bg-white/[0.04] px-3 py-2">
+            <div class="text-[10px] font-semibold text-slate-400 dark:text-slate-500">启用接入</div>
+            <div class="mt-1 text-lg font-bold text-slate-950 dark:text-white">{{ enabledProviderCount }}</div>
+          </div>
+          <div class="rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-white/70 dark:bg-white/[0.04] px-3 py-2">
+            <div class="text-[10px] font-semibold text-slate-400 dark:text-slate-500">CLI 就绪</div>
+            <div class="mt-1 text-lg font-bold text-slate-950 dark:text-white">{{ configuredCliCount }}/{{ cliTabs.length }}</div>
+          </div>
+        </div>
       </div>
-      <button
-        v-for="tab in TABS"
-        :key="tab.id"
-        type="button"
-        class="group w-full text-left px-4 py-3 transition-colors cursor-pointer border-l-[3px]"
-        :class="activeTabId === tab.id
-          ? 'border-sky-500 dark:border-sky-400 bg-sky-50/50 dark:bg-sky-500/[0.04] text-sky-700 dark:text-sky-300'
-          : 'border-transparent text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/[0.03] hover:text-slate-800 dark:hover:text-slate-200'"
-        @click="switchTab(tab.id)"
-      >
-        <div class="text-sm font-medium">{{ tab.label }}</div>
-        <div class="text-[11px] mt-0.5 opacity-60">{{ tab.desc }}</div>
-      </button>
+
+      <div class="lg:flex-1 lg:min-h-0 overflow-x-auto lg:overflow-x-hidden lg:overflow-y-auto px-3 py-3">
+        <div class="flex lg:block gap-2 lg:gap-0 min-w-max lg:min-w-0">
+        <button
+          v-for="tab in TABS"
+          :key="tab.id"
+          type="button"
+          class="group w-[220px] lg:w-full min-h-[64px] text-left px-3 py-3 lg:mb-2 rounded-lg border transition-all cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+          :class="activeTabId === tab.id
+            ? 'border-slate-300 bg-white shadow-sm dark:border-white/[0.14] dark:bg-white/[0.07]'
+            : 'border-transparent bg-transparent hover:border-slate-200 hover:bg-white/70 dark:hover:border-white/[0.08] dark:hover:bg-white/[0.04]'"
+          @click="switchTab(tab.id)"
+        >
+          <div class="flex items-start gap-3">
+            <div
+              class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center border transition-colors"
+              :class="activeTabId === tab.id
+                ? 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300'
+                : 'border-slate-200 bg-white text-slate-500 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-slate-400'"
+            >
+              <AppIcon :name="tab.icon" :size="17" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center justify-between gap-2">
+                <span class="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{{ tab.label }}</span>
+                <span class="shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold" :class="tabStatusClass(tab)">
+                  {{ tabStatusText(tab) }}
+                </span>
+              </div>
+              <div class="mt-1 text-[11px] leading-4 text-slate-500 dark:text-slate-400 truncate">{{ tab.desc }}</div>
+            </div>
+          </div>
+        </button>
+        </div>
+      </div>
+
+      <div class="hidden lg:block px-5 py-4 border-t border-slate-200/70 dark:border-white/[0.06]">
+        <div class="flex items-center justify-between text-[11px]">
+          <span class="text-slate-500 dark:text-slate-400">扫描状态</span>
+          <span class="font-semibold text-slate-700 dark:text-slate-200">{{ scanning ? '刷新中' : '已同步' }}</span>
+        </div>
+        <div class="mt-3 flex gap-1.5">
+          <span class="h-1.5 flex-1 rounded-full bg-emerald-400/80" :class="configuredCliCount ? '' : 'opacity-25'"></span>
+          <span class="h-1.5 flex-1 rounded-full bg-sky-400/80" :class="detectedCliCount ? '' : 'opacity-25'"></span>
+          <span class="h-1.5 flex-1 rounded-full bg-amber-400/80" :class="missingCliCount ? '' : 'opacity-25'"></span>
+        </div>
+      </div>
     </nav>
 
-    <!-- ═══ 右侧：内容区 ═══ -->
     <main class="flex-1 min-w-0 flex flex-col overflow-hidden">
-
-      <!-- ══════ 1Shell AI tab ══════ -->
       <template v-if="isSkillsTab">
-        <header class="shrink-0 flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/[0.05] bg-white dark:bg-[#0f1321]">
-          <div>
-            <h2 class="text-base font-semibold text-slate-800 dark:text-slate-200">1Shell AI 引擎</h2>
-            <p class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-              Agent 与 Skill 执行的模型接入 · 已启用 <span class="font-semibold text-sky-600 dark:text-sky-400">{{ enabledCount }}</span> 个
-            </p>
-          </div>
-          <button
-            type="button"
-            class="h-8 px-3 rounded-lg border border-sky-200 dark:border-sky-500/30 bg-sky-50 dark:bg-sky-500/10 text-xs font-medium text-sky-600 dark:text-sky-400 hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-500/20 transition-all cursor-pointer flex items-center gap-1.5"
-            @click="openAddModal"
-          >
-            <AppIcon name="plus" :size="14" />
-            添加接入
-          </button>
-        </header>
-
-        <div class="flex-1 overflow-y-auto p-6">
-          <div v-if="loadingProviders" class="flex items-center justify-center py-20">
-            <span class="inline-block w-4 h-4 rounded-full bg-sky-400 animate-pulse"></span>
-            <span class="ml-3 text-sm text-slate-400 dark:text-slate-500">加载中...</span>
-          </div>
-
-          <div v-else-if="!providers.length" class="flex flex-col items-center justify-center py-20 text-center">
-            <div class="w-14 h-14 rounded-2xl bg-slate-100 dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.06] flex items-center justify-center mb-4">
-              <AppIcon name="spark" :size="24" class="text-slate-300 dark:text-slate-600" />
+        <header class="shrink-0 border-b border-slate-200/80 dark:border-white/[0.07] bg-white/78 dark:bg-[#0a0f1d]/90 backdrop-blur-xl">
+          <div class="px-4 sm:px-5 lg:px-7 py-5 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 sm:gap-5">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="inline-flex w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.12)]"></span>
+                <span class="text-[11px] font-bold uppercase text-slate-400 dark:text-slate-500">1Shell Runtime</span>
+              </div>
+              <h2 class="mt-2 text-xl font-bold text-slate-950 dark:text-white">1Shell AI 引擎</h2>
+              <p class="mt-1 max-w-2xl text-sm text-slate-500 dark:text-slate-400">
+                Agent、Skill 与 IDE 创作共用这里的模型接入。当前默认：{{ activeProviderSummary }}
+              </p>
             </div>
-            <h3 class="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">暂无配置的模型接入</h3>
-            <p class="text-xs text-slate-400 dark:text-slate-600 mb-5">添加模型接入后，在 Agent 页面使用 /model 即可切换</p>
             <button
               type="button"
-              class="h-8 px-4 rounded-lg bg-sky-500 hover:bg-sky-600 text-white text-xs font-medium transition-colors cursor-pointer"
+              class="h-9 px-3.5 rounded-lg bg-slate-950 text-white dark:bg-white dark:text-slate-950 text-xs font-semibold hover:opacity-90 transition-opacity cursor-pointer flex items-center gap-1.5 outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
               @click="openAddModal"
-            >添加接入</button>
+            >
+              <AppIcon name="plus" :size="14" />
+              添加接入
+            </button>
           </div>
 
-          <!-- provider cards -->
+          <div class="px-4 sm:px-5 lg:px-7 pb-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-slate-50/70 dark:bg-white/[0.04] px-4 py-3">
+              <div class="text-[11px] font-semibold text-slate-400 dark:text-slate-500">配置方案</div>
+              <div class="mt-1 text-lg font-bold text-slate-950 dark:text-white">{{ providers.length }}</div>
+            </div>
+            <div class="rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-slate-50/70 dark:bg-white/[0.04] px-4 py-3">
+              <div class="text-[11px] font-semibold text-slate-400 dark:text-slate-500">启用中</div>
+              <div class="mt-1 text-lg font-bold text-emerald-600 dark:text-emerald-300">{{ enabledProviderCount }}</div>
+            </div>
+            <div class="rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-slate-50/70 dark:bg-white/[0.04] px-4 py-3">
+              <div class="text-[11px] font-semibold text-slate-400 dark:text-slate-500">Key 就绪</div>
+              <div class="mt-1 text-lg font-bold text-slate-950 dark:text-white">{{ readyProviderCount }}</div>
+            </div>
+          </div>
+        </header>
+
+        <div class="flex-1 overflow-y-auto px-4 sm:px-5 lg:px-7 py-5 lg:py-6">
+          <div v-if="loadingProviders" class="h-full min-h-[360px] flex items-center justify-center">
+            <span class="inline-block w-4 h-4 rounded-full bg-sky-500 animate-pulse"></span>
+            <span class="ml-3 text-sm text-slate-500 dark:text-slate-400">正在读取模型接入...</span>
+          </div>
+
+          <div v-else-if="!providers.length" class="h-full min-h-[360px] flex items-center justify-center">
+            <div class="max-w-sm text-center">
+              <div class="mx-auto w-12 h-12 rounded-lg bg-white dark:bg-white/[0.05] border border-slate-200 dark:border-white/[0.08] flex items-center justify-center">
+                <AppIcon name="spark" :size="23" class="text-slate-400 dark:text-slate-500" />
+              </div>
+              <h3 class="mt-4 text-sm font-semibold text-slate-800 dark:text-slate-200">暂无模型接入</h3>
+              <p class="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">添加后，Agent 页面和 IDE 的 /model 会读取这些配置。</p>
+              <button
+                type="button"
+                class="mt-5 h-9 px-4 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors cursor-pointer"
+                @click="openAddModal"
+              >
+                添加接入
+              </button>
+            </div>
+          </div>
+
           <div v-else class="space-y-3">
             <div
               v-for="p in providers"
               :key="p.id"
-              class="flex items-center gap-4 px-5 py-4 rounded-xl border bg-white dark:bg-[#101827] shadow-sm transition-all group cursor-pointer"
+              class="grid grid-cols-1 md:grid-cols-[auto_minmax(0,1fr)_auto] items-start md:items-center gap-4 rounded-lg border bg-white/86 dark:bg-white/[0.045] px-4 py-3 shadow-sm transition-all cursor-pointer"
               :class="p.id === activeProviderId
-                ? 'border-emerald-300 dark:border-emerald-500/40 bg-emerald-50/50 dark:bg-emerald-500/[0.06] ring-1 ring-emerald-200/70 dark:ring-emerald-500/20 shadow-[0_10px_24px_rgba(15,118,110,0.08)]'
-                : (p.enabled !== false
-                  ? 'border-slate-200 dark:border-white/[0.08] hover:border-slate-300 dark:hover:border-white/[0.14] hover:shadow-md'
-                  : 'border-slate-200/80 dark:border-white/[0.06] bg-slate-50/70 dark:bg-white/[0.025] hover:border-slate-300 dark:hover:border-white/[0.12]')"
+                ? 'border-emerald-300 dark:border-emerald-500/40 ring-1 ring-emerald-200/80 dark:ring-emerald-500/20'
+                : 'border-slate-200/80 dark:border-white/[0.08] hover:border-slate-300 dark:hover:border-white/[0.14] hover:bg-white dark:hover:bg-white/[0.065]'"
               @click="setActive(p.id)"
             >
-              <!-- enable toggle -->
-              <button
-                type="button"
-                class="shrink-0 w-9 h-5 rounded-full transition-colors relative cursor-pointer"
-                :class="p.enabled !== false ? 'bg-emerald-500 dark:bg-emerald-400' : 'bg-slate-300 dark:bg-slate-600'"
-                @click.stop="toggleEnabled(p)"
-                :title="p.enabled !== false ? '已启用，点击禁用' : '未启用，点击启用'"
-              >
-                <span class="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform" :class="p.enabled !== false ? 'left-[18px]' : 'left-[2px]'"></span>
-              </button>
+              <div class="flex items-center gap-3">
+                <button
+                  type="button"
+                  class="relative w-9 h-5 rounded-full transition-colors cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+                  :class="p.enabled !== false ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"
+                  :aria-label="p.enabled !== false ? '禁用配置方案' : '启用配置方案'"
+                  :title="p.enabled !== false ? '已启用，点击禁用' : '未启用，点击启用'"
+                  @click.stop="toggleEnabled(p)"
+                >
+                  <span class="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform" :class="p.enabled !== false ? 'left-[18px]' : 'left-[2px]'"></span>
+                </button>
+                <span class="w-2.5 h-2.5 rounded-full" :class="p.id === activeProviderId ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
+              </div>
 
-              <!-- active dot -->
-              <span
-                class="shrink-0 w-2.5 h-2.5 rounded-full transition-colors"
-                :class="p.id === activeProviderId ? 'bg-emerald-500 dark:bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.4)]' : 'bg-slate-300 dark:bg-slate-600'"
-              ></span>
-
-              <!-- info -->
-              <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-2">
-                  <span class="text-sm font-medium text-slate-700 dark:text-slate-200 truncate">{{ p.name || '未命名' }}</span>
-                  <span v-if="p.id === activeProviderId" class="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/20">活跃</span>
-                  <span v-if="p.enabled === false" class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-white/[0.05]">已禁用</span>
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ p.name || '未命名配置' }}</span>
+                  <span v-if="p.id === activeProviderId" class="rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-300">默认</span>
+                  <span class="rounded-md border px-1.5 py-0.5 text-[10px] font-semibold" :class="providerKeyClass(p)">{{ providerKeyText(p) }}</span>
                 </div>
-                <div class="flex items-center gap-2 mt-0.5 text-xs text-slate-400 dark:text-slate-500">
-                  <span class="truncate">{{ p.model || '未指定模型' }}</span>
-                  <span class="text-slate-300 dark:text-slate-700">·</span>
-                  <span class="truncate">{{ fmtBase(p.apiBase || '') }}</span>
-                  <span v-if="!p.apiKeySet" class="text-amber-500 dark:text-amber-400 shrink-0">· 未设 Key</span>
+                <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                  <span class="font-mono truncate max-w-[280px]">{{ providerModelLabel(p) }}</span>
+                  <span>{{ providerProtocolLabel(p) }}</span>
+                  <span class="font-mono truncate max-w-[320px]">{{ providerBaseLabel(p) }}</span>
                 </div>
               </div>
 
-              <!-- actions -->
-              <div class="shrink-0 flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50/80 dark:bg-white/[0.035] p-1 shadow-sm">
+              <div class="shrink-0 flex items-center gap-1 rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-slate-50/80 dark:bg-white/[0.04] p-1 overflow-x-auto max-w-full">
                 <button
                   type="button"
-                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                  class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
                   :disabled="testingProviderIds.has(p.id)"
                   title="测试配置方案"
                   @click.stop="testProvider(p)"
@@ -545,7 +690,7 @@ onMounted(() => {
                 </button>
                 <button
                   type="button"
-                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                  class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
                   :disabled="copyingProviderIds.has(p.id)"
                   title="复制配置方案"
                   @click.stop="copyProvider(p)"
@@ -555,7 +700,7 @@ onMounted(() => {
                 </button>
                 <button
                   type="button"
-                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
+                  class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
                   title="编辑配置方案"
                   @click.stop="openEditModal(p.id)"
                 >
@@ -564,11 +709,11 @@ onMounted(() => {
                 </button>
                 <button
                   type="button"
-                  class="h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
+                  class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
                   title="删除配置方案"
                   @click.stop="deleteProvider(p.id)"
                 >
-                  <AppIcon name="close" :size="13" />
+                  <AppIcon name="trash" :size="13" />
                   删除
                 </button>
               </div>
@@ -577,208 +722,261 @@ onMounted(() => {
         </div>
       </template>
 
-      <!-- ══════ CLI tab (Claude Code / Codex / OpenCode) ══════ -->
       <template v-else>
-        <header class="shrink-0 flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/[0.05] bg-white dark:bg-[#0f1321]">
-          <div class="flex items-center gap-3">
-            <h2 class="text-base font-semibold text-slate-800 dark:text-slate-200">{{ activeTab.label }}</h2>
-            <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full border" :class="toolStatus.cls">{{ toolStatus.label }}</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <button
-              type="button"
-              class="h-8 px-3 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.02] text-xs font-medium text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-white/[0.15] hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-              :disabled="scanning"
-              @click="onScan"
-            >
-              <AppIcon name="radio" :size="13" />
-              {{ scanning ? '扫描中...' : '扫描' }}
-            </button>
-            <button
-              v-if="currentTool?.status === 'missing'"
-              type="button"
-              class="h-8 px-3 rounded-lg border border-sky-200 dark:border-sky-500/30 bg-sky-50 dark:bg-sky-500/10 text-xs font-medium text-sky-600 dark:text-sky-400 hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-500/20 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-              :disabled="installingIds.has(activeTabId)"
-              @click="onInstall"
-            >
-              <AppIcon name="download" :size="13" />
-              {{ installingIds.has(activeTabId) ? '安装中...' : '安装' }}
-            </button>
-            <button
-              v-if="currentTool?.status !== 'missing'"
-              type="button"
-              class="h-8 px-3 rounded-lg border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 text-xs font-medium text-amber-600 dark:text-amber-400 hover:border-amber-400 hover:bg-amber-100 dark:hover:bg-amber-500/20 transition-all cursor-pointer flex items-center gap-1.5"
-              @click="onUpdate"
-            >
-              <AppIcon name="arrow-up" :size="13" />
-              更新
-            </button>
+        <header class="shrink-0 border-b border-slate-200/80 dark:border-white/[0.07] bg-white/78 dark:bg-[#0a0f1d]/90 backdrop-blur-xl">
+          <div class="px-4 sm:px-5 lg:px-7 py-5 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 sm:gap-5">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="inline-flex w-2.5 h-2.5 rounded-full" :class="statusDotClass(currentTool?.status)"></span>
+                <span class="text-[11px] font-bold uppercase text-slate-400 dark:text-slate-500">Native CLI</span>
+              </div>
+              <div class="mt-2 flex flex-wrap items-center gap-3">
+                <h2 class="text-xl font-bold text-slate-950 dark:text-white">{{ activeTab.label }}</h2>
+                <span class="rounded-md border px-2 py-1 text-[11px] font-bold" :class="toolStatus.cls">{{ toolStatus.label }}</span>
+              </div>
+              <p class="mt-1 max-w-2xl text-sm text-slate-500 dark:text-slate-400">{{ activeTab.desc }} · 配置会写入本机原生配置文件，供 CLI 启动时读取。</p>
+            </div>
+            <div class="shrink-0 flex items-center gap-2">
+              <button
+                type="button"
+                class="h-9 px-3 rounded-lg border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-white/[0.04] text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-white/[0.07] transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-wait outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+                :disabled="scanning"
+                @click="onScan"
+              >
+                <AppIcon name="radio" :size="13" />
+                {{ scanning ? '扫描中' : '扫描' }}
+              </button>
+              <button
+                v-if="currentTool?.status === 'missing'"
+                type="button"
+                class="h-9 px-3 rounded-lg bg-slate-950 text-white dark:bg-white dark:text-slate-950 text-xs font-semibold hover:opacity-90 transition-opacity cursor-pointer flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-wait outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+                :disabled="installingIds.has(activeTabId)"
+                @click="onInstall"
+              >
+                <AppIcon name="download" :size="13" />
+                {{ installingIds.has(activeTabId) ? '安装中' : '安装' }}
+              </button>
+              <button
+                v-if="currentTool?.status !== 'missing'"
+                type="button"
+                class="h-9 px-3 rounded-lg border border-amber-200 bg-amber-50 text-xs font-semibold text-amber-700 hover:bg-amber-100 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300 dark:hover:bg-amber-500/15 transition-all cursor-pointer flex items-center gap-1.5 outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50"
+                @click="onUpdate"
+              >
+                <AppIcon name="arrow-up" :size="13" />
+                更新
+              </button>
+            </div>
           </div>
         </header>
 
-        <div class="flex-1 overflow-y-auto p-6 space-y-6">
-          <!-- CLI info card -->
-          <div class="rounded-xl border border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#0f1321] p-4">
-            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-3">CLI 状态</h3>
+        <div class="flex-1 overflow-y-auto px-4 sm:px-5 lg:px-7 py-5 lg:py-6 space-y-5">
+          <section class="rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-white/86 dark:bg-white/[0.045] shadow-sm">
+            <div class="grid grid-cols-1 lg:grid-cols-[1.1fr_1.5fr]">
+              <div class="p-5 border-b lg:border-b-0 lg:border-r border-slate-200/80 dark:border-white/[0.07]">
+                <div class="flex items-center justify-between gap-3">
+                  <h3 class="text-sm font-bold text-slate-900 dark:text-white">CLI 状态</h3>
+                  <span v-if="currentTool" class="inline-flex items-center gap-1.5 text-xs font-semibold" :class="toolStatusTextClass(currentTool.status)">
+                    <span class="w-2 h-2 rounded-full" :class="statusDotClass(currentTool.status)"></span>
+                    {{ toolStatus.label }}
+                  </span>
+                </div>
 
-            <div v-if="!currentTool" class="text-xs text-slate-400 dark:text-slate-500 py-4 text-center">
-              {{ scanning ? '正在扫描...' : '点击"扫描"检测 CLI 安装状态' }}
+                <div v-if="!currentTool" class="mt-5 rounded-lg border border-dashed border-slate-300 dark:border-white/[0.12] px-4 py-8 text-center">
+                  <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ scanning ? '正在扫描 CLI...' : '尚未扫描 CLI' }}</div>
+                  <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">扫描后会显示安装状态、版本和配置目录。</p>
+                </div>
+
+                <div v-else class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div class="rounded-lg bg-slate-50 dark:bg-white/[0.04] border border-slate-200/70 dark:border-white/[0.07] p-3">
+                    <div class="text-slate-400 dark:text-slate-500">名称</div>
+                    <div class="mt-1 font-semibold text-slate-900 dark:text-white truncate">{{ currentTool.name }}</div>
+                  </div>
+                  <div class="rounded-lg bg-slate-50 dark:bg-white/[0.04] border border-slate-200/70 dark:border-white/[0.07] p-3">
+                    <div class="text-slate-400 dark:text-slate-500">版本</div>
+                    <div class="mt-1 font-semibold text-slate-900 dark:text-white truncate">{{ currentTool.binary?.version || '待检测' }}</div>
+                  </div>
+                  <div class="sm:col-span-2 rounded-lg bg-slate-50 dark:bg-white/[0.04] border border-slate-200/70 dark:border-white/[0.07] p-3">
+                    <div class="text-slate-400 dark:text-slate-500">可执行文件</div>
+                    <div class="mt-1 font-mono text-[11px] font-semibold text-slate-900 dark:text-white truncate">{{ currentTool.binary?.path || '未找到 PATH 或手动路径' }}</div>
+                  </div>
+                  <div class="sm:col-span-2 rounded-lg bg-slate-50 dark:bg-white/[0.04] border border-slate-200/70 dark:border-white/[0.07] p-3">
+                    <div class="text-slate-400 dark:text-slate-500">配置目录</div>
+                    <div class="mt-1 font-mono text-[11px] font-semibold text-slate-900 dark:text-white truncate">{{ currentTool.nativeConfig?.configDir || '尚未启用原生配置' }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="p-5">
+                <div class="flex items-center justify-between gap-3">
+                  <h3 class="text-sm font-bold text-slate-900 dark:text-white">原生配置控制</h3>
+                  <span class="text-[11px] text-slate-500 dark:text-slate-400">{{ nativeConfigFiles.length }} 个配置文件</span>
+                </div>
+
+                <div v-if="currentTool" class="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class="h-8 px-3 rounded-lg bg-slate-900 text-white dark:bg-white dark:text-slate-950 text-xs font-semibold hover:opacity-90 transition-opacity cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                    :disabled="ensuringIds.has(activeTabId)"
+                    @click="onEnsureNativeConfig"
+                  >
+                    {{ ensuringIds.has(activeTabId) ? '启用中' : '启用配置' }}
+                  </button>
+                  <button
+                    v-if="currentTool.nativeConfig?.configDir"
+                    type="button"
+                    class="h-8 px-3 rounded-lg border border-red-200 bg-red-50 text-xs font-semibold text-red-600 hover:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/15 transition-all cursor-pointer"
+                    @click="onResetNativeConfig"
+                  >
+                    重置配置状态
+                  </button>
+                  <button
+                    type="button"
+                    class="h-8 px-3 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/[0.1] dark:bg-white/[0.04] dark:text-slate-200 dark:hover:bg-white/[0.07] transition-all cursor-pointer"
+                    @click="onSetBinary"
+                  >
+                    指定路径
+                  </button>
+                  <button
+                    v-if="currentTool.binary?.override"
+                    type="button"
+                    class="h-8 px-3 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/[0.1] dark:bg-white/[0.04] dark:text-slate-200 dark:hover:bg-white/[0.07] transition-all cursor-pointer"
+                    @click="onClearBinary"
+                  >
+                    清除路径
+                  </button>
+                  <button
+                    type="button"
+                    class="h-8 px-3 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/[0.1] dark:bg-white/[0.04] dark:text-slate-200 dark:hover:bg-white/[0.07] transition-all cursor-pointer"
+                    @click="onDiagnose"
+                  >
+                    诊断
+                  </button>
+                </div>
+
+                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div class="rounded-lg border border-slate-200/70 dark:border-white/[0.07] bg-slate-50 dark:bg-white/[0.04] px-3 py-2">
+                    <div class="text-[11px] text-slate-400 dark:text-slate-500">当前原生方案</div>
+                    <div class="mt-1 text-xs font-semibold text-slate-900 dark:text-white truncate">{{ nativeEnabledProviderId || '未绑定' }}</div>
+                  </div>
+                  <div class="rounded-lg border border-slate-200/70 dark:border-white/[0.07] bg-slate-50 dark:bg-white/[0.04] px-3 py-2">
+                    <div class="text-[11px] text-slate-400 dark:text-slate-500">接入方案</div>
+                    <div class="mt-1 text-xs font-semibold text-slate-900 dark:text-white">{{ providers.length }} 个</div>
+                  </div>
+                </div>
+              </div>
             </div>
+          </section>
 
-            <div v-else class="space-y-2 text-xs">
-              <div class="flex justify-between">
-                <span class="text-slate-400 dark:text-slate-500">名称</span>
-                <span class="text-slate-700 dark:text-slate-200 font-medium">{{ currentTool.name }}</span>
+          <section class="rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-white/86 dark:bg-white/[0.045] shadow-sm">
+            <div class="px-5 py-4 flex items-center justify-between gap-3 border-b border-slate-200/80 dark:border-white/[0.07]">
+              <div>
+                <h3 class="text-sm font-bold text-slate-900 dark:text-white">原生配置方案</h3>
+                <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">编辑 1Shell 草稿，点击启用后写入 {{ activeTab.label }} 原生配置。</p>
               </div>
-              <div class="flex justify-between">
-                <span class="text-slate-400 dark:text-slate-500">状态</span>
-                <span :class="toolStatus.cls.split(' ').filter(c => c.startsWith('text-')).join(' ')">{{ toolStatus.label }}</span>
-              </div>
-              <div v-if="currentTool.binary?.path" class="flex justify-between">
-                <span class="text-slate-400 dark:text-slate-500">路径</span>
-                <span class="text-slate-700 dark:text-slate-200 font-mono truncate max-w-[300px]">{{ currentTool.binary.path }}</span>
-              </div>
-              <div v-if="currentTool.binary?.version" class="flex justify-between">
-                <span class="text-slate-400 dark:text-slate-500">版本</span>
-                <span class="text-slate-700 dark:text-slate-200">{{ currentTool.binary.version }}</span>
-              </div>
-              <div v-if="currentTool.nativeConfig?.configDir" class="flex justify-between">
-                <span class="text-slate-400 dark:text-slate-500">配置目录</span>
-                <span class="text-slate-700 dark:text-slate-200 font-mono truncate max-w-[300px]">{{ currentTool.nativeConfig.configDir }}</span>
-              </div>
-            </div>
-
-            <!-- CLI action buttons -->
-            <div v-if="currentTool" class="flex flex-wrap gap-2 mt-4 pt-3 border-t border-slate-100 dark:border-white/[0.04]">
               <button
                 type="button"
-                class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-white/[0.15] hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all cursor-pointer"
-                :disabled="ensuringIds.has(activeTabId)"
-                @click="onEnsureNativeConfig"
-              >{{ ensuringIds.has(activeTabId) ? '启用中...' : '启用配置' }}</button>
-              <button
-                v-if="currentTool.nativeConfig?.configDir"
-                type="button"
-                class="h-7 px-2.5 rounded-lg border border-red-200 dark:border-red-500/20 text-[11px] text-red-400 hover:border-red-300 dark:hover:border-red-500/30 hover:bg-red-50 dark:hover:bg-red-500/5 transition-all cursor-pointer"
-                @click="onResetNativeConfig"
-              >重置配置状态</button>
-              <button
-                type="button"
-                class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-white/[0.15] hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all cursor-pointer"
-                @click="onSetBinary"
-              >指定路径</button>
-              <button
-                v-if="currentTool.binary?.override"
-                type="button"
-                class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-white/[0.15] hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all cursor-pointer"
-                @click="onClearBinary"
-              >清除路径</button>
-              <button
-                type="button"
-                class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-white/[0.15] hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all cursor-pointer"
-                @click="onDiagnose"
-              >诊断</button>
-            </div>
-          </div>
-
-          <!-- Native config profiles for this CLI -->
-          <div class="rounded-xl border border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#0f1321] p-4">
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">原生配置方案</h3>
-              <button
-                type="button"
-                class="h-7 px-2.5 rounded-lg border border-sky-200 dark:border-sky-500/30 bg-sky-50 dark:bg-sky-500/10 text-[11px] font-medium text-sky-600 dark:text-sky-400 hover:border-sky-400 hover:bg-sky-100 dark:hover:bg-sky-500/20 transition-all cursor-pointer flex items-center gap-1"
+                class="h-8 px-3 rounded-lg border border-sky-200 bg-sky-50 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 dark:border-sky-500/25 dark:bg-sky-500/10 dark:text-sky-300 dark:hover:bg-sky-500/15 transition-all cursor-pointer flex items-center gap-1.5"
                 @click="openAddModal"
               >
-                <AppIcon name="plus" :size="11" />
+                <AppIcon name="plus" :size="12" />
                 添加
               </button>
             </div>
 
-            <div v-if="loadingProviders" class="text-xs text-slate-400 text-center py-6">加载中...</div>
+            <div class="p-5">
+              <div v-if="loadingProviders" class="py-12 text-center text-sm text-slate-500 dark:text-slate-400">正在加载配置方案...</div>
 
-            <div v-else-if="!providers.length" class="text-xs text-slate-400 dark:text-slate-500 text-center py-6">
-              暂无原生配置方案，点击"添加"配置
-            </div>
-
-            <div v-else class="space-y-2">
-              <div
-                v-for="p in providers"
-                :key="p.id"
-                class="flex items-center gap-3 px-3.5 py-3 rounded-xl border bg-white dark:bg-[#101827] shadow-sm transition-all group cursor-pointer"
-                :class="p.id === activeProviderId
-                  ? 'border-emerald-300 dark:border-emerald-500/40 bg-emerald-50/50 dark:bg-emerald-500/[0.06] ring-1 ring-emerald-200/60 dark:ring-emerald-500/20'
-                  : 'border-slate-200 dark:border-white/[0.08] hover:border-slate-300 dark:hover:border-white/[0.14] hover:shadow-md'"
-                @click="setActive(p.id)"
-              >
-                <span class="w-2 h-2 rounded-full shrink-0" :class="p.id === activeProviderId ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2">
-                    <span class="text-xs font-medium text-slate-700 dark:text-slate-200 truncate">{{ p.name || '未命名' }}</span>
-                    <span v-if="p.id === activeProviderId" class="text-[9px] px-1 rounded bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">活跃</span>
-                  </div>
-                  <div class="text-[11px] text-slate-400 dark:text-slate-500 truncate">
-                    {{ p.model || '未指定模型' }} · {{ fmtBase(p.apiBase || '') }}
-                  </div>
+              <div v-else-if="!providers.length" class="rounded-lg border border-dashed border-slate-300 dark:border-white/[0.12] px-4 py-12 text-center">
+                <div class="mx-auto w-11 h-11 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.04] flex items-center justify-center">
+                  <AppIcon name="file-plus" :size="21" class="text-slate-400 dark:text-slate-500" />
                 </div>
-                <div class="shrink-0 flex items-center gap-1 rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50/80 dark:bg-white/[0.035] p-1 shadow-sm">
-                  <button
-                    type="button"
-                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
-                    :disabled="enablingProviderIds.has(p.id)"
-                    title="启用该配置方案到原生配置文件"
-                    @click.stop="enableProviderConfig(p)"
-                  >
-                    <AppIcon name="check" :size="12" />
-                    {{ enablingProviderIds.has(p.id) ? '启用中' : (isProviderNativeEnabled(p) ? '已启用' : '启用') }}
-                  </button>
-                  <button
-                    type="button"
-                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
-                    :disabled="testingProviderIds.has(p.id)"
-                    title="测试配置方案"
-                    @click.stop="testProvider(p)"
-                  >
-                    <AppIcon name="radio" :size="12" />
-                    {{ testingProviderIds.has(p.id) ? '测试中' : '测试' }}
-                  </button>
-                  <button
-                    type="button"
-                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
-                    :disabled="copyingProviderIds.has(p.id)"
-                    title="复制配置方案"
-                    @click.stop="copyProvider(p)"
-                  >
-                    <AppIcon name="copy" :size="12" />
-                    {{ copyingProviderIds.has(p.id) ? '复制中' : '复制' }}
-                  </button>
-                  <button
-                    type="button"
-                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
-                    title="设置"
-                    @click.stop="openEditModal(p.id)"
-                  >
-                    <AppIcon name="cog" :size="12" />
-                    设置
-                  </button>
-                  <button
-                    type="button"
-                    class="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
-                    title="删除"
-                    @click.stop="deleteProvider(p.id)"
-                  >
-                    <AppIcon name="close" :size="12" />
-                    删除
-                  </button>
+                <h4 class="mt-4 text-sm font-semibold text-slate-800 dark:text-slate-200">暂无原生配置方案</h4>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">添加后可测试、复制、编辑，并启用到原生配置文件。</p>
+              </div>
+
+              <div v-else class="space-y-3">
+                <div
+                  v-for="p in providers"
+                  :key="p.id"
+                  class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_auto] items-start xl:items-center gap-4 rounded-lg border bg-white dark:bg-[#0d1424] px-4 py-3 transition-all cursor-pointer"
+                  :class="p.id === activeProviderId
+                    ? 'border-emerald-300 dark:border-emerald-500/40 ring-1 ring-emerald-200/80 dark:ring-emerald-500/20'
+                    : 'border-slate-200/80 dark:border-white/[0.08] hover:border-slate-300 dark:hover:border-white/[0.14]'"
+                  @click="setActive(p.id)"
+                >
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="w-2.5 h-2.5 rounded-full" :class="p.id === activeProviderId ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
+                      <span class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ p.name || '未命名配置' }}</span>
+                      <span v-if="p.id === activeProviderId" class="rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-300">当前</span>
+                      <span v-if="isProviderNativeEnabled(p)" class="rounded-md border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:border-sky-500/25 dark:bg-sky-500/10 dark:text-sky-300">已写入原生</span>
+                      <span class="rounded-md border px-1.5 py-0.5 text-[10px] font-semibold" :class="providerKeyClass(p)">{{ providerKeyText(p) }}</span>
+                    </div>
+                    <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                      <span class="font-mono truncate max-w-[280px]">{{ providerModelLabel(p) }}</span>
+                      <span>{{ providerProtocolLabel(p) }}</span>
+                      <span class="font-mono truncate max-w-[360px]">{{ providerBaseLabel(p) }}</span>
+                    </div>
+                  </div>
+
+                  <div class="shrink-0 flex items-center gap-1 rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-slate-50/80 dark:bg-white/[0.04] p-1 overflow-x-auto max-w-full">
+                    <button
+                      type="button"
+                      class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                      :disabled="enablingProviderIds.has(p.id)"
+                      title="启用该配置方案到原生配置文件"
+                      @click.stop="enableProviderConfig(p)"
+                    >
+                      <AppIcon name="check" :size="12" />
+                      {{ enablingProviderIds.has(p.id) ? '启用中' : (isProviderNativeEnabled(p) ? '已启用' : '启用') }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:text-emerald-700 dark:hover:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                      :disabled="testingProviderIds.has(p.id)"
+                      title="测试配置方案"
+                      @click.stop="testProvider(p)"
+                    >
+                      <AppIcon name="radio" :size="12" />
+                      {{ testingProviderIds.has(p.id) ? '测试中' : '测试' }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                      :disabled="copyingProviderIds.has(p.id)"
+                      title="复制配置方案"
+                      @click.stop="copyProvider(p)"
+                    >
+                      <AppIcon name="copy" :size="12" />
+                      {{ copyingProviderIds.has(p.id) ? '复制中' : '复制' }}
+                    </button>
+                    <button
+                      type="button"
+                      class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:text-sky-700 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-500/10 transition-colors cursor-pointer"
+                      title="设置"
+                      @click.stop="openEditModal(p.id)"
+                    >
+                      <AppIcon name="cog" :size="12" />
+                      设置
+                    </button>
+                    <button
+                      type="button"
+                      class="h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer"
+                      title="删除"
+                      @click.stop="deleteProvider(p.id)"
+                    >
+                      <AppIcon name="trash" :size="12" />
+                      删除
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          </section>
         </div>
       </template>
     </main>
 
-    <!-- Provider Modal (shared) -->
     <ProviderModal
       v-model:open="modalOpen"
       :cli-id="modalProps.cliId"

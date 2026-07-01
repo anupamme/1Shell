@@ -74,7 +74,7 @@ Provider 表单
   └── 配置文件视图
         ├── Claude Code settings.json
         ├── Codex config.toml
-        ├── Codex auth.json 状态
+        ├── Codex mcp.json
         ├── OpenCode opencode.json provider 片段
         ├── MCP 配置片段
         └── Raw editor + diff + validate + backup + restore
@@ -211,7 +211,7 @@ interface AgentNativeAdapter {
 |---|---|
 | 用户本机真实配置文件 | 默认只 patch 1Shell 管理的片段。写前必须 diff + backup。 |
 | OpenCode 这类 additive config | 只写 `provider.<id>` 和 `mcp.<id>` 片段,不碰其他 provider。 |
-| Codex `auth.json` | 默认保护官方登录态,第三方 token 优先写入 `config.toml` 的 provider scope。 |
+| Codex `auth.json` | 只做旧配置导入兼容读取；1Shell 不生成、不展示、不覆盖。Codex API Key 通过启动环境变量注入。 |
 | 用户手工指定 catalog/config | 不抢占,不删除,只在明确由 1Shell 生成时管理。 |
 
 建议新增 ledger:
@@ -309,7 +309,7 @@ Provider 编辑页新增 "配置文件" 区域。
   ├── 能力开关
   └── 配置文件
         ├── Agent tabs: Claude Code / Codex / OpenCode
-        ├── 文件 tabs: settings.json / config.toml / auth.json / mcp.json
+        ├── 文件 tabs: settings.json / config.toml / mcp.json
         ├── 表单视图
         ├── 原文视图
         ├── 预览生成
@@ -423,7 +423,6 @@ host(default):
 ```text
 host(default):
 ~/.codex/config.toml
-~/.codex/auth.json
 ~/.codex/mcp.json
 ~/.codex/1shell-model-catalog.json
 
@@ -454,8 +453,8 @@ sandbox = "elevated"
 关键原则:
 
 - 不默认覆盖用户官方 ChatGPT/Codex 登录态。
-- 第三方 token 优先写入 `config.toml` provider scope。
-- `auth.json` 必须保护官方登录态；第三方 key 写入要可见、可备份、可恢复。
+- 第三方 token 不写入 `auth.json`；启动 Codex 时由 1Shell 注入 `OPENAI_API_KEY`。
+- `auth.json` 只兼容读取旧配置,不得由 1Shell 生成或覆盖。
 - `model_catalog_json` 只管理 1Shell 自己生成的 catalog 文件。
 - 如果用户已有外部 catalog,不得删除。
 - native Responses 网关可能拒绝 Codex 的 custom tool schema,model catalog 要能按 provider 能力调整。
@@ -597,7 +596,7 @@ host(default):
 
 - 实现 `codex.adapter.js`。
 - 使用 TOML parser/edit 工具,避免字符串拼接。
-- 保护 `auth.json`。
+- 不再生成 `auth.json`,仅兼容读取旧文件。
 - 支持 provider-scoped bearer token。
 - 支持 `model_reasoning_effort`。
 - 初版 model catalog 只做必要最小集。
@@ -759,7 +758,7 @@ UI 原则:
 - backup restore。
 - raw override 不被覆盖。
 - additive patch 不删除用户配置。
-- Codex `auth.json` 保护。
+- Codex `auth.json` 兼容读取,不生成不覆盖。
 - Agent proxy 旧端点不可回归。
 
 前端:

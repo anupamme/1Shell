@@ -62,6 +62,8 @@ const keyword = ref('');
 const renamingId = ref<string | null>(null);
 const renameText = ref('');
 const fileHostId = ref('local');
+const COLLAPSED_GROUP_SESSION_LIMIT = 2;
+const expandedGroupKeys = ref<Set<string>>(new Set());
 
 const fb = useFileBrowser({ hostId: fileHostId, singleton: false });
 
@@ -105,6 +107,8 @@ const chatGroups = computed<SessionGroup[]>(() => {
   }
   return [...groups.values()].sort((a, b) => parseTime(b.updatedAt) - parseTime(a.updatedAt));
 });
+
+const searchActive = computed(() => keyword.value.trim().length > 0);
 
 const visibleItems = computed<DirItem[]>(() => {
   const list = fb.showHidden.value
@@ -190,6 +194,12 @@ watch(() => props.fileFocus, async (focus) => {
   if (targetDir !== fb.currentPath.value) fb.navigate(targetDir);
 }, { deep: true });
 
+watch(chatGroups, (groups) => {
+  const validKeys = new Set(groups.map((group) => group.key));
+  const next = new Set([...expandedGroupKeys.value].filter((key) => validKeys.has(key)));
+  if (next.size !== expandedGroupKeys.value.size) expandedGroupKeys.value = next;
+});
+
 function setTab(tab: RailTab): void {
   emit('update:activeTab', tab);
 }
@@ -266,6 +276,31 @@ function hostName(id: string): string {
   return host?.name || id;
 }
 
+function isGroupExpanded(groupKey: string): boolean {
+  return searchActive.value || expandedGroupKeys.value.has(groupKey);
+}
+
+function groupCanToggle(group: SessionGroup): boolean {
+  return !searchActive.value && group.sessions.length > COLLAPSED_GROUP_SESSION_LIMIT;
+}
+
+function hiddenGroupCount(group: SessionGroup): number {
+  if (isGroupExpanded(group.key)) return 0;
+  return Math.max(0, group.sessions.length - COLLAPSED_GROUP_SESSION_LIMIT);
+}
+
+function visibleGroupSessions(group: SessionGroup): SessionMeta[] {
+  if (isGroupExpanded(group.key)) return group.sessions;
+  return group.sessions.slice(0, COLLAPSED_GROUP_SESSION_LIMIT);
+}
+
+function toggleGroupExpanded(groupKey: string): void {
+  const next = new Set(expandedGroupKeys.value);
+  if (next.has(groupKey)) next.delete(groupKey);
+  else next.add(groupKey);
+  expandedGroupKeys.value = next;
+}
+
 function selectHost(id: string): void {
   const next = id || 'local';
   fileHostId.value = next;
@@ -308,7 +343,7 @@ function isFocusedItem(item: DirItem): boolean {
 </script>
 
 <template>
-  <aside class="w-[328px] min-w-[292px] max-w-[360px] shrink-0 h-full flex flex-col border-r border-slate-200/80 dark:border-white/[0.06] bg-white dark:bg-[#0d111b]">
+  <aside class="w-[352px] min-w-[312px] max-w-[380px] shrink-0 h-full flex flex-col border-r border-slate-200/80 dark:border-white/[0.06] bg-white dark:bg-[#0d111b]">
     <div class="shrink-0 p-2.5 border-b border-slate-200/80 dark:border-white/[0.06]">
       <div class="grid grid-cols-3 gap-1 rounded-xl bg-slate-100/70 dark:bg-white/[0.035] border border-slate-200/80 dark:border-white/[0.06] p-1">
         <button
@@ -363,13 +398,13 @@ function isFocusedItem(item: DirItem): boolean {
 
           <div class="agent-chat-group-list">
             <div
-              v-for="s in group.sessions"
+              v-for="s in visibleGroupSessions(group)"
               :key="s.id"
-              class="group relative rounded-xl cursor-pointer transition-all border"
+              class="group relative rounded-xl cursor-pointer transition-all border overflow-hidden"
               :class="s.id === props.activeId ? 'bg-sky-50/80 dark:bg-sky-400/10 border-sky-200/90 dark:border-sky-400/20 shadow-sm' : 'bg-white/70 dark:bg-white/[0.02] border-transparent hover:bg-white dark:hover:bg-white/[0.04] hover:border-slate-200/80 dark:hover:border-white/[0.06]'"
               @click="renamingId === s.id ? null : emit('select', s.id)"
             >
-              <div class="px-3 py-2.5">
+              <div class="min-w-0 px-3 py-2.5">
                 <input
                   v-if="renamingId === s.id"
                   :ref="(el) => focusRename(el, s.id)"
@@ -381,20 +416,32 @@ function isFocusedItem(item: DirItem): boolean {
                   @keydown.esc.prevent="renamingId = null"
                   @blur="commitRename"
                 />
-                <div v-else class="flex items-center gap-1.5">
+                <div v-else class="agent-session-text-guard min-w-0 flex items-center gap-1.5 pr-1 transition-[padding] group-hover:pr-[82px]">
                   <span v-if="s.entry === 'task'" class="shrink-0 text-amber-500 dark:text-amber-400" title="任务会话"><AppIcon name="save" :size="11" /></span>
-                  <span class="text-[13px] font-semibold truncate" :class="s.id === props.activeId ? 'text-slate-950 dark:text-slate-100' : 'text-slate-700 dark:text-slate-200'">{{ s.title || '新对话' }}</span>
+                  <span
+                    class="min-w-0 flex-1 text-[13px] font-semibold truncate"
+                    :class="s.id === props.activeId ? 'text-slate-950 dark:text-slate-100' : 'text-slate-700 dark:text-slate-200'"
+                    :title="s.title || '新对话'"
+                  >{{ s.title || '新对话' }}</span>
                   <span v-if="s.awaitingApproval" class="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400">待确认</span>
                   <span v-if="s.running" class="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400 animate-pulse">运行中</span>
                 </div>
 
-                <div v-if="renamingId !== s.id" class="flex items-center gap-1.5 mt-0.5">
-                  <span class="text-[10px] text-slate-400 dark:text-slate-600 shrink-0">{{ relTime(s.updatedAt) }}</span>
-                  <span v-if="s.preview" class="text-[10px] text-slate-400 dark:text-slate-600 truncate">· {{ s.preview }}</span>
+                <div v-if="renamingId !== s.id" class="agent-session-text-guard min-w-0 mt-1 pr-1 transition-[padding] group-hover:pr-[82px]">
+                  <div class="flex items-center gap-1.5 text-[10px] font-medium text-slate-400 dark:text-slate-600">
+                    <span class="shrink-0">{{ relTime(s.updatedAt) }}</span>
+                    <span v-if="s.messageCount" class="shrink-0">· {{ s.messageCount }} 条</span>
+                    <span v-if="s.modelLabel" class="min-w-0 truncate">· {{ s.modelLabel }}</span>
+                  </div>
+                  <p
+                    v-if="s.preview"
+                    class="agent-session-preview mt-0.5 text-[11px] leading-4 text-slate-500/75 dark:text-slate-500"
+                    :title="s.preview"
+                  >{{ s.preview }}</p>
                 </div>
               </div>
 
-              <div v-if="renamingId !== s.id" class="absolute right-1.5 top-1.5 hidden group-hover:flex items-center gap-0.5 rounded-lg border border-slate-200/80 dark:border-white/[0.06] bg-white/95 dark:bg-[#121826]/95 p-0.5 shadow-sm">
+              <div v-if="renamingId !== s.id" class="agent-session-actions absolute right-1.5 top-1.5 hidden group-hover:flex items-center gap-0.5 rounded-lg border border-slate-200/80 dark:border-white/[0.06] bg-white/95 dark:bg-[#121826]/95 p-0.5 shadow-sm">
                 <button class="w-6 h-6 flex items-center justify-center rounded text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] transition-colors cursor-pointer" title="重命名" @click.stop="startRename(s)">
                   <AppIcon name="pen" :size="12" />
                 </button>
@@ -406,6 +453,22 @@ function isFocusedItem(item: DirItem): boolean {
                 </button>
               </div>
             </div>
+
+            <button
+              v-if="groupCanToggle(group)"
+              type="button"
+              class="agent-chat-group-toggle"
+              :aria-expanded="isGroupExpanded(group.key)"
+              @click="toggleGroupExpanded(group.key)"
+            >
+              <AppIcon
+                name="arrow-right"
+                :size="12"
+                class="agent-chat-group-toggle-icon"
+                :class="{ 'agent-chat-group-toggle-icon--expanded': isGroupExpanded(group.key) }"
+              />
+              <span>{{ isGroupExpanded(group.key) ? '收起' : `展开 ${hiddenGroupCount(group)} 条` }}</span>
+            </button>
           </div>
         </section>
       </div>
@@ -549,6 +612,57 @@ function isFocusedItem(item: DirItem): boolean {
   border-left: 1px solid rgba(203, 213, 225, 0.72);
 }
 
+.agent-chat-group-toggle {
+  width: 100%;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px dashed rgba(148, 163, 184, 0.5);
+  border-radius: 10px;
+  color: rgb(71, 85, 105);
+  background: rgba(248, 250, 252, 0.74);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.agent-chat-group-toggle:hover {
+  color: rgb(2, 132, 199);
+  border-color: rgba(14, 165, 233, 0.42);
+  background: rgba(240, 249, 255, 0.78);
+}
+
+.agent-chat-group-toggle-icon {
+  transform: rotate(90deg);
+  transition: transform 160ms ease;
+}
+
+.agent-chat-group-toggle-icon--expanded {
+  transform: rotate(-90deg);
+}
+
+.agent-session-preview {
+  display: -webkit-box;
+  max-height: 32px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@media (hover: none) {
+  .agent-session-actions {
+    display: flex;
+  }
+
+  .agent-session-text-guard {
+    padding-right: 82px;
+  }
+}
+
 :global(.dark) .agent-chat-group-header {
   border-color: rgba(255, 255, 255, 0.07);
   background:
@@ -558,5 +672,17 @@ function isFocusedItem(item: DirItem): boolean {
 
 :global(.dark) .agent-chat-group-list {
   border-left-color: rgba(255, 255, 255, 0.08);
+}
+
+:global(.dark) .agent-chat-group-toggle {
+  color: rgb(148, 163, 184);
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+:global(.dark) .agent-chat-group-toggle:hover {
+  color: rgb(125, 211, 252);
+  border-color: rgba(56, 189, 248, 0.28);
+  background: rgba(56, 189, 248, 0.08);
 }
 </style>

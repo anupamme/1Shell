@@ -174,7 +174,7 @@ function assertCodexNativeConfig() {
       const nativeConfig = createNativeConfigHarness(dataDir, { codex: provider });
       nativeConfig.ensureNativeConfig('codex', { cwd: '/native-codex-test' });
       const configToml = fs.readFileSync(path.join(dataDir, '.codex', 'config.toml'), 'utf8');
-      const auth = readJson(path.join(dataDir, '.codex', 'auth.json'));
+      const launchEnv = nativeConfig.buildLaunchEnv('codex', { cwd: '/native-codex-test' });
       const providerId = localConfig?.providerId || 'cpa';
       const baseUrl = localConfig?.baseUrl || 'https://codex.weidu.my/v1';
       const model = localConfig?.model || 'gpt-5.5';
@@ -187,7 +187,8 @@ function assertCodexNativeConfig() {
       assert.ok(configToml.includes('env_key = "OPENAI_API_KEY"'), configToml);
       assert.ok(!configToml.includes('disable_response_storage'), 'Codex 0.142 strict config rejects disable_response_storage');
       assert.ok(!configToml.includes('/api/proxy/codex'), 'Codex native config must not use old proxy URL');
-      assert.strictEqual(auth.OPENAI_API_KEY, provider.apiKey);
+      assert.strictEqual(fs.existsSync(path.join(dataDir, '.codex', 'auth.json')), false, 'Codex auth.json should not be generated');
+      assert.strictEqual(launchEnv.OPENAI_API_KEY, provider.apiKey, 'Codex API key should be injected at launch time');
 
       if (expectedEffort) {
         assert.ok(configToml.includes(`model_reasoning_effort = "${expectedEffort}"`), configToml);
@@ -307,12 +308,11 @@ function assertConfigPreviewFollowsDraftWithoutWriting() {
       activeProvider: codexDraft,
     });
     const codexToml = codexFiles.find(file => file.name === 'config.toml')?.content || '';
-    const codexAuth = JSON.parse(codexFiles.find(file => file.name === 'auth.json')?.content || '{}');
     assert.ok(codexToml.includes('model_provider = "preview-codex"'), codexToml);
     assert.ok(codexToml.includes('model = "gpt-preview"'), codexToml);
     assert.ok(codexToml.includes('model_reasoning_effort = "xhigh"'), codexToml);
     assert.ok(codexToml.includes('base_url = "https://preview-codex.example.com/v1"'), codexToml);
-    assert.strictEqual(codexAuth.OPENAI_API_KEY, 'sk-preview-codex');
+    assert.strictEqual(codexFiles.some(file => file.name === 'auth.json'), false, 'Codex preview should not expose auth.json');
     assert.strictEqual(fs.existsSync(path.join(dataDir, '.codex', 'config.toml')), false, 'preview must not write Codex files');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -349,12 +349,11 @@ function assertSaveDraftAndLaunchDoNotWriteNativeFiles() {
       cwd: '/native-enable-test',
       files: [
         { name: 'config.toml', content: customToml },
-        { name: 'auth.json', content: JSON.stringify({ OPENAI_API_KEY: 'sk-enabled-codex' }, null, 2) },
         { name: 'mcp.json', content: JSON.stringify({ mcpServers: {} }, null, 2) },
       ],
     });
     assert.strictEqual(fs.readFileSync(configPath, 'utf8'), customToml, 'enable should write selected config.toml content');
-    assert.strictEqual(readJson(authPath).OPENAI_API_KEY, 'sk-enabled-codex', 'enable should write selected auth.json content');
+    assert.strictEqual(fs.existsSync(authPath), false, 'enable should not write Codex auth.json');
     assert.ok(fs.existsSync(mcpPath), 'enable should write selected mcp.json content');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });

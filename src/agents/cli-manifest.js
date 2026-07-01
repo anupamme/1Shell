@@ -87,11 +87,6 @@ const CLI_MANIFESTS = [
           template: 'codex-config-toml',
         },
         {
-          name: 'auth.json',
-          mergeStrategy: 'overwrite',
-          overwriteBuilder: 'codex-native-auth',
-        },
-        {
           name: 'mcp.json',
           mergeStrategy: 'deep-merge',
           mergePointer: 'mcpServers.1shell',

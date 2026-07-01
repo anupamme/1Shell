@@ -18,13 +18,18 @@ const navItems: NavItem[] = [
 </script>
 
 <template>
-  <aside class="sidebar-aside app-sidebar shrink-0 w-16 flex flex-col items-stretch py-3">
-    <nav class="app-sidebar-nav flex flex-col gap-1 px-1">
+  <aside class="sidebar-aside app-sidebar shrink-0 w-[76px] flex flex-col items-stretch py-3 border-r border-slate-200/70 dark:border-white/[0.06]">
+    <div class="px-2 pb-3">
+      <div class="h-8 rounded-lg border border-slate-200/80 dark:border-white/[0.08] bg-white/70 dark:bg-white/[0.04] text-[10px] font-semibold text-slate-500 dark:text-slate-400 flex items-center justify-center">
+        配置
+      </div>
+    </div>
+    <nav class="app-sidebar-nav flex flex-col gap-1.5 px-2">
       <RouterLink
         v-for="item in navItems"
         :key="item.to"
         :to="item.to"
-        class="side-nav-item"
+        class="side-nav-item outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
         :title="item.title"
       >
         <AppIcon :name="item.icon" :size="20" />

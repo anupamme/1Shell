@@ -707,7 +707,6 @@ function createNativeCliConfig({
     }),
     'claude-native-settings': (cliId, configFile, ctx = {}) => buildClaudeNativeSettings(ctx.active ?? getActiveProviderConfig(cliId)),
     'claude-native-config': (cliId, configFile, ctx = {}) => buildClaudeNativeConfig(ctx.active ?? getActiveProviderConfig(cliId)),
-    'codex-native-auth': (cliId, configFile, ctx = {}) => buildCodexNativeAuth(ctx.active ?? getActiveProviderConfig(cliId)),
     'opencode-native-config': (cliId, configFile, ctx = {}) => buildOpenCodeNativeConfig(ctx.active ?? getActiveProviderConfig(cliId), buildAllMcpEntries(cliId)),
     'static': (cliId, configFile) => (
       configFile.content && typeof configFile.content === 'object' ? configFile.content : {}
@@ -820,6 +819,11 @@ function createNativeCliConfig({
 
       if (prepareNative) ensureNativeConfig(cliId, { cwd });
       env.ONESHELL_MCP_TOKEN = bridgeToken;
+    }
+
+    if (cliId === 'codex') {
+      const apiKey = String(getActiveProviderConfig(cliId)?.apiKey || '').trim();
+      if (apiKey && !env.OPENAI_API_KEY) env.OPENAI_API_KEY = apiKey;
     }
 
     Object.assign(env, manifest.extraEnv);
@@ -1082,7 +1086,6 @@ function createNativeCliConfig({
     const authPath = path.join(dir, 'auth.json');
     const files = [
       { name: 'config.toml', path: configPath, exists: fs.existsSync(configPath) },
-      { name: 'auth.json', path: authPath, exists: fs.existsSync(authPath) },
     ];
     if (!files[0].exists) return { found: false, cliId: 'codex', provider: null, files };
 
@@ -1513,7 +1516,6 @@ function shouldSkipProviderConfigWrite(configFile, activeProvider) {
   return [
     'claude-native-settings',
     'claude-native-config',
-    'codex-native-auth',
     'opencode-native-config',
   ].includes(builder) || template === 'codex-config-toml';
 }
@@ -1756,11 +1758,6 @@ function buildClaudeNativeSettings(provider) {
 
 function buildClaudeNativeConfig() {
   return { primaryApiKey: 'any' };
-}
-
-function buildCodexNativeAuth(provider) {
-  const apiKey = String(provider?.apiKey || '').trim();
-  return apiKey ? { OPENAI_API_KEY: apiKey } : {};
 }
 
 function buildOpenCodeNativeConfig(provider, mcpEntries = {}) {

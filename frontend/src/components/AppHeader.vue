@@ -11,14 +11,15 @@ interface NavItem {
   to: string;
   label: string;
   matchPrefix: string;
+  icon: string;
 }
 
 const navItems: NavItem[] = [
-  { to: '/',          label: '主页',   matchPrefix: '/' },
-  { to: '/agent',     label: 'Agent',  matchPrefix: '/agent' },
-  { to: '/terminal',  label: '终端',   matchPrefix: '/terminal' },
-  { to: '/panel',     label: '面板',   matchPrefix: '/panel' },
-  { to: '/config',    label: '配置',   matchPrefix: '/config' },
+  { to: '/',          label: '主页',   matchPrefix: '/',         icon: 'globe' },
+  { to: '/agent',     label: 'Agent',  matchPrefix: '/agent',    icon: 'robot' },
+  { to: '/terminal',  label: '终端',   matchPrefix: '/terminal', icon: 'terminal' },
+  { to: '/panel',     label: '面板',   matchPrefix: '/panel',    icon: 'chart' },
+  { to: '/config',    label: '配置',   matchPrefix: '/config',   icon: 'toolbox' },
 ];
 
 function isActive(item: NavItem): boolean {
@@ -46,27 +47,28 @@ onMounted(syncFromDom);
 </script>
 
 <template>
-  <header class="app-header shrink-0 flex items-center h-12 px-3 bg-white/95 dark:bg-slate-900 border-b border-slate-200/80 dark:border-slate-700 transition-colors">
+  <header class="app-header shrink-0 flex items-center h-14 px-4 bg-white/85 dark:bg-[#070b15]/95 border-b border-slate-200/80 dark:border-white/[0.08] transition-colors backdrop-blur-xl">
     <!-- 左侧：Logo + 导航 -->
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-3 min-w-0">
       <RouterLink
         to="/"
-        class="shrink-0 w-8 h-8 rounded-lg overflow-hidden flex items-center justify-center hover:opacity-80 transition-opacity"
+        class="shrink-0 w-9 h-9 rounded-lg overflow-hidden flex items-center justify-center shadow-sm ring-1 ring-slate-200/70 dark:ring-white/10 hover:opacity-90 transition-opacity"
         title="1Shell"
       >
         <img src="/logo.png" alt="1Shell" class="w-full h-full object-cover" />
       </RouterLink>
-      <div class="w-px h-5 bg-slate-200 dark:bg-slate-700 mx-1"></div>
-      <nav class="app-header-nav flex gap-1">
+      <div class="hidden sm:block w-px h-6 bg-slate-200 dark:bg-white/10"></div>
+      <nav class="app-header-nav flex gap-1 min-w-0">
         <RouterLink
           v-for="item in navItems"
           :key="item.to"
           :to="item.to"
-          class="app-header-nav-link px-3 py-1.5 text-sm font-medium rounded-lg transition-colors duration-150"
+          class="app-header-nav-link inline-flex items-center gap-1.5 px-3 py-2 text-sm font-semibold rounded-lg transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
           :class="isActive(item)
-            ? 'text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-500/10'
-            : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/[0.06]'"
+            ? 'text-slate-950 dark:text-white bg-slate-900/[0.06] dark:bg-white/[0.08] shadow-sm'
+            : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-900/[0.04] dark:hover:bg-white/[0.06]'"
         >
+          <AppIcon :name="item.icon" :size="15" />
           {{ item.label }}
         </RouterLink>
       </nav>
@@ -78,21 +80,21 @@ onMounted(syncFromDom);
         :href="GITHUB_URL"
         target="_blank"
         rel="noopener noreferrer"
-        class="app-header-github flex items-center justify-center w-8 h-8 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] rounded-lg transition-colors duration-150"
+        class="app-header-github flex items-center justify-center w-9 h-9 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-900/[0.05] dark:hover:bg-white/[0.07] rounded-lg transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
         title="GitHub 项目主页"
       >
         <AppIcon name="github" :size="18" />
       </a>
       <RouterLink
         to="/settings"
-        class="flex items-center justify-center w-8 h-8 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] rounded-lg transition-colors duration-150"
+        class="flex items-center justify-center w-9 h-9 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-900/[0.05] dark:hover:bg-white/[0.07] rounded-lg transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
         title="系统设置"
       >
         <AppIcon name="cog" :size="18" />
       </RouterLink>
       <button
         type="button"
-        class="flex items-center justify-center w-8 h-8 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] rounded-lg transition-colors duration-150"
+        class="flex items-center justify-center w-9 h-9 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-900/[0.05] dark:hover:bg-white/[0.07] rounded-lg transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
         title="主题切换"
         @click="toggleTheme"
       >
