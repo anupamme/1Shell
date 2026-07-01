@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.6.8 - 2026-07-01
+
+4.6.8 将“扩展”重构为主机级 MCP / Skill 能力矩阵，并移除旧版内置 1Shell Skill 与 Claude Code Skill 托管残留。
+
+- 扩展页重建为 MCP / Skill 双矩阵，按 agent 图标列管理 `1Shell AI`、Claude Code、Codex、OpenCode 的能力暴露状态。
+- 新增主机能力扫描服务，识别本机 Claude Code / Codex / OpenCode MCP 配置与外部导入 Skill，并区分 `managed`、`installed`、`external`、`preset`、`oneshell` 来源。
+- 新增 Skill AI 导入入口，粘贴 GitHub 仓库链接后临时拉取源码、扫描 `SKILL.md`，再由 AI 适配为 1Shell 原生 Skill。
+- `1Shell AI` 现在使用同一套 Skill/MCP 管理矩阵，不再走旧的内部隐藏 Skill 注入路径。
+- 删除旧 `oneshell-task-authoring` 内置 Skill、旧卡片式扩展组件、旧 `/api/skills/import` 与 `/api/claude-code-skills/*` 托管接口。
+- 移除旧 Claude Code Skill 同步 hook，外部 agent 能力暴露统一回到主机能力矩阵的后续 adapter 路线。
+- `.gitignore` 收紧本机运行态目录、原生 CLI 配置备份、导入 Skill 数据和 MindFS 会话数据，避免发布包或源码提交携带私人状态。
+
+### Verification
+
+- `npm --prefix frontend run build`
+- `npm test`
+- `node scripts/test-host-capability-service.js`
+- staged source secret/path scan before release
+
 ## 4.6.7 - 2026-06-30
 
 4.6.7 集中修复终端与 1Shell AI 输出保真问题，重点让模型看到完整工具信息，并让流式显示过程与最终回答保持一致。

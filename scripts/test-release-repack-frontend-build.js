@@ -13,6 +13,9 @@ assert.match(source, /runNpm\(\s*\[\s*'--prefix',\s*'frontend',\s*'run',\s*'buil
 assert.match(source, /frontend\/dist\/index\.html is missing after build/, 'repack script must fail if frontend build output is missing');
 assert.match(source, /\.1shell-build\.json/, 'repack script must stamp the frontend build marker');
 assert.match(source, /writeFrontendBuildMarker\(\);/, 'repack script must write the frontend build marker after build');
+assert.match(source, /sanitizeBasePackage\s*\(\s*packageDir\s*\)\s*;/, 'repack script must sanitize inherited runtime data before overlay');
+assert.match(source, /'data\/skills\/_templates'/, 'repack script must include only skill templates');
+assert.doesNotMatch(source, /'data\/skills'\s*,/, 'repack script must not include imported host skills');
 
 const runBuildIndex = source.indexOf('runFrontendBuild();');
 const repackLoopIndex = source.indexOf('for (const asset of ASSETS)');

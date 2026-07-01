@@ -62,7 +62,7 @@ const DIRS = [
   '.github',
   'agent',
   'bin',
-  'data/skills',
+  'data/skills/_templates',
   'desktop',
   'docs',
   'frontend/dist',
@@ -81,6 +81,11 @@ const DIRS = [
   'public',
   'scripts',
   'src',
+];
+
+const BASE_RUNTIME_PATHS = [
+  '.mindfs',
+  'data',
 ];
 
 function posixRel(from, to) {
@@ -170,6 +175,17 @@ function overlay(packageDir) {
   }
   for (const rel of DIRS) {
     cp(path.join(ROOT, rel), path.join(packageDir, rel));
+  }
+}
+
+function sanitizeBasePackage(packageDir) {
+  for (const rel of BASE_RUNTIME_PATHS) {
+    rm(path.join(packageDir, rel));
+  }
+  for (const entry of fs.readdirSync(packageDir, { withFileTypes: true })) {
+    if (entry.name === '.env' || entry.name.startsWith('.env.')) {
+      rm(path.join(packageDir, entry.name));
+    }
   }
 }
 
@@ -424,6 +440,7 @@ async function repack(asset) {
       execFileSync('tar', extractArgs, { stdio: 'inherit' });
     }
     let packageDir = findPackageDir(workDir);
+    sanitizeBasePackage(packageDir);
     overlay(packageDir);
     restoreExecutableBits(packageDir);
     if (path.basename(packageDir) !== asset.packageName) {
