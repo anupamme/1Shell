@@ -189,6 +189,74 @@ function sanitizeBasePackage(packageDir) {
   }
 }
 
+function nodeModulePath(nodeModulesDir, packageName) {
+  return path.join(nodeModulesDir, ...String(packageName || '').split('/'));
+}
+
+function assertPortableJavaScriptPackage(packageName, packageMeta) {
+  const blockers = [];
+  if (packageMeta.gypfile) blockers.push('gypfile');
+  if (packageMeta.binary) blockers.push('binary');
+  if (packageMeta.os) blockers.push('os');
+  if (packageMeta.cpu) blockers.push('cpu');
+  if (packageMeta.libc) blockers.push('libc');
+  const scripts = packageMeta.scripts || {};
+  for (const scriptName of ['preinstall', 'install', 'postinstall']) {
+    if (scripts[scriptName]) blockers.push(`scripts.${scriptName}`);
+  }
+  if (blockers.length > 0) {
+    throw new Error(`Missing runtime dependency ${packageName} is not safe to copy across release assets (${blockers.join(', ')}). Rebuild the base asset for that platform.`);
+  }
+}
+
+function copyPortablePackageTree(packageName, destNodeModulesDir, seen = new Set()) {
+  const normalizedName = String(packageName || '').trim();
+  if (!normalizedName || seen.has(normalizedName)) return;
+  seen.add(normalizedName);
+
+  const srcNodeModulesDir = path.join(ROOT, 'node_modules');
+  const src = nodeModulePath(srcNodeModulesDir, normalizedName);
+  const dest = nodeModulePath(destNodeModulesDir, normalizedName);
+  const packageJson = path.join(src, 'package.json');
+  if (!fs.existsSync(packageJson)) {
+    throw new Error(`Missing ${normalizedName} in local node_modules. Run npm install before repacking release assets.`);
+  }
+
+  const packageMeta = JSON.parse(fs.readFileSync(packageJson, 'utf8'));
+  assertPortableJavaScriptPackage(normalizedName, packageMeta);
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  rm(dest);
+  fs.cpSync(src, dest, { recursive: true, dereference: false });
+
+  for (const depName of Object.keys(packageMeta.dependencies || {})) {
+    if (!fs.existsSync(nodeModulePath(destNodeModulesDir, depName))) {
+      copyPortablePackageTree(depName, destNodeModulesDir, seen);
+    }
+  }
+}
+
+function syncMissingRuntimeDependencies(packageDir) {
+  const deps = Object.keys(pkg.dependencies || {}).sort();
+  if (deps.length === 0) return;
+
+  const destNodeModulesDir = path.join(packageDir, 'node_modules');
+  const copied = [];
+  for (const depName of deps) {
+    if (fs.existsSync(path.join(nodeModulePath(destNodeModulesDir, depName), 'package.json'))) continue;
+    copyPortablePackageTree(depName, destNodeModulesDir);
+    copied.push(depName);
+  }
+
+  const missing = deps.filter((depName) => !fs.existsSync(path.join(nodeModulePath(destNodeModulesDir, depName), 'package.json')));
+  if (missing.length > 0) {
+    throw new Error(`Release package is missing runtime dependencies: ${missing.join(', ')}`);
+  }
+  if (copied.length > 0) {
+    console.log(`[repack] Copied missing portable runtime dependencies: ${copied.join(', ')}`);
+  }
+}
+
 function chmodIfExists(packageDir, rel, mode = 0o755) {
   const target = path.join(packageDir, rel);
   if (!fs.existsSync(target)) return;
@@ -442,6 +510,7 @@ async function repack(asset) {
     let packageDir = findPackageDir(workDir);
     sanitizeBasePackage(packageDir);
     overlay(packageDir);
+    syncMissingRuntimeDependencies(packageDir);
     restoreExecutableBits(packageDir);
     if (path.basename(packageDir) !== asset.packageName) {
       const renamedPackageDir = path.join(workDir, asset.packageName);

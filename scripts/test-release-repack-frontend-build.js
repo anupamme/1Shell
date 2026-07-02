@@ -14,6 +14,8 @@ assert.match(source, /frontend\/dist\/index\.html is missing after build/, 'repa
 assert.match(source, /\.1shell-build\.json/, 'repack script must stamp the frontend build marker');
 assert.match(source, /writeFrontendBuildMarker\(\);/, 'repack script must write the frontend build marker after build');
 assert.match(source, /sanitizeBasePackage\s*\(\s*packageDir\s*\)\s*;/, 'repack script must sanitize inherited runtime data before overlay');
+assert.match(source, /syncMissingRuntimeDependencies\s*\(\s*packageDir\s*\)\s*;/, 'repack script must verify runtime dependencies before archiving');
+assert.match(source, /assertPortableJavaScriptPackage\s*\(/, 'repack script must not copy native/platform packages across release assets');
 assert.match(source, /'data\/skills\/_templates'/, 'repack script must include only skill templates');
 assert.doesNotMatch(source, /'data\/skills'\s*,/, 'repack script must not include imported host skills');
 

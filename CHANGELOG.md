@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.6.9 - 2026-07-02
+
+4.6.9 修复 4.6.8 离线更新包漏带新增运行依赖，导致部分从旧版本升级的服务启动失败并出现 502 的问题。
+
+- 修复 repack 复用旧离线包 `node_modules` 时没有同步新增生产依赖的问题，确保 `toml` 这类新增运行依赖会进入 Linux / Windows 更新包。
+- repack 现在会在打包前校验所有生产依赖是否实际存在；缺失的可移植 JS 依赖会从当前构建环境复制，native / 平台相关依赖缺失时直接失败，避免发布不可启动的包。
+- 保留 4.6.8 已加入的运行态目录清理逻辑，发布包仍不会携带本机 `.env`、`.mindfs`、导入 Skill 或主机配置状态。
+
+### Verification
+
+- `npm test`
+- `node scripts/repack-release-assets.js`
+- release asset dependency/content scan
+- staged source secret/path scan before release
+
 ## 4.6.8 - 2026-07-01
 
 4.6.8 将“扩展”重构为主机级 MCP / Skill 能力矩阵，并移除旧版内置 1Shell Skill 与 Claude Code Skill 托管残留。
