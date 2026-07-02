@@ -1,6 +1,6 @@
 {
   "name": "1shell-frontend",
-  "version": "4.6.9",
+  "version": "4.6.10",
   "private": true,
   "type": "module",
   "scripts": {

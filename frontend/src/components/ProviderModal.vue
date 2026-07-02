@@ -77,7 +77,7 @@ const configFileError = ref<string | null>(null);
 const configDraftDirty = ref(false);
 let configPreviewTimer: ReturnType<typeof setTimeout> | null = null;
 let configPreviewSeq = 0;
-const SHOW_CONFIG_FILE_DRAFTS = false;
+const SHOW_CONFIG_FILE_DRAFTS = true;
 
 const CLAUDE_ONE_M_MARKER = '[1M]';
 const CLAUDE_MODEL_ROLES: Array<{ id: ClaudeRole; label: string; supportsOneM: boolean }> = [
@@ -530,7 +530,7 @@ function applyRequestedMode(providerId = props.editProviderId || null): void {
   statusOk.value = false;
 }
 
-function getPreferredProviderId(explicitProviderId = props.editProviderId || null): string | null {
+function getPreferredProviderId(explicitProviderId: string | null = null): string | null {
   if (explicitProviderId) return explicitProviderId;
   if (!isNativeCli.value) return null;
   const importedId = typeof nativeImportInfo.value?.id === 'string' ? nativeImportInfo.value.id : '';
@@ -545,7 +545,7 @@ async function prepareModal(): Promise<void> {
   listError.value = null;
   resetFormToAdd();
   await Promise.all([loadProviders(), loadPresetsIfNeeded()]);
-  applyRequestedMode(getPreferredProviderId());
+  applyRequestedMode(props.editProviderId || null);
   await loadConfigFiles();
   await refreshConfigPreview({ force: true });
 }
@@ -561,7 +561,7 @@ async function syncNativeProviderFromFiles(): Promise<void> {
     providers.value = resp.providers || [];
     activeRoute.value = resp.activeRoute || null;
     nativeImportInfo.value = resp.nativeImport || null;
-    applyRequestedMode(getPreferredProviderId());
+    applyRequestedMode(editingPid.value ? getPreferredProviderId(editingPid.value) : null);
     await loadConfigFiles();
     await refreshConfigPreview({ force: true });
     if (nativeImportInfo.value?.error) {
@@ -754,7 +754,7 @@ watch(() => props.cliId, async (newId, oldId) => {
 
 watch(() => props.editProviderId, (newId, oldId) => {
   if (props.open && newId !== oldId) {
-    applyRequestedMode(getPreferredProviderId(newId || null));
+    applyRequestedMode(newId || null);
   }
 });
 
@@ -784,7 +784,7 @@ const presetHint = computed(() => (
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
     @click="onBackdropClick"
   >
-    <div class="w-[640px] max-h-[90vh] overflow-y-auto bg-white dark:bg-[#111827] rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700">
+    <div class="w-[min(1120px,calc(100vw-32px))] max-h-[90vh] overflow-y-auto bg-white dark:bg-[#111827] rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700">
       <!-- 头 -->
       <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-700">
         <div>
@@ -944,6 +944,98 @@ const presetHint = computed(() => (
           </div>
           <pre class="text-[11px] font-mono text-cyan-600 dark:text-cyan-400 whitespace-pre-wrap break-all select-all">{{ launchCommand }}</pre>
           <div class="mt-1.5 text-[10px] text-slate-400">CLI 只读取已经启用到主机路径的原生配置文件</div>
+        </div>
+
+        <!-- 原生配置文件生成器 -->
+        <div v-if="showConfigEditor" class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-[#0b1324] overflow-hidden">
+          <div class="px-3 py-2.5 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <div class="text-[10px] font-semibold text-slate-400 uppercase">原生配置文件生成器</div>
+              <div class="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
+                根据左侧表单实时生成 CLI 会读取的配置；保存草稿不会写入主机原生路径，点击列表里的“启用”后才生效。
+              </div>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span v-if="previewingConfigFiles" class="text-[10px] text-cyan-600 dark:text-cyan-300">生成中...</span>
+              <button
+                type="button"
+                class="h-7 px-2.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] text-[10px] text-slate-600 dark:text-slate-300 hover:border-cyan-300 hover:text-cyan-600 disabled:opacity-50"
+                :disabled="loadingConfigFiles || previewingConfigFiles"
+                @click="reloadConfigFilesAndPreview"
+              >
+                重新生成
+              </button>
+              <button
+                type="button"
+                class="h-7 px-2.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] text-[10px] text-slate-600 dark:text-slate-300 hover:border-cyan-300 hover:text-cyan-600 disabled:opacity-50"
+                :disabled="savingConfigFile || !activeConfigFile"
+                @click="resetConfigFileOverride"
+              >
+                恢复自动
+              </button>
+              <button
+                type="button"
+                class="h-7 px-2.5 rounded-md bg-cyan-500 text-white text-[10px] font-semibold hover:bg-cyan-600 disabled:opacity-50"
+                :disabled="savingConfigFile || !activeConfigFile"
+                @click="() => saveConfigFile()"
+              >
+                {{ savingConfigFile ? '保存中...' : '保存草稿' }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="configFileError" class="mx-3 mt-3 rounded-lg border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-500/10 px-3 py-2 text-[10px] text-red-600 dark:text-red-300">
+            {{ configFileError }}
+          </div>
+          <div v-if="loadingConfigFiles" class="px-3 py-5 text-[11px] text-slate-400">正在读取配置文件...</div>
+          <div v-else-if="!configFiles.length" class="px-3 py-5 text-[11px] text-slate-400">暂无可编辑的原生配置文件。</div>
+          <div v-else class="grid grid-cols-1 lg:grid-cols-[220px_1fr] min-h-[320px]">
+            <div class="border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-700 p-2 bg-white/70 dark:bg-white/[0.03]">
+              <button
+                v-for="file in configFiles"
+                :key="file.name"
+                type="button"
+                class="w-full mb-1 last:mb-0 text-left rounded-lg px-2.5 py-2 border transition-colors"
+                :class="activeConfigFileName === file.name
+                  ? 'border-cyan-300 bg-cyan-50 text-cyan-700 dark:border-cyan-500/40 dark:bg-cyan-500/10 dark:text-cyan-200'
+                  : 'border-transparent text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/[0.05]'"
+                @click="selectConfigFile(file.name)"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[11px] font-semibold truncate">{{ file.name }}</span>
+                  <span
+                    v-if="file.overridden"
+                    class="shrink-0 rounded bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300 px-1.5 py-0.5 text-[9px] font-semibold"
+                  >
+                    草稿
+                  </span>
+                  <span
+                    v-else-if="file.enabled"
+                    class="shrink-0 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300 px-1.5 py-0.5 text-[9px] font-semibold"
+                  >
+                    已启用
+                  </span>
+                </div>
+                <div class="mt-1 text-[9px] text-slate-400 truncate">{{ file.path }}</div>
+              </button>
+            </div>
+
+            <div class="min-w-0 flex flex-col">
+              <div class="px-3 py-2 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2">
+                <div class="min-w-0">
+                  <div class="text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate">{{ activeConfigFile?.name || '配置文件' }}</div>
+                  <div class="mt-0.5 text-[9px] text-slate-400 truncate">{{ activeConfigFile?.path || '' }}</div>
+                </div>
+                <span v-if="configDraftDirty" class="shrink-0 text-[10px] text-amber-600 dark:text-amber-300">未保存</span>
+              </div>
+              <textarea
+                :value="configDraft"
+                spellcheck="false"
+                class="min-h-[280px] flex-1 w-full resize-y bg-white dark:bg-[#050814] px-3 py-3 font-mono text-[11px] leading-5 text-slate-700 dark:text-slate-200 outline-none"
+                @input="markConfigDraftDirty"
+              ></textarea>
+            </div>
+          </div>
         </div>
 
         <div v-if="statusText" class="text-[10px]" :class="statusOk ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'">{{ statusText }}</div>
