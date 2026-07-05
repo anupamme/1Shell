@@ -223,6 +223,20 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     }
   }
 
+  // 读取器+储存器：本机原生配置默认直接成为“已添加的配置方案”。
+  // 但 enabled-meta 记录了 providerId 时说明当前盘上的配置是 1Shell「启用」写入的，
+  // 此时跳过自动导入，避免把替换器刚写盘的方案镜像回列表、覆盖用户原始的本机配置条目。
+  function autoImportNativeProviderForCli(cliId) {
+    const managedProviderId = String(nativeCliConfig?.getNativeConfigStatus?.(cliId)?.meta?.providerId || '').trim();
+    if (!managedProviderId) return importNativeProviderForCli(cliId);
+    const scan = scanNativeProviderForCli(cliId);
+    return {
+      ...scan,
+      managedProviderId,
+      reason: scan.found ? '当前本机配置由 1Shell 启用的配置方案写入' : scan.reason,
+    };
+  }
+
   function normalizeApiV1Base(apiBase) {
     const raw = String(apiBase || '').trim().replace(/\/+$/, '');
     if (!raw) throw new Error('apiBase 不能为空');
@@ -495,7 +509,7 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
 
   router.get('/agent/providers/:cliId', (req, res) => {
     if (!validateCli(req.params.cliId, res)) return;
-    const nativeImport = scanNativeProviderForCli(req.params.cliId);
+    const nativeImport = autoImportNativeProviderForCli(req.params.cliId);
     const result = proxyConfigStore.listProviders(req.params.cliId);
     return res.json({ ok: true, ...result, nativeImport });
   });

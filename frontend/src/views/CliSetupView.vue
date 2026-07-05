@@ -127,6 +127,9 @@ async function loadProviders(cliId: string): Promise<void> {
     const resp = await requestJson<ProvidersResponse>(`/api/agent/providers/${encodeURIComponent(cliId)}`);
     providers.value = resp.providers || [];
     activeProviderId.value = resp.activeProviderId || null;
+    if (resp.nativeImport?.created && resp.nativeImport?.id) {
+      notify.success('已将本机原生配置导入为配置方案');
+    }
   } catch {
     providers.value = [];
   } finally {
@@ -909,6 +912,7 @@ onMounted(() => {
                       <span class="w-2.5 h-2.5 rounded-full" :class="p.id === activeProviderId ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
                       <span class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ p.name || '未命名配置' }}</span>
                       <span v-if="p.id === activeProviderId" class="rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-300">当前</span>
+                      <span v-if="p.nativeSource === 'host-config'" title="从本机原生配置自动导入" class="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300">本机配置</span>
                       <span v-if="isProviderNativeEnabled(p)" class="rounded-md border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:border-sky-500/25 dark:bg-sky-500/10 dark:text-sky-300">已写入原生</span>
                       <span class="rounded-md border px-1.5 py-0.5 text-[10px] font-semibold" :class="providerKeyClass(p)">{{ providerKeyText(p) }}</span>
                     </div>

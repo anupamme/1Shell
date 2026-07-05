@@ -118,6 +118,8 @@ export interface NativeProviderImportInfo {
   changed?: boolean;
   created?: boolean;
   id?: string | null;
+  /** 当前本机原生配置由 1Shell 启用的方案写入时,记录该方案 id(此时不会自动导入) */
+  managedProviderId?: string;
   error?: string;
   reason?: string;
   files?: Array<{ name: string; path: string; exists: boolean }>;
