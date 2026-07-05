@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.7.0 - 2026-07-05
+
+4.7.0 让第三方 agent（Claude Code / Codex）以结构化协议方式进入 Agent 板块，与 1Shell AI 共用同一套时间线，并为 Agent 板块加上 IDE 式文件面板。
+
+- 新增协议接入层（`src/agents/protocol/`）：支持 ACP（JSON-RPC over ndjson）、Claude Code stream-json、Codex app-server 三种协议，第三方 agent 的输出统一翻译为 1Shell 的 `ide:event` 事件流，前端时间线零改动复用。
+- 会话持久化新增 `agent_id / cwd / native_session_id`，服务重启后可通过 `claude --resume` / codex `thread/resume` 继续对话；Windows 下 `.cmd/.bat` shim 启动与进程树清理已适配。
+- 新建会话可选择 agent（1Shell AI / Claude Code / Codex，未安装置灰）与工作目录；协议会话在侧栏按工作目录分组，文件浏览器支持「在此目录新建会话」。
+- 审批卡支持 ACP 多选项权限请求（允许一次 / 总是允许 / 拒绝），超时自动拒绝。
+- IDE 式文件面板：工具卡展示涉及的文件，点击在右栏打开（CodeMirror 6，代码高亮 / Markdown 预览 / 图片预览 / 可编辑保存）；会话头部聚合本次会话触碰的全部文件；文件面板可反查触碰过该文件的其他会话；Claude 的 Edit/MultiEdit 工具卡内联渲染 diff。
+- 模型接入页自动导入本机已有的原生 CLI 配置（Claude Code / Codex / OpenCode）为配置方案，带「本机配置」徽标；由 1Shell「启用」写入的配置会被识别并跳过，避免镜像循环。
+
+### Verification
+
+- `npm test`（33 个脚本，含新增 ACP / codex app-server mock 套件）
+- `npm --prefix frontend run build`
+- 真实 claude / codex CLI 冒烟（工具调用闭合 + 会话恢复上下文保留）
+
 ## 4.6.10 - 2026-07-02
 
 4.6.10 修复模型接入页在 4.6.8/4.6.9 中被隐藏的原生配置文件生成器，并修复添加配置方案时误进入已有方案编辑的问题。
