@@ -20,6 +20,18 @@ function createIdeSessionRouter({ ideService }) {
     }
   });
 
+  // 文件反查会话（IDE 壳）。注意必须注册在 /:id 之前，否则 by-file 会被当成 id
+  router.get('/agent/sessions/by-file', (req, res, next) => {
+    try {
+      const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+      if (!filePath) return res.status(400).json({ ok: false, error: 'path 不能为空' });
+      const sessions = ideService.findSessionsByFile ? ideService.findSessionsByFile(filePath) : [];
+      return res.json({ ok: true, sessions });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
   router.get('/agent/sessions/:id', (req, res, next) => {
     try {
       const session = ideService.getSessionDetail(req.params.id);

@@ -16,16 +16,22 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
 
   const stmts = {
     selectMetaList: db.prepare(`
-      SELECT id, title, entry, host_id, workspace_hosts_json, model_label, message_count, preview, created_at, updated_at
+      SELECT id, title, entry, host_id, workspace_hosts_json, model_label, message_count, preview, agent_id, cwd, native_session_id, created_at, updated_at
       FROM ide_sessions
       ORDER BY updated_at DESC
     `),
     countAll: db.prepare('SELECT COUNT(*) AS total FROM ide_sessions'),
-    selectMeta: db.prepare('SELECT id FROM ide_sessions WHERE id = ?'),
+    selectMeta: db.prepare('SELECT id, agent_id, cwd, native_session_id, files_json FROM ide_sessions WHERE id = ?'),
     selectFull: db.prepare('SELECT * FROM ide_sessions WHERE id = ?'),
+    selectWithFiles: db.prepare(`
+      SELECT id, title, entry, host_id, workspace_hosts_json, model_label, message_count, preview, agent_id, cwd, native_session_id, created_at, updated_at, files_json
+      FROM ide_sessions
+      WHERE files_json != '[]'
+      ORDER BY updated_at DESC
+    `),
     insert: db.prepare(`
-      INSERT INTO ide_sessions (id, title, entry, host_id, workspace_hosts_json, model_label, message_count, messages_json, preview, created_at, updated_at)
-      VALUES (@id, @title, @entry, @host_id, @workspace_hosts_json, @model_label, @message_count, @messages_json, @preview, datetime('now'), datetime('now'))
+      INSERT INTO ide_sessions (id, title, entry, host_id, workspace_hosts_json, model_label, message_count, messages_json, preview, agent_id, cwd, native_session_id, files_json, created_at, updated_at)
+      VALUES (@id, @title, @entry, @host_id, @workspace_hosts_json, @model_label, @message_count, @messages_json, @preview, @agent_id, @cwd, @native_session_id, @files_json, datetime('now'), datetime('now'))
     `),
     update: db.prepare(`
       UPDATE ide_sessions
@@ -36,6 +42,10 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
           message_count = @message_count,
           messages_json = @messages_json,
           preview = @preview,
+          agent_id = @agent_id,
+          cwd = @cwd,
+          native_session_id = @native_session_id,
+          files_json = @files_json,
           updated_at = datetime('now')
       WHERE id = @id
     `),
@@ -45,7 +55,10 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
 
   // INSERT sets the (auto-derived) title; UPDATE preserves it so a user rename
   // is never clobbered by the per-turn snapshot.
+  // agent_id/cwd/native_session_id fall back to the existing row so 1Shell AI
+  // snapshot writes (which don't know about protocol agents) can't wipe them.
   const upsertTx = db.transaction((payload) => {
+    const existing = stmts.selectMeta.get(payload.id) || null;
     const row = {
       id: payload.id,
       title: String(payload.title || '').slice(0, 200),
@@ -56,8 +69,14 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
       message_count: Number.isFinite(payload.messageCount) ? payload.messageCount : (Array.isArray(payload.messages) ? payload.messages.length : 0),
       messages_json: JSON.stringify(Array.isArray(payload.messages) ? payload.messages : []),
       preview: String(payload.preview || '').slice(0, 400),
+      agent_id: payload.agentId !== undefined ? String(payload.agentId || 'oneshell') : (existing?.agent_id || 'oneshell'),
+      cwd: payload.cwd !== undefined ? (payload.cwd || null) : (existing?.cwd || null),
+      native_session_id: payload.nativeSessionId !== undefined ? (payload.nativeSessionId || null) : (existing?.native_session_id || null),
+      files_json: payload.files !== undefined
+        ? JSON.stringify(Array.isArray(payload.files) ? payload.files : [])
+        : (existing?.files_json || '[]'),
     };
-    if (stmts.selectMeta.get(row.id)) stmts.update.run(row);
+    if (existing) stmts.update.run(row);
     else stmts.insert.run(row);
   });
 
@@ -72,6 +91,9 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
       modelLabel: row.model_label || '',
       messageCount: row.message_count || 0,
       preview: row.preview || '',
+      agentId: row.agent_id || 'oneshell',
+      cwd: row.cwd || '',
+      nativeSessionId: row.native_session_id || '',
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -82,6 +104,7 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
     return {
       ...rowToMeta(row),
       messages: safeParseArray(row.messages_json),
+      files: safeParseArray(row.files_json),
     };
   }
 
@@ -114,7 +137,17 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
     return stmts.delete.run(id).changes > 0;
   }
 
-  return { listSessions, getSession, upsertSession, renameSession, deleteSession };
+  // 文件反查会话（IDE 壳）：哪些会话触碰过该文件。LIKE 对 Windows 反斜杠路径
+  // 转义太脆，改为粗筛非空 files_json 后在 JS 里精确匹配（会话量有上限，可承受）。
+  function findSessionsByFile(filePath) {
+    const target = normalizeFilePathKey(filePath);
+    if (!target) return [];
+    return stmts.selectWithFiles.all()
+      .filter((row) => safeParseArray(row.files_json).some((f) => normalizeFilePathKey(f?.path) === target))
+      .map(rowToMeta);
+  }
+
+  return { listSessions, getSession, upsertSession, renameSession, deleteSession, findSessionsByFile };
 }
 
 function safeParseArray(value) {
@@ -125,6 +158,11 @@ function safeParseArray(value) {
   } catch {
     return [];
   }
+}
+
+// 路径比较键：统一分隔符（同机工具产出的同一文件，斜杠风格可能不一致）
+function normalizeFilePathKey(value) {
+  return String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/g, '');
 }
 
 function normalizeWorkspaceHostIds(value, fallbackHostId = '') {
@@ -173,7 +211,7 @@ function createFileIdeSessionRepository(dataDir) {
 
   function getSession(id) {
     const row = load().find((item) => item.id === id);
-    return row ? { ...fileRowToMeta(row), messages: Array.isArray(row.messages) ? row.messages : [] } : null;
+    return row ? { ...fileRowToMeta(row), messages: Array.isArray(row.messages) ? row.messages : [], files: Array.isArray(row.files) ? row.files : [] } : null;
   }
 
   function upsertSession(payload) {
@@ -194,6 +232,12 @@ function createFileIdeSessionRepository(dataDir) {
         : (Array.isArray(payload.messages) ? payload.messages.length : (existing?.messageCount || 0)),
       messages: Array.isArray(payload.messages) ? payload.messages : (existing?.messages || []),
       preview: String(payload.preview || existing?.preview || '').slice(0, 400),
+      agentId: payload.agentId !== undefined ? String(payload.agentId || 'oneshell') : (existing?.agentId || 'oneshell'),
+      cwd: payload.cwd !== undefined ? String(payload.cwd || '') : (existing?.cwd || ''),
+      nativeSessionId: payload.nativeSessionId !== undefined ? String(payload.nativeSessionId || '') : (existing?.nativeSessionId || ''),
+      files: payload.files !== undefined
+        ? (Array.isArray(payload.files) ? payload.files : [])
+        : (existing?.files || []),
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     });
@@ -221,7 +265,16 @@ function createFileIdeSessionRepository(dataDir) {
     return true;
   }
 
-  return { listSessions, getSession, upsertSession, renameSession, deleteSession };
+  function findSessionsByFile(filePath) {
+    const target = normalizeFilePathKey(filePath);
+    if (!target) return [];
+    return load()
+      .filter((row) => Array.isArray(row.files) && row.files.some((f) => normalizeFilePathKey(f?.path) === target))
+      .sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''))
+      .map(fileRowToMeta);
+  }
+
+  return { listSessions, getSession, upsertSession, renameSession, deleteSession, findSessionsByFile };
 }
 
 function normalizeFileRow(value) {
@@ -239,6 +292,10 @@ function normalizeFileRow(value) {
       : messages.length,
     messages,
     preview: String(row.preview || '').slice(0, 400),
+    agentId: String(row.agentId || row.agent_id || 'oneshell'),
+    cwd: String(row.cwd || ''),
+    nativeSessionId: String(row.nativeSessionId || row.native_session_id || ''),
+    files: Array.isArray(row.files) ? row.files : safeParseArray(row.files_json),
     createdAt: String(row.createdAt || row.created_at || row.updatedAt || row.updated_at || new Date().toISOString()),
     updatedAt: String(row.updatedAt || row.updated_at || row.createdAt || row.created_at || new Date().toISOString()),
   };
@@ -254,6 +311,9 @@ function fileRowToMeta(row) {
     modelLabel: row.modelLabel || '',
     messageCount: row.messageCount || 0,
     preview: row.preview || '',
+    agentId: row.agentId || 'oneshell',
+    cwd: row.cwd || '',
+    nativeSessionId: row.nativeSessionId || '',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

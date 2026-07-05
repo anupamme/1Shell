@@ -119,6 +119,9 @@ const { registerSkillSocketHandlers } = require('./src/sockets/registerSkillSock
 const { registerIdeSocketHandlers } = require('./src/sockets/registerIdeSocketHandlers');
 const { createIdeTools } = require('./src/ide/ide.tools');
 const { createIdeService } = require('./src/ide/ide.service');
+const { createProtocolAgentCatalog } = require('./src/agents/protocol/agent-catalog');
+const { createProtocolAgentService } = require('./src/agents/protocol/protocol-agent.service');
+const { createProtocolAgentRouter } = require('./src/routes/protocol-agent.routes');
 const { createLocalMcpService } = require('./src/services/local-mcp.service');
 const { createLocalMcpDeployer } = require('./src/services/local-mcp-deployer.service');
 
@@ -230,6 +233,18 @@ const ideService = createIdeService({
   ideSessionRepository,
 });
 
+// ─── 协议 agent（Claude Code / Gemini CLI / …）── Agent 板块的第三方接入 ──
+const protocolAgentCatalog = createProtocolAgentCatalog({
+  binaryOverrides: (agentId) => {
+    try { return nativeCliConfig.getBinaryOverride?.(agentId) || null; } catch { return null; }
+  },
+});
+const protocolAgentService = createProtocolAgentService({
+  catalog: protocolAgentCatalog,
+  ideSessionRepository,
+  logger: log,
+});
+
 const mcpService = createMcpService({
   bridgeService,
   hostService,
@@ -307,6 +322,7 @@ app.use('/api', createFileRouter({ fileService }));
 app.use('/api', createIpFilterRouter({ ipFilterService }));
 app.use('/api', createAiTaskRouter({ aiTaskService }));
 app.use('/api', createIdeSessionRouter({ ideService }));
+app.use('/api', createProtocolAgentRouter({ protocolAgentService }));
 app.use('/api', createScriptRouter({ scriptService, aiService }));
 app.use('/api', createHostCapabilityRouter({ hostCapabilityService }));
 app.use('/api', createSkillRouter({ libraryService, skillRunner, skillImportStager, aiService }));
@@ -320,7 +336,7 @@ io.use(authService.authenticateSocket);
 registerSessionSocketHandlers(io, { sessionService });
 registerAgentSocketHandlers(io, { agentPtyService });
 registerSkillSocketHandlers(io, { skillRunner });
-registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, mcpRegistry });
+registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, mcpRegistry, protocolAgentService });
 
 // ─── 定时任务 ───────────────────────────────────────────────────────────
 probeService.startScheduler({
@@ -414,6 +430,7 @@ function shutdown() {
   probeAggregatorService.stopScheduler();
   updaterService.stopScheduler();
   localMcpService.stopAll();
+  protocolAgentService.shutdown();
   sshPool.closeAll();
   sshShellPool.closeAll();
   if (db) db.close();

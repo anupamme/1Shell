@@ -3628,6 +3628,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
           if (blk?.type !== 'tool_use') continue;
           flushText();
           const item = { id: `tool-${blk.id}`, kind: 'tool', toolUseId: blk.id, name: blk.name || 'unknown', status: 'done', startedAt: 0, input: blk.input, logs: [] };
+          // 协议 agent 会话的 tool_use 块带 locations（文件↔会话关联）
+          if (Array.isArray(blk.locations) && blk.locations.length) item.locations = blk.locations;
           items.push(item);
           toolIndex.set(blk.id, item);
         }
@@ -3648,6 +3650,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       modelLabel: record.modelLabel || '',
       messageCount: record.messageCount || 0,
       preview: record.preview || '',
+      agentId: record.agentId || 'oneshell',
+      cwd: record.cwd || '',
       createdAt: record.createdAt || record.created_at || '',
       updatedAt: record.updatedAt || record.updated_at || '',
     };
@@ -3669,6 +3673,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       modelLabel: existing?.modelLabel || '',
       messageCount: messages.length || existing?.messageCount || 0,
       preview: deriveSessionPreview(messages) || existing?.preview || '',
+      agentId: existing?.agentId || 'oneshell',
+      cwd: existing?.cwd || '',
       createdAt,
       updatedAt,
       running: Boolean(session.currentRunId && !session.cancelled),
@@ -3711,6 +3717,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       const meta = liveSessionMeta(id, live, sessionRecordToMeta(record));
       return {
         ...meta,
+        files: Array.isArray(record?.files) ? record.files : [],
         timeline: projectMessagesToTimeline(live.messages),
       };
     }
@@ -3723,6 +3730,9 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       workspaceHostIds: cleanWorkspaceHostIds(record.workspaceHostIds),
       modelLabel: record.modelLabel,
       messageCount: record.messageCount,
+      agentId: record.agentId || 'oneshell',
+      cwd: record.cwd || '',
+      files: Array.isArray(record.files) ? record.files : [],
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       timeline: projectMessagesToTimeline(record.messages),
@@ -3771,6 +3781,11 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
   function removeSessionRecord(id) {
     deleteSession(id); // cancel + drop any in-memory session
     return ideSessionRepository?.deleteSession ? ideSessionRepository.deleteSession(id) : false;
+  }
+
+  // 文件反查会话（IDE 壳）：哪些会话触碰过该文件
+  function findSessionsByFile(filePath) {
+    return ideSessionRepository?.findSessionsByFile ? ideSessionRepository.findSessionsByFile(filePath) : [];
   }
 
   async function handleMessage({ socket, sessionId, message, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry, approvalMode, attachments = [] }) {
@@ -4195,7 +4210,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return { ok: true, running: !!session.currentRunId && !session.cancelled, runId: session.currentRunId };
   }
 
-  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord };
+  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord, findSessionsByFile };
 }
 
 module.exports = {

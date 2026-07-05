@@ -522,6 +522,33 @@ const migrations = [
       }
     },
   },
+  {
+    version: 15,
+    name: 'ide sessions: protocol agent binding',
+    up(db) {
+      // (agent_id, cwd, native_session_id) 三元组：协议 agent 会话与原生会话的
+      // 绑定关系，服务重启后据此 --resume / session/load 恢复。
+      if (!columnExists(db, 'ide_sessions', 'agent_id')) {
+        db.exec("ALTER TABLE ide_sessions ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'oneshell'");
+      }
+      if (!columnExists(db, 'ide_sessions', 'cwd')) {
+        db.exec('ALTER TABLE ide_sessions ADD COLUMN cwd TEXT');
+      }
+      if (!columnExists(db, 'ide_sessions', 'native_session_id')) {
+        db.exec('ALTER TABLE ide_sessions ADD COLUMN native_session_id TEXT');
+      }
+    },
+  },
+  {
+    version: 16,
+    name: 'ide sessions: touched files',
+    up(db) {
+      // 会话涉及的文件列表（tool 事件 locations 聚合），IDE 壳的文件↔会话关联。
+      if (!columnExists(db, 'ide_sessions', 'files_json')) {
+        db.exec("ALTER TABLE ide_sessions ADD COLUMN files_json TEXT NOT NULL DEFAULT '[]'");
+      }
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {
