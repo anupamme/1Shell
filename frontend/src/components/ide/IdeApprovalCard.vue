@@ -3,7 +3,7 @@ import { computed } from 'vue';
 
 import AppIcon from '@/components/AppIcon.vue';
 import SecretRefPicker from '@/components/SecretRefPicker.vue';
-import type { IdeApprovalRequest } from '@/composables/useIdeChat';
+import type { IdeApprovalOption, IdeApprovalRequest } from '@/composables/useIdeChat';
 
 const props = withDefaults(defineProps<{
   request: IdeApprovalRequest | null;
@@ -18,10 +18,32 @@ const emit = defineEmits<{
   allow: [];
   deny: [];
   custom: [];
+  option: [option: IdeApprovalOption];
   secretSubmit: [secretRef: string];
 }>();
 
 const customHasText = computed(() => props.customText.trim().length > 0);
+
+// ACP 多选项（allow_once / allow_always / reject_once…）：agent 自带动作组，
+// 有选项时替代默认的 允许/拒绝 两键
+const acpOptions = computed<IdeApprovalOption[]>(() => {
+  const options = props.request?.options;
+  return Array.isArray(options) ? options.filter((o) => o.optionId) : [];
+});
+
+function optionAllows(option: IdeApprovalOption): boolean {
+  return String(option.kind || '').startsWith('allow');
+}
+
+function optionHint(option: IdeApprovalOption): string {
+  switch (option.kind) {
+    case 'allow_once': return '只允许当前这次操作';
+    case 'allow_always': return '本会话后续同类操作不再询问';
+    case 'reject_once': return '拒绝当前这次操作';
+    case 'reject_always': return '本会话后续同类操作一律拒绝';
+    default: return '';
+  }
+}
 
 const aiWorkNote = computed(() => String(props.request?.workNote || '').trim());
 
@@ -34,7 +56,11 @@ const harnessReason = computed(() => {
 const promptTitle = computed(() => {
   const request = props.request;
   if (!request) return '';
-  if (request.mode === 'approval') return `允许 1Shell AI ${request.title || '执行此操作'}吗？`;
+  if (request.mode === 'approval') {
+    // 协议 agent（带 ACP 选项）标题后端已完整给出，不再套 1Shell AI 文案
+    if (acpOptions.value.length || /请求/.test(request.title || '')) return request.title || '操作需要确认';
+    return `允许 1Shell AI ${request.title || '执行此操作'}吗？`;
+  }
   return request.title || (request.mode === 'request_secret' ? '需要 Secret 引用' : '需要补充信息');
 });
 
@@ -190,7 +216,26 @@ function onCustomKeydown(event: KeyboardEvent): void {
     </div>
 
     <footer class="ide-approval-actions">
-      <template v-if="request.mode === 'approval'">
+      <!-- ACP 多选项：agent 自带动作组（allow once / always / reject…） -->
+      <template v-if="request.mode === 'approval' && acpOptions.length">
+        <button
+          v-for="(option, index) in acpOptions"
+          :key="option.optionId"
+          type="button"
+          class="ide-approval-decision"
+          :class="optionAllows(option) ? 'ide-approval-decision--allow' : 'ide-approval-decision--deny'"
+          @click="emit('option', option)"
+        >
+          <span class="ide-approval-index">{{ index + 1 }}</span>
+          <span>
+            <strong>{{ option.name || (optionAllows(option) ? '允许' : '拒绝') }}</strong>
+            <small v-if="optionHint(option)">{{ optionHint(option) }}</small>
+          </span>
+          <AppIcon :name="optionAllows(option) ? 'check' : 'close'" :size="16" />
+        </button>
+      </template>
+
+      <template v-else-if="request.mode === 'approval'">
         <button type="button" class="ide-approval-decision ide-approval-decision--allow" @click="emit('allow')">
           <span class="ide-approval-index">1</span>
           <span>

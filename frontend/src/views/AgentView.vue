@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Ref } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Ref } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import AppIcon from '@/components/AppIcon.vue';
 import HostListToolResult from '@/components/ide/HostListToolResult.vue';
@@ -8,7 +8,7 @@ import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import AgentSessionRail from '@/components/AgentSessionRail.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
-import { useIdeChat, type IdeApprovalMode, type IdeTimelineItem, type IdeChatApi, type IdeChatMessage, type IdeThinkingTimelineItem, type IdeToolTimelineItem, type IdeSystemTimelineItem, type IdeRewindPoint } from '@/composables/useIdeChat';
+import { useIdeChat, type IdeApprovalMode, type IdeTimelineItem, type IdeChatApi, type IdeChatMessage, type IdeThinkingTimelineItem, type IdeToolTimelineItem, type IdeSystemTimelineItem, type IdeRewindPoint, type IdeFileLocation } from '@/composables/useIdeChat';
 import { useNotifyStore } from '@/stores/notify';
 import {
   agentGoalObjective,
@@ -25,6 +25,11 @@ import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 import { parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlashCommand } from '@/utils/agentSlashCommands';
 import type { HostInfo, HostsListResponse } from '@/utils/scripts';
+
+// 异步加载：CodeMirror 体积大，只在真正打开文件面板时拉取
+const AgentFilePanel = defineAsyncComponent(() => import('@/components/ide/AgentFilePanel.vue'));
+// 工具卡 diff（claude Edit/MultiEdit 的 old/new）同样按需加载
+const IdeEditDiff = defineAsyncComponent(() => import('@/components/ide/IdeEditDiff.vue'));
 
 // ── provider model ──
 interface AgentProviderModel {
@@ -56,6 +61,20 @@ interface AgentProvider {
 interface AgentProviderRoute {
   providerId?: string | null;
   modelId?: string | null;
+}
+
+// ── protocol agents（第三方协议 agent：Claude Code / Codex / …）──
+const ONESHELL_AGENT_ID = 'oneshell';
+
+interface ProtocolAgentInfo {
+  id: string;
+  name: string;
+  protocol: string;
+  icon?: string;
+  description?: string;
+  supportsResume?: boolean;
+  installed: boolean;
+  binaryPath?: string;
 }
 
 interface AgentModelOption {
@@ -101,6 +120,36 @@ function toolDuration(d: number | undefined): string {
   return d < 1000 ? `${d}ms` : `${(d / 1000).toFixed(1)}s`;
 }
 
+// 协议 agent 工具卡带出的触碰文件（后端 tool 事件 locations）
+function toolFileLocations(tool: IdeToolTimelineItem): IdeFileLocation[] {
+  return Array.isArray(tool.locations) ? tool.locations : [];
+}
+
+// claude Edit / MultiEdit 入参 → diff 对（展开的工具卡里渲染 unified diff）
+interface ToolEditDiff {
+  oldText: string;
+  newText: string;
+  path: string;
+}
+
+function toolEditDiffs(tool: IdeToolTimelineItem): ToolEditDiff[] {
+  if (!isRecord(tool.input)) return [];
+  const input = tool.input;
+  const path = stringField(input, 'file_path') || stringField(input, 'filePath');
+  const out: ToolEditDiff[] = [];
+  if (typeof input.old_string === 'string' && typeof input.new_string === 'string') {
+    out.push({ oldText: input.old_string, newText: input.new_string, path });
+  } else if (Array.isArray(input.edits)) {
+    for (const edit of input.edits) {
+      if (!isRecord(edit)) continue;
+      if (typeof edit.old_string === 'string' && typeof edit.new_string === 'string') {
+        out.push({ oldText: edit.old_string, newText: edit.new_string, path });
+      }
+    }
+  }
+  return out;
+}
+
 function fmtVal(v: unknown, max = 4000): string {
   if (v === undefined || v === null) return '';
   const t = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
@@ -133,6 +182,7 @@ const router = useRouter();
 const scrollEl = ref<HTMLElement | null>(null);
 const hosts = ref<HostInfo[]>([]);
 const providers = ref<AgentProvider[]>([]);
+const protocolAgents = ref<ProtocolAgentInfo[]>([]);
 const activeProviderId = ref<string | null>(null);
 const activeModelId = ref<string | null>(null);
 const agentGoal = ref(emptyAgentGoalState());
@@ -146,8 +196,11 @@ const composerInputEl = ref<HTMLTextAreaElement | null>(null);
 const showHostDropdown = ref(false);
 const showModeDropdown = ref(false);
 const showModelDropdown = ref(false);
+const showFilesDropdown = ref(false);
 const newSessionModalOpen = ref(false);
 const newSessionHostDraft = ref<string[]>([]);
+const newSessionAgentDraft = ref(ONESHELL_AGENT_ID);
+const newSessionCwdDraft = ref('');
 const expandingToolId = ref<string | null>(null);
 const initialMobileRailLayout = typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches;
 const railCollapsed = ref(initialMobileRailLayout);
@@ -170,6 +223,8 @@ interface FileFocus {
 
 const railTab = ref<RailTab>('chat');
 const fileFocus = ref<FileFocus | null>(null);
+// 右栏文件面板（M3 IDE 壳）：桌面端点击工具卡文件 chip 打开
+const filePanelFile = ref<IdeFileLocation | null>(null);
 let lastToolFocusKey = '';
 
 type AttachmentKind = 'image' | 'text' | 'document' | 'file';
@@ -216,6 +271,8 @@ interface AgentRuntime {
   ide: IdeChatApi;
   hostId: Ref<string>;
   workspaceHostIds: Ref<string[]>;
+  agentId: Ref<string>;
+  cwd: Ref<string>;
   taskMode: Ref<boolean>;
   createdAt: string;
   touchedAt: Ref<string>;
@@ -225,6 +282,8 @@ interface AgentRuntime {
 interface CreateAgentRuntimeOptions {
   hostId?: string;
   workspaceHostIds?: string[];
+  agentId?: string;
+  cwd?: string;
   taskMode?: boolean;
   session?: IdeLoadableAgentSession;
 }
@@ -274,6 +333,35 @@ const taskMode = computed({
 });
 
 const enabledProviders = computed(() => providers.value.filter(p => p.enabled !== false));
+
+// ── protocol agent helpers ──
+function normalizeAgentId(agentId: unknown): string {
+  const id = String(agentId || '').trim();
+  return id && id !== ONESHELL_AGENT_ID ? id : ONESHELL_AGENT_ID;
+}
+
+function isProtocolAgentId(agentId: string): boolean {
+  return Boolean(agentId) && agentId !== ONESHELL_AGENT_ID;
+}
+
+function agentNameFor(agentId: string): string {
+  if (!isProtocolAgentId(agentId)) return '1Shell AI';
+  return protocolAgents.value.find((agent) => agent.id === agentId)?.name || agentId;
+}
+
+const installedProtocolAgents = computed(() => protocolAgents.value.filter((agent) => agent.installed));
+const activeAgentId = computed(() => normalizeAgentId(activeRuntime.value?.agentId.value));
+const activeAgentName = computed(() => agentNameFor(activeAgentId.value));
+const activeIsProtocolAgent = computed(() => isProtocolAgentId(activeAgentId.value));
+const activeCwd = computed(() => String(activeRuntime.value?.cwd.value || '').trim());
+
+async function loadProtocolAgents(): Promise<void> {
+  try {
+    const resp = await requestJson<{ ok: boolean; agents: ProtocolAgentInfo[] }>('/api/agent/protocol/agents');
+    if (resp.ok) protocolAgents.value = Array.isArray(resp.agents) ? resp.agents : [];
+  } catch { /* ignore */ }
+}
+
 function modelKey(providerId: string | null | undefined, modelId: string | null | undefined): string {
   return providerId ? `${providerId}::${modelId || ''}` : '';
 }
@@ -512,6 +600,8 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
   );
   const runtimeWorkspaceHostIds = ref<string[]>(initialWorkspaceHostIds);
   const runtimeHostId = ref(workspacePrimaryHostId(initialWorkspaceHostIds));
+  const runtimeAgentId = ref(normalizeAgentId(options.agentId));
+  const runtimeCwd = ref(String(options.cwd || '').trim());
   const runtimeTaskMode = ref(Boolean(options.taskMode));
   const touchedAt = ref(new Date().toISOString());
 
@@ -533,17 +623,28 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
         hosts: workspaceContextHosts(workspaceIds),
       };
     },
-    messagePayload: () => ({
-      entry: runtimeTaskMode.value ? 'task' : 'core',
-      approvalMode: approvalMode.value,
-      goal: agentGoalObjective(agentGoal.value) || undefined,
-      goalStatus: serializeAgentGoal(agentGoal.value)?.status,
-      threadGoal: serializeAgentGoal(agentGoal.value),
-      hostId: runtimeHostId.value || undefined,
-      workspaceHostIds: normalizeWorkspaceHostIds(runtimeWorkspaceHostIds.value),
-      modelPreference: modelPreference.value !== '默认模型' ? modelPreference.value : undefined,
-      attachments: attachmentPayload(),
-    }),
+    messagePayload: () => {
+      // 协议 agent 会话：后端 registerIdeSocketHandlers 按 agentId 分流到
+      // protocolAgentService，1Shell 专属字段（goal/toolPolicy…）会被忽略
+      if (isProtocolAgentId(runtimeAgentId.value)) {
+        return {
+          agentId: runtimeAgentId.value,
+          cwd: runtimeCwd.value || undefined,
+          attachments: attachmentPayload(),
+        };
+      }
+      return {
+        entry: runtimeTaskMode.value ? 'task' : 'core',
+        approvalMode: approvalMode.value,
+        goal: agentGoalObjective(agentGoal.value) || undefined,
+        goalStatus: serializeAgentGoal(agentGoal.value)?.status,
+        threadGoal: serializeAgentGoal(agentGoal.value),
+        hostId: runtimeHostId.value || undefined,
+        workspaceHostIds: normalizeWorkspaceHostIds(runtimeWorkspaceHostIds.value),
+        modelPreference: modelPreference.value !== '默认模型' ? modelPreference.value : undefined,
+        attachments: attachmentPayload(),
+      };
+    },
     onRunComplete: () => {
       touchedAt.value = new Date().toISOString();
       rememberRuntimeSession(runtime);
@@ -555,6 +656,8 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
     ide: ideApi,
     hostId: runtimeHostId,
     workspaceHostIds: runtimeWorkspaceHostIds,
+    agentId: runtimeAgentId,
+    cwd: runtimeCwd,
     taskMode: runtimeTaskMode,
     createdAt: touchedAt.value,
     touchedAt,
@@ -582,6 +685,8 @@ function activateRuntime(runtime: AgentRuntime): void {
   selectedHostId.value = runtime.hostId.value || '';
   selectedWorkspaceHostIds.value = normalizeWorkspaceHostIds(runtime.workspaceHostIds.value);
   fileFocus.value = null;
+  filePanelFile.value = null;
+  showFilesDropdown.value = false;
   lastToolFocusKey = '';
   follow = true;
   syncRailFromTimeline();
@@ -618,6 +723,8 @@ interface SessionMeta {
   modelLabel: string;
   messageCount: number;
   preview: string;
+  agentId?: string;
+  cwd?: string;
   createdAt: string;
   updatedAt: string;
   running?: boolean;
@@ -640,9 +747,11 @@ const railSessions = computed<SessionMeta[]>(() => {
       entry: runtime.taskMode.value ? 'task' : (existing?.entry || 'core'),
       hostId: runtime.hostId.value || existing?.hostId || '',
       workspaceHostIds: normalizeWorkspaceHostIds(runtime.workspaceHostIds.value),
-      modelLabel: existing?.modelLabel || modelText.value,
+      modelLabel: existing?.modelLabel || (isProtocolAgentId(runtime.agentId.value) ? agentNameFor(runtime.agentId.value) : modelText.value),
       messageCount: timeline.length || existing?.messageCount || 0,
       preview: liveSessionPreview(runtime) || existing?.preview || '',
+      agentId: normalizeAgentId(runtime.agentId.value || existing?.agentId),
+      cwd: runtime.cwd.value || existing?.cwd || '',
       createdAt: existing?.createdAt || runtime.createdAt,
       updatedAt: runtime.touchedAt.value || existing?.updatedAt || runtime.createdAt,
       running: runtime.ide.isRunning.value,
@@ -703,7 +812,7 @@ async function refreshRuntimeProjection(runtime: AgentRuntime, attempt = 0): Pro
     await waitForSessionProjection(attempt);
     if (runtime.ide.currentSessionId.value !== sessionId || runtime.ide.isRunning.value) return;
 
-    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; workspaceHostIds?: string[]; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${encodeURIComponent(sessionId)}`);
+    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; workspaceHostIds?: string[]; agentId?: string; cwd?: string; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${encodeURIComponent(sessionId)}`);
     const projected = resp.session?.timeline || [];
     if (!resp.ok || !resp.session) {
       if (attempt < 2) await refreshRuntimeProjection(runtime, attempt + 1);
@@ -718,6 +827,8 @@ async function refreshRuntimeProjection(runtime: AgentRuntime, attempt = 0): Pro
     const workspaceIds = normalizeWorkspaceHostIds(resp.session.workspaceHostIds || (resp.session.hostId ? [resp.session.hostId] : []));
     runtime.hostId.value = workspacePrimaryHostId(workspaceIds);
     runtime.workspaceHostIds.value = workspaceIds;
+    runtime.agentId.value = normalizeAgentId(resp.session.agentId);
+    runtime.cwd.value = String(resp.session.cwd || '').trim();
     runtime.taskMode.value = resp.session.entry === 'task';
     runtime.ide.loadSession({
       id: resp.session.id,
@@ -756,7 +867,7 @@ async function onSelectSession(id: string): Promise<boolean> {
     return true;
   }
   try {
-    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; workspaceHostIds?: string[]; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${id}`);
+    const resp = await requestJson<{ ok: boolean; session: { id: string; entry: string; hostId: string; workspaceHostIds?: string[]; agentId?: string; cwd?: string; timeline: IdeTimelineItem[]; running?: boolean; runId?: string } }>(`/api/agent/sessions/${id}`);
     if (!resp.ok || !resp.session) return false;
     fileFocus.value = null;
     lastToolFocusKey = '';
@@ -765,6 +876,8 @@ async function onSelectSession(id: string): Promise<boolean> {
     const runtime = createAgentRuntime({
       hostId: resp.session.hostId || '',
       workspaceHostIds: normalizeWorkspaceHostIds(resp.session.workspaceHostIds || (resp.session.hostId ? [resp.session.hostId] : [])),
+      agentId: resp.session.agentId || '',
+      cwd: resp.session.cwd || '',
       taskMode: resp.session.entry === 'task',
       session: {
         id: resp.session.id,
@@ -780,18 +893,26 @@ async function onSelectSession(id: string): Promise<boolean> {
   } catch { return false; }
 }
 
-function onNewSession(workspaceInput: string | string[] = selectedWorkspaceHostIds.value): void {
+function onNewSession(
+  workspaceInput: string | string[] = selectedWorkspaceHostIds.value,
+  agentOptions: { agentId?: string; cwd?: string } = {},
+): void {
   const runtime = activeRuntime.value;
-  const workspaceIds = workspaceHostIdsFromInput(workspaceInput);
+  const agentId = normalizeAgentId(agentOptions.agentId);
+  const cwd = isProtocolAgentId(agentId) ? String(agentOptions.cwd || '').trim() : '';
+  // 协议 agent 会话运行在本机工作目录上，不绑定 VPS 工作区
+  const workspaceIds = isProtocolAgentId(agentId) ? [] : workspaceHostIdsFromInput(workspaceInput);
   const normalizedHostId = workspacePrimaryHostId(workspaceIds);
   if (runtime && !runtime.ide.isRunning.value && runtime.ide.timeline.value.length === 0) {
     runtime.hostId.value = normalizedHostId;
     runtime.workspaceHostIds.value = workspaceIds;
+    runtime.agentId.value = agentId;
+    runtime.cwd.value = cwd;
     runtime.taskMode.value = false;
     selectedHostId.value = normalizedHostId;
     selectedWorkspaceHostIds.value = workspaceIds;
   } else {
-    createAgentRuntime({ hostId: normalizedHostId, workspaceHostIds: workspaceIds });
+    createAgentRuntime({ hostId: normalizedHostId, workspaceHostIds: workspaceIds, agentId, cwd });
   }
   fileFocus.value = null;
   lastToolFocusKey = '';
@@ -915,6 +1036,9 @@ async function onRailSelectSession(id: string): Promise<void> {
 
 function openNewSessionModal(): void {
   newSessionHostDraft.value = [];
+  newSessionAgentDraft.value = ONESHELL_AGENT_ID;
+  newSessionCwdDraft.value = '';
+  void loadProtocolAgents();
   newSessionModalOpen.value = true;
   showHostDropdown.value = false;
   showModeDropdown.value = false;
@@ -924,6 +1048,12 @@ function openNewSessionModal(): void {
 function closeNewSessionModal(): void {
   newSessionModalOpen.value = false;
 }
+
+function pickNewSessionAgent(agentId: string): void {
+  newSessionAgentDraft.value = normalizeAgentId(agentId);
+}
+
+const newSessionIsProtocol = computed(() => isProtocolAgentId(newSessionAgentDraft.value));
 
 function toggleNewSessionHost(id: string): void {
   const hostId = String(id || '').trim();
@@ -935,13 +1065,24 @@ function toggleNewSessionHost(id: string): void {
 }
 
 function confirmNewSession(): void {
-  onNewSession(newSessionHostDraft.value);
+  onNewSession(newSessionHostDraft.value, {
+    agentId: newSessionAgentDraft.value,
+    cwd: newSessionCwdDraft.value,
+  });
   closeNewSessionModal();
   closeRailOnMobile();
 }
 
 function onRailNewSession(): void {
   openNewSessionModal();
+}
+
+// 文件页「以此目录新建会话」：预填工作目录并预选第一个已安装协议 agent
+function onRailNewSessionAt(path: string): void {
+  openNewSessionModal();
+  newSessionCwdDraft.value = String(path || '').trim();
+  const firstInstalled = installedProtocolAgents.value[0];
+  if (firstInstalled) newSessionAgentDraft.value = firstInstalled.id;
 }
 
 const FILE_TOOL_ACTIONS: Record<string, string> = {
@@ -1062,6 +1203,45 @@ function focusFromTool(tool: IdeToolTimelineItem): FileFocus | null {
   };
 }
 
+// 本会话涉及的文件：从时间线工具卡的 locations 聚合（live 与重载天然一致），
+// 最近触碰的排最前。仅协议 agent 会话会产出 locations。
+const sessionFiles = computed<IdeFileLocation[]>(() => {
+  const seen = new Map<string, IdeFileLocation>();
+  for (const item of ide.timeline.value) {
+    if (item.kind !== 'tool') continue;
+    const locations = (item as IdeToolTimelineItem).locations;
+    if (!Array.isArray(locations)) continue;
+    for (const loc of locations) {
+      if (!loc?.path) continue;
+      seen.delete(loc.path);
+      seen.set(loc.path, loc);
+    }
+  }
+  return [...seen.values()].reverse();
+});
+
+// 点击工具卡上的文件路径：桌面端打开右栏文件面板（CodeMirror 编辑/预览）；
+// 移动端没有右栏空间，退回左栏文件页定位（协议 agent 的文件都在本机）
+function openToolFile(location: IdeFileLocation): void {
+  const path = String(location?.path || '').trim();
+  if (!path) return;
+  if (!mobileRailLayout.value) {
+    filePanelFile.value = { path, line: location.line };
+    return;
+  }
+  railCollapsed.value = false;
+  railTab.value = 'files';
+  fileFocus.value = {
+    hostId: LOCAL_HOST_ID,
+    path,
+    directory: parentDirectory(path),
+    fileName: basename(path),
+    action: 'Agent 文件操作',
+    status: 'done',
+    updatedAt: Date.now(),
+  };
+}
+
 function syncRailFromTimeline(): void {
   const tools = ide.timeline.value.filter((item): item is IdeToolTimelineItem => item.kind === 'tool').slice().reverse();
   const latestHostTool = tools.find((tool) => isRecord(tool.input) && stringField(tool.input, 'hostId'));
@@ -1115,6 +1295,7 @@ onMounted(() => {
   window.addEventListener('resize', syncRailLayout);
   void loadHosts();
   void loadProviders();
+  void loadProtocolAgents();
   void loadSessions();
   consumeTaskAuthoringRoute();
 });
@@ -1623,6 +1804,7 @@ function onSecretRefSubmit(secretRef: string): void {
       :file-focus="fileFocus"
       @select="onRailSelectSession"
       @new-session="onRailNewSession"
+      @new-session-at="onRailNewSessionAt"
       @rename="onRenameSession"
       @copy="onCopySession"
       @delete="onDeleteSession"
@@ -1656,6 +1838,27 @@ function onSecretRefSubmit(secretRef: string): void {
       <div class="ml-auto flex items-center gap-2">
         <span v-if="taskMode" class="text-[11px] font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-400/10 border border-amber-200 dark:border-amber-400/20 px-2 py-0.5 rounded-full">任务模式</span>
         <span v-if="isBusy" class="text-[11px] text-sky-600 dark:text-sky-400/80 animate-pulse">运行中</span>
+        <div v-if="sessionFiles.length" class="relative">
+          <button class="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 transition-colors cursor-pointer" title="本会话涉及的文件" @click="showFilesDropdown = !showFilesDropdown">
+            <AppIcon name="file" :size="13" />
+            文件 {{ sessionFiles.length }}
+          </button>
+          <div v-if="showFilesDropdown" class="absolute top-full right-0 mt-1.5 w-72 max-h-80 overflow-y-auto bg-white dark:bg-[#161b2a] border border-slate-200 dark:border-white/[0.08] rounded-lg shadow-xl z-30 py-1">
+            <button
+              v-for="f in sessionFiles"
+              :key="f.path"
+              class="w-full text-left px-3 py-2 hover:bg-slate-50 dark:hover:bg-white/[0.04] cursor-pointer"
+              :title="f.path"
+              @click="openToolFile(f); showFilesDropdown = false"
+            >
+              <div class="flex items-center gap-1.5 text-xs text-slate-700 dark:text-slate-200">
+                <AppIcon name="file" :size="11" class="shrink-0 text-slate-400 dark:text-slate-500" />
+                <span class="truncate">{{ basename(f.path) }}</span>
+              </div>
+              <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600 truncate">{{ f.path }}</div>
+            </button>
+          </div>
+        </div>
         <button v-if="hasTimeline" class="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 transition-colors cursor-pointer" @click="openRewindModal" title="回溯到某次输入">
           <AppIcon name="history" :size="13" />
           回溯
@@ -1735,6 +1938,19 @@ function onSecretRefSubmit(secretRef: string): void {
                   <div class="flex items-center gap-2 mt-0.5 text-[11px] text-slate-400 dark:text-slate-500">
                     <span v-if="toolDuration((item as IdeToolTimelineItem).durationMs)">{{ toolDuration((item as IdeToolTimelineItem).durationMs) }}</span>
                   </div>
+                  <div v-if="toolFileLocations(item as IdeToolTimelineItem).length" class="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                    <button
+                      v-for="loc in toolFileLocations(item as IdeToolTimelineItem)"
+                      :key="loc.path"
+                      type="button"
+                      class="inline-flex items-center gap-1 max-w-[260px] px-1.5 py-0.5 rounded-md border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.04] text-[11px] text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-300 hover:border-sky-300 dark:hover:border-sky-400/30 transition-colors cursor-pointer"
+                      :title="loc.path"
+                      @click.stop="openToolFile(loc)"
+                    >
+                      <AppIcon name="file" :size="11" class="shrink-0" />
+                      <span class="truncate">{{ basename(loc.path) }}</span>
+                    </button>
+                  </div>
                 </div>
                 <AppIcon name="arrow-right" :size="14" class="text-slate-400 dark:text-slate-600 shrink-0 transition-transform duration-200" :class="expandingToolId === (item as IdeToolTimelineItem).toolUseId ? 'rotate-90' : ''" />
               </div>
@@ -1745,6 +1961,16 @@ function onSecretRefSubmit(secretRef: string): void {
                 <ProbeListToolResult :result="(item as IdeToolTimelineItem).result" />
               </div>
               <div v-if="expandingToolId === (item as IdeToolTimelineItem).toolUseId" class="px-4 pb-4 space-y-3 border-t border-slate-100 dark:border-white/[0.05] pt-3">
+                <div v-if="toolEditDiffs(item as IdeToolTimelineItem).length" class="space-y-1.5" @click.stop>
+                  <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">改动</div>
+                  <IdeEditDiff
+                    v-for="(diff, di) in toolEditDiffs(item as IdeToolTimelineItem)"
+                    :key="`${item.id}-diff-${di}`"
+                    :old-text="diff.oldText"
+                    :new-text="diff.newText"
+                    :file-name="diff.path ? basename(diff.path) : ''"
+                  />
+                </div>
                 <div v-if="(item as IdeToolTimelineItem).input !== undefined && (item as IdeToolTimelineItem).input !== null" class="space-y-1">
                   <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600">参数</div>
                   <pre class="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-[#090d15] border border-slate-200/70 dark:border-white/[0.05] rounded-lg p-3 overflow-x-auto font-mono leading-relaxed max-h-[200px] overflow-y-auto">{{ fmtVal((item as IdeToolTimelineItem).input) }}</pre>
@@ -1782,6 +2008,19 @@ function onSecretRefSubmit(secretRef: string): void {
         </div>
       </div>
 
+      <!-- file panel (M3 IDE 壳右栏；审批面板打开时隐藏但保留编辑状态) -->
+      <AgentFilePanel
+        v-if="filePanelFile && !mobileRailLayout"
+        v-show="!ide.approveRequest.value"
+        class="w-[420px] shrink-0 min-h-0 h-full border-l border-slate-200 dark:border-white/[0.06]"
+        :path="filePanelFile.path"
+        :line="filePanelFile.line"
+        :host-id="LOCAL_HOST_ID"
+        :current-session-id="ide.currentSessionId.value"
+        @close="filePanelFile = null"
+        @open-session="onRailSelectSession"
+      />
+
       <!-- approval sidebar -->
       <div v-if="ide.approveRequest.value" class="agent-approval-panel w-[380px] shrink-0 min-h-0 h-full border-l border-slate-200 dark:border-white/[0.06] bg-stone-50 dark:bg-[#0f1321] flex flex-col overflow-hidden">
         <IdeApprovalCard
@@ -1792,6 +2031,7 @@ function onSecretRefSubmit(secretRef: string): void {
           @allow="ide.approveAllow"
           @deny="ide.approveDeny"
           @custom="ide.approveCustom"
+          @option="ide.approveOption"
           @secret-submit="onSecretRefSubmit"
         />
       </div>
@@ -1983,6 +2223,20 @@ function onSecretRefSubmit(secretRef: string): void {
               <AppIcon name="history" :size="16" />
             </button>
 
+            <!-- 协议 agent 会话：目标/审批模式/模型均为 1Shell AI 专属，换成 agent 标识 -->
+            <template v-if="activeIsProtocolAgent">
+              <div
+                class="h-8 max-w-full px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.03] text-xs flex items-center gap-1.5 min-w-0"
+                :title="activeCwd || activeAgentName"
+              >
+                <AppIcon name="robot" :size="13" class="text-sky-500 shrink-0" />
+                <span class="truncate font-medium text-slate-700 dark:text-slate-200">{{ activeAgentName }}</span>
+                <span v-if="activeCwd" class="hidden sm:inline truncate text-[10px] text-slate-400 dark:text-slate-600">{{ activeCwd }}</span>
+              </div>
+              <div class="ml-auto"></div>
+            </template>
+
+            <template v-else>
             <button
               type="button"
               class="shrink-0 h-8 px-2.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors disabled:cursor-not-allowed disabled:opacity-50"
@@ -2062,6 +2316,7 @@ function onSecretRefSubmit(secretRef: string): void {
                 </div>
               </div>
             </div>
+            </template>
 
             <button
               class="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer"
@@ -2076,7 +2331,7 @@ function onSecretRefSubmit(secretRef: string): void {
       </div>
     </footer>
 
-    <div v-if="showHostDropdown || showModeDropdown || showModelDropdown" class="fixed inset-0 z-20" @click="showHostDropdown = false; showModeDropdown = false; showModelDropdown = false"></div>
+    <div v-if="showHostDropdown || showModeDropdown || showModelDropdown || showFilesDropdown" class="fixed inset-0 z-20" @click="showHostDropdown = false; showModeDropdown = false; showModelDropdown = false; showFilesDropdown = false"></div>
 
     <Teleport to="body">
       <div
@@ -2098,7 +2353,7 @@ function onSecretRefSubmit(secretRef: string): void {
                 </span>
                 <h2 id="new-session-modal-title" class="text-base font-semibold text-slate-800 dark:text-slate-100">新建对话</h2>
               </div>
-              <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">不选择 VPS 时建立全局对话。</p>
+              <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">{{ newSessionIsProtocol ? '第三方 agent 在本机工作目录中运行。' : '不选择 VPS 时建立全局对话。' }}</p>
             </div>
             <button
               type="button"
@@ -2111,9 +2366,61 @@ function onSecretRefSubmit(secretRef: string): void {
           </header>
 
           <div class="flex-1 min-h-[240px] overflow-y-auto px-5 py-4">
+            <div class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">Agent</div>
+            <div class="mt-2 space-y-1.5">
+              <button
+                type="button"
+                class="w-full min-h-11 px-3 rounded-lg border flex items-center gap-3 text-left transition-colors cursor-pointer"
+                :class="!newSessionIsProtocol ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10' : 'border-slate-200 dark:border-white/[0.08] hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                @click="pickNewSessionAgent(ONESHELL_AGENT_ID)"
+              >
+                <span class="w-7 h-7 rounded-md flex items-center justify-center shrink-0" :class="!newSessionIsProtocol ? 'bg-sky-500 text-white' : 'bg-slate-100 dark:bg-white/[0.05] text-slate-400'">
+                  <AppIcon name="sparkle" :size="14" />
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-medium" :class="!newSessionIsProtocol ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">1Shell AI</div>
+                  <div class="mt-0.5 text-xs text-slate-400 dark:text-slate-500">内置 agent，可绑定 VPS 工作区</div>
+                </div>
+              </button>
+              <button
+                v-for="agent in protocolAgents"
+                :key="agent.id"
+                type="button"
+                class="w-full min-h-11 px-3 rounded-lg border flex items-center gap-3 text-left transition-colors"
+                :class="[
+                  newSessionAgentDraft === agent.id ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10' : 'border-slate-200 dark:border-white/[0.08]',
+                  agent.installed ? 'cursor-pointer hover:bg-slate-50 dark:hover:bg-white/[0.04]' : 'opacity-55 cursor-not-allowed',
+                ]"
+                :disabled="!agent.installed"
+                :title="agent.installed ? '' : '未检测到该 CLI，请先安装'"
+                @click="pickNewSessionAgent(agent.id)"
+              >
+                <span class="w-7 h-7 rounded-md flex items-center justify-center shrink-0" :class="newSessionAgentDraft === agent.id ? 'bg-sky-500 text-white' : 'bg-slate-100 dark:bg-white/[0.05] text-slate-400'">
+                  <AppIcon name="robot" :size="14" />
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-medium" :class="newSessionAgentDraft === agent.id ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'">{{ agent.name }}</div>
+                  <div class="mt-0.5 text-xs text-slate-400 dark:text-slate-500 truncate">{{ agent.installed ? (agent.description || agent.protocol) : '未安装' }}</div>
+                </div>
+              </button>
+            </div>
+
+            <template v-if="newSessionIsProtocol">
+              <div class="mt-4 text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">工作目录</div>
+              <input
+                v-model="newSessionCwdDraft"
+                type="text"
+                class="mt-2 w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] text-sm text-slate-700 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-sky-400 dark:focus:border-sky-400/50"
+                placeholder="本机目录，如 E:\projects\demo（留空使用默认目录）"
+                spellcheck="false"
+              >
+              <p class="mt-2 text-xs leading-5 text-slate-400 dark:text-slate-500">agent 将在该目录中读写文件、执行命令。</p>
+            </template>
+
+            <template v-else>
             <button
               type="button"
-              class="w-full min-h-12 px-3 rounded-lg border flex items-center gap-3 text-left transition-colors cursor-pointer"
+              class="mt-4 w-full min-h-12 px-3 rounded-lg border flex items-center gap-3 text-left transition-colors cursor-pointer"
               :class="newSessionHostDraft.length === 0 ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10' : 'border-slate-200 dark:border-white/[0.08] hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
               @click="newSessionHostDraft = []"
             >
@@ -2155,10 +2462,15 @@ function onSecretRefSubmit(secretRef: string): void {
                 暂无 VPS
               </div>
             </div>
+            </template>
           </div>
 
           <footer class="shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-t border-slate-200 dark:border-white/[0.06] bg-stone-50 dark:bg-[#0b0f19]">
-            <div class="text-xs text-slate-500 dark:text-slate-400">工作区：{{ newSessionHostDraft.length ? workspaceLabel(newSessionHostDraft) : '全局' }}</div>
+            <div class="text-xs text-slate-500 dark:text-slate-400 truncate">
+              {{ newSessionIsProtocol
+                ? `${agentNameFor(newSessionAgentDraft)} · ${newSessionCwdDraft.trim() || '默认目录'}`
+                : `工作区：${newSessionHostDraft.length ? workspaceLabel(newSessionHostDraft) : '全局'}` }}
+            </div>
             <div class="flex items-center gap-2">
               <button type="button" class="h-8 px-3 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white dark:hover:bg-white/[0.04] transition-colors cursor-pointer" @click="closeNewSessionModal">取消</button>
               <button type="button" class="h-8 px-3 rounded-lg text-xs font-medium bg-slate-900 dark:bg-sky-500 text-white hover:bg-slate-800 dark:hover:bg-sky-400 transition-colors cursor-pointer" @click="confirmNewSession">建立对话</button>

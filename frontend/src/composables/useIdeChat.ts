@@ -26,6 +26,12 @@ export interface IdeToolLogEntry {
   terminalText?: string;
 }
 
+// 工具触碰的文件位置（协议 agent 会话的文件↔会话关联）
+export interface IdeFileLocation {
+  path: string;
+  line?: number;
+}
+
 export interface IdeThinkingTimelineItem {
   id: string;
   kind: 'thinking';
@@ -52,10 +58,17 @@ export interface IdeToolTimelineItem {
   result?: unknown;
   isError?: boolean;
   workNote?: string;
+  locations?: IdeFileLocation[];
   logs: IdeToolLogEntry[];
 }
 
 export type IdeTimelineItem = IdeChatMessage | IdeThinkingTimelineItem | IdeToolTimelineItem | IdeSystemTimelineItem;
+
+export interface IdeApprovalOption {
+  optionId: string;
+  name: string;
+  kind: string;
+}
 
 export interface IdeApprovalFacts {
   schemaVersion?: number;
@@ -72,6 +85,7 @@ export interface IdeApprovalFacts {
   detail?: string;
   hostId?: string;
   input?: unknown;
+  options?: IdeApprovalOption[];
   summary?: {
     title?: string;
     detail?: string;
@@ -95,6 +109,7 @@ export interface IdeApprovalRequest {
   actionText?: string;
   input?: unknown;
   approval?: IdeApprovalFacts;
+  options?: IdeApprovalOption[];
   mode: 'approval' | 'ask_user' | 'request_secret';
   responseEvent: 'ide:approve-response' | 'ide:ask-user-response' | 'ide:secret-response';
   secretName?: string;
@@ -155,6 +170,7 @@ export interface IdeChatApi {
   approveAllow(): void;
   approveDeny(): void;
   approveCustom(): void;
+  approveOption(option: IdeApprovalOption): void;
   pushSystemEvent(title: string, text: string, tone?: IdeSystemTimelineItem['tone']): void;
   dispose(): void;
 }
@@ -278,6 +294,20 @@ function cleanAssistantWorkNote(value: unknown): string {
 
 function normalizeTimelineItems(items: IdeTimelineItem[]): IdeTimelineItem[] {
   return items.filter((item, index) => !isStoredAssistantStray(items, item, index));
+}
+
+function normalizeFileLocations(value: unknown): IdeFileLocation[] {
+  if (!Array.isArray(value)) return [];
+  const out: IdeFileLocation[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    const path = String((raw as { path?: unknown })?.path || '').trim();
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    const line = (raw as { line?: unknown })?.line;
+    out.push(typeof line === 'number' && Number.isInteger(line) && line >= 0 ? { path, line } : { path });
+  }
+  return out;
 }
 
 function isCompactCommandText(value: string): boolean {
@@ -628,12 +658,14 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     return cleanAssistantWorkNote(active?.workNote);
   }
 
-  function startTool(msg: StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown; workNote?: string; modelNote?: string }): void {
+  function startTool(msg: StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown; workNote?: string; modelNote?: string; locations?: unknown }): void {
     const visibleWorkNote = convertCurrentAssistantToThinking();
     const tool = ensureTool(msg.toolUseId, msg.name || 'unknown');
     if (!tool) return;
     const workNote = cleanAssistantWorkNote(msg.workNote || msg.modelNote) || visibleWorkNote;
     if (workNote) tool.workNote = workNote;
+    const locations = normalizeFileLocations(msg.locations);
+    if (locations.length) tool.locations = locations;
     if (msg.phase === 'preparing_input' || msg.input === null) {
       if (tool.status !== 'running') tool.status = 'preparing';
     } else {
@@ -665,7 +697,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     touchTimeline();
   }
 
-  function finishTool(msg: StreamMessage & { name?: string; toolUseId?: string; is_error?: boolean; result?: unknown }): void {
+  function finishTool(msg: StreamMessage & { name?: string; toolUseId?: string; is_error?: boolean; result?: unknown; locations?: unknown }): void {
     closeCurrentAssistant();
     const tool = ensureTool(msg.toolUseId, msg.name || 'unknown');
     if (!tool) return;
@@ -673,6 +705,8 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     tool.isError = Boolean(msg.is_error);
     tool.result = msg.result;
     tool.durationMs = Date.now() - tool.startedAt;
+    const locations = normalizeFileLocations([...(tool.locations || []), ...(Array.isArray(msg.locations) ? msg.locations : [])]);
+    if (locations.length) tool.locations = locations;
     touchTimeline();
   }
 
@@ -752,7 +786,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     }, 1000);
   }
 
-  function respondApproval(action: 'allow' | 'deny' | 'custom', text = ''): void {
+  function respondApproval(action: 'allow' | 'deny' | 'custom', text = '', optionId = ''): void {
     const req = approveRequest.value;
     if (!req || !socket) {
       approveRequest.value = null;
@@ -764,6 +798,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
       sessionId: req.sessionId,
       action,
       text: text || '',
+      ...(optionId ? { optionId } : {}),
     });
     approveRequest.value = null;
     approveCustomText.value = '';
@@ -776,6 +811,12 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
 
   function approveDeny(): void {
     respondApproval('deny');
+  }
+
+  // ACP 多选项审批（allow_once / allow_always / reject_once…）：optionId 直传后端
+  function approveOption(option: IdeApprovalOption): void {
+    const wantAllow = String(option.kind || '').startsWith('allow');
+    respondApproval(wantAllow ? 'allow' : 'deny', '', option.optionId);
   }
 
   function approveCustom(): void {
@@ -824,7 +865,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         appendAssistantText(msg.text);
       }],
       ['ide:tool-start', (raw: unknown) => {
-        const msg = raw as StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown; workNote?: string; modelNote?: string };
+        const msg = raw as StreamMessage & { name?: string; phase?: string; toolUseId?: string; input?: unknown; workNote?: string; modelNote?: string; locations?: unknown };
         if (!matchesCurrentRun(msg)) return;
         startTool(msg);
         if (msg.phase === 'preparing_input' || msg.input === null) {
@@ -840,7 +881,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         setStatus('工具执行中...');
       }],
       ['ide:tool-end', (raw: unknown) => {
-        const msg = raw as StreamMessage & { name?: string; toolUseId?: string; result?: unknown; is_error?: boolean };
+        const msg = raw as StreamMessage & { name?: string; toolUseId?: string; result?: unknown; is_error?: boolean; locations?: unknown };
         if (!matchesCurrentRun(msg)) return;
         finishTool(msg);
         setStatus(msg.is_error ? '工具返回错误' : '思考中...');
@@ -913,6 +954,8 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         };
         if (!matchesCurrentRun(msg) || !msg.requestId) return;
         const approval = msg.approval && typeof msg.approval === 'object' ? msg.approval : undefined;
+        const approvalOptions = (Array.isArray(approval?.options) ? approval.options : [])
+          .filter((o): o is IdeApprovalOption => Boolean(o && o.optionId));
         approveCustomText.value = '';
         approveRequest.value = {
           requestId: msg.requestId,
@@ -930,6 +973,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
           actionText: msg.actionText || approval?.actionText || '',
           input: msg.input ?? approval?.input,
           approval,
+          options: approvalOptions.length ? approvalOptions : undefined,
           mode: 'approval',
           responseEvent: 'ide:approve-response',
           countdown: 120,
@@ -1229,6 +1273,7 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     approveAllow,
     approveDeny,
     approveCustom,
+    approveOption,
     pushSystemEvent,
     dispose,
   };

@@ -16,6 +16,8 @@ interface SessionMeta {
   modelLabel: string;
   messageCount: number;
   preview: string;
+  agentId?: string;
+  cwd?: string;
   createdAt: string;
   updatedAt: string;
   running?: boolean;
@@ -51,6 +53,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'select', id: string): void;
   (e: 'new-session'): void;
+  (e: 'new-session-at', path: string): void;
   (e: 'rename', id: string, title: string): void;
   (e: 'copy', id: string): void;
   (e: 'delete', id: string): void;
@@ -86,18 +89,44 @@ const chatSessions = computed(() => filtered.value.slice().sort((a, b) => parseT
 interface SessionGroup {
   key: string;
   label: string;
+  sublabel?: string;
   sessions: SessionMeta[];
   updatedAt: string;
+}
+
+// 协议 agent 会话（Claude Code / Codex…）不绑 VPS 工作区，按本机 cwd 分组
+function isProtocolSession(session: SessionMeta): boolean {
+  const id = String(session.agentId || '').trim();
+  return Boolean(id) && id !== 'oneshell';
+}
+
+function cwdBasename(path: string): string {
+  const normalized = String(path || '').replace(/\\/g, '/').replace(/\/+$/g, '');
+  if (!normalized) return '';
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? (normalized.slice(idx + 1) || normalized) : normalized;
 }
 
 const chatGroups = computed<SessionGroup[]>(() => {
   const groups = new Map<string, SessionGroup>();
   for (const session of chatSessions.value) {
-    const ids = sessionWorkspaceIds(session);
-    const key = workspaceKey(ids);
+    let key = '';
+    let label = '';
+    let sublabel = '';
+    if (isProtocolSession(session)) {
+      const cwd = String(session.cwd || '').trim();
+      key = `cwd:${cwd || '__default__'}`;
+      label = cwd ? (cwdBasename(cwd) || cwd) : '默认目录';
+      sublabel = cwd || '本机目录';
+    } else {
+      const ids = sessionWorkspaceIds(session);
+      key = workspaceKey(ids);
+      label = workspaceLabel(ids);
+    }
     const group = groups.get(key) || {
       key,
-      label: workspaceLabel(ids),
+      label,
+      sublabel,
       sessions: [],
       updatedAt: session.updatedAt || '',
     };
@@ -120,6 +149,12 @@ const visibleItems = computed<DirItem[]>(() => {
 const dirCount = computed(() => visibleItems.value.filter((i) => i.isDir || i.isDrive).length);
 const fileCount = computed(() => visibleItems.value.length - dirCount.value);
 const fileHostLabel = computed(() => hostName(fileHostId.value));
+// 协议 agent 目前只在本机跑；盘符列表页（此电脑）不是可用工作目录
+const canNewSessionHere = computed(() => {
+  if (fileHostId.value !== 'local') return false;
+  const path = String(fb.currentPath.value || '').trim();
+  return Boolean(path) && path !== '此电脑' && path !== '__drives__';
+});
 const activeFileFocus = computed(() => props.fileFocus || null);
 const focusStatusLabel = computed(() => {
   switch (activeFileFocus.value?.status) {
@@ -391,7 +426,7 @@ function isFocusedItem(item: DirItem): boolean {
           <div class="agent-chat-group-header sticky top-0 z-10">
             <div class="min-w-0 flex-1">
               <div class="truncate text-[13px] font-bold text-slate-700 dark:text-slate-200">{{ group.label }}</div>
-              <div class="mt-0.5 text-[10px] font-medium tracking-wider text-slate-400 dark:text-slate-600">工作区</div>
+              <div class="mt-0.5 text-[10px] font-medium tracking-wider text-slate-400 dark:text-slate-600 truncate" :title="group.sublabel || ''">{{ group.sublabel || '工作区' }}</div>
             </div>
             <span class="min-w-6 h-5 px-1.5 rounded-full bg-white dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.07] text-center text-[11px] leading-5 font-semibold text-slate-500 dark:text-slate-400">{{ group.sessions.length }}</span>
           </div>
@@ -418,6 +453,7 @@ function isFocusedItem(item: DirItem): boolean {
                 />
                 <div v-else class="agent-session-text-guard min-w-0 flex items-center gap-1.5 pr-1 transition-[padding] group-hover:pr-[82px]">
                   <span v-if="s.entry === 'task'" class="shrink-0 text-amber-500 dark:text-amber-400" title="任务会话"><AppIcon name="save" :size="11" /></span>
+                  <span v-if="isProtocolSession(s)" class="shrink-0 text-sky-500 dark:text-sky-400" :title="s.modelLabel || '协议 agent 会话'"><AppIcon name="robot" :size="11" /></span>
                   <span
                     class="min-w-0 flex-1 text-[13px] font-semibold truncate"
                     :class="s.id === props.activeId ? 'text-slate-950 dark:text-slate-100' : 'text-slate-700 dark:text-slate-200'"
@@ -481,6 +517,12 @@ function isFocusedItem(item: DirItem): boolean {
             <div class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">文件</div>
             <div class="mt-0.5 text-xs font-medium text-slate-700 dark:text-slate-200 truncate">{{ fileHostLabel }}</div>
           </div>
+          <button
+            v-if="canNewSessionHere"
+            class="h-7 px-2 rounded-md border border-sky-200 dark:border-sky-400/25 text-[11px] text-sky-600 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-400/10 transition-colors cursor-pointer whitespace-nowrap"
+            title="以当前目录为工作目录新建 agent 会话"
+            @click="emit('new-session-at', fb.currentPath.value)"
+          >在此新建会话</button>
           <button class="h-7 px-2 rounded-md border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white dark:hover:bg-white/[0.04] transition-colors cursor-pointer" title="刷新当前目录" @click="fb.refreshCurrent">刷新</button>
         </div>
         <div v-if="activeFileFocus" class="mt-2 rounded-lg border border-sky-200 dark:border-sky-400/15 bg-sky-50/70 dark:bg-sky-400/8 px-2.5 py-2">
