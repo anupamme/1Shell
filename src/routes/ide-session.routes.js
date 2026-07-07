@@ -45,8 +45,9 @@ function createIdeSessionRouter({ ideService }) {
   router.patch('/agent/sessions/:id', (req, res, next) => {
     try {
       const title = String(req.body?.title || '').trim();
-      if (!title) return res.status(400).json({ ok: false, error: 'title 不能为空' });
-      const ok = ideService.renameSessionRecord(req.params.id, title);
+      const agentId = String(req.body?.agentId || '').trim();
+      if (!title && !agentId) return res.status(400).json({ ok: false, error: 'title 或 agentId 至少提供一个' });
+      const ok = ideService.patchSessionRecord(req.params.id, { title: title || undefined, agentId: agentId || undefined });
       if (!ok) return res.status(404).json({ ok: false, error: '会话不存在' });
       return res.json({ ok: true });
     } catch (err) {

@@ -419,11 +419,35 @@ function pickProtocolAgent(agentId: string): void {
     notify.info('当前回合仍在运行，请先停止后再切换 agent。');
     return;
   }
-  // 切回 1Shell AI：保留当前目标 VPS，创建新 1Shell 会话；旧会话留在左侧栏
+  // 切回 1Shell AI：copy 当前会话 → 改 agentId → 切换（同一时间线无断点）
   if (agentId === ONESHELL_AGENT_ID) {
-    const currentIds = runtime.workspaceHostIds.value;
-    onNewSession(currentIds.length ? currentIds : selectedWorkspaceHostIds.value, { agentId: ONESHELL_AGENT_ID });
-    notify.info('已切换为 1Shell AI（新会话）。旧协议会话保留在左侧 Agent 栏。');
+    const oldId = runtime.ide.currentSessionId.value;
+    if (!oldId) {
+      onNewSession(selectedWorkspaceHostIds.value, { agentId: ONESHELL_AGENT_ID });
+      return;
+    }
+    void (async () => {
+      try {
+        const copyResp = await requestJson<{ ok: boolean; session: { id: string } }>(
+          `/api/agent/sessions/${encodeURIComponent(oldId)}/copy`, { method: 'POST', body: JSON.stringify({}) },
+        );
+        if (!copyResp.ok || !copyResp.session?.id) throw new Error('复制会话失败');
+        const newId = copyResp.session.id;
+        // 先改 agentId，再加载（onSelectSession 读 DB，必须先打补丁）
+        await requestJson(`/api/agent/sessions/${encodeURIComponent(newId)}`, {
+          method: 'PATCH', body: JSON.stringify({ agentId: ONESHELL_AGENT_ID }),
+        });
+        const loaded = await onSelectSession(newId);
+        if (!loaded) throw new Error('加载新会话失败');
+        // 后台删旧协议会话（不阻塞 UI）
+        requestJson(`/api/agent/sessions/${encodeURIComponent(oldId)}`, { method: 'DELETE' }).catch(() => {});
+        await loadSessions();
+        notify.info('已切换为 1Shell AI，对话历史自动迁移。');
+      } catch (err) {
+        notify.error(err instanceof Error ? err.message : '切换 1Shell AI 失败');
+      }
+    })();
+    notify.info('正在切换到 1Shell AI…');
     return;
   }
   // 从 1Shell AI 切到协议 agent：同理创建新协议会话，旧 1Shell 会话留在左侧栏

@@ -3744,6 +3744,15 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return ideSessionRepository?.renameSession ? ideSessionRepository.renameSession(id, title) : false;
   }
 
+  function patchSessionRecord(id, { title, agentId }) {
+    const record = ideSessionRepository?.getSession?.(id);
+    if (!record) return false;
+    const payload = { id };
+    if (title) payload.title = title;
+    if (agentId) payload.agentId = agentId;
+    return Boolean(ideSessionRepository?.upsertSession?.(payload));
+  }
+
   function copySessionRecord(id) {
     if (!ideSessionRepository?.upsertSession) return null;
     const live = sessions.get(id);
@@ -4211,7 +4220,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return { ok: true, running: !!session.currentRunId && !session.cancelled, runId: session.currentRunId };
   }
 
-  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord, findSessionsByFile };
+  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, patchSessionRecord, copySessionRecord, removeSessionRecord, findSessionsByFile };
 }
 
 module.exports = {
