@@ -231,7 +231,7 @@ async function testProtocolAgentService() {
     const catalog = createMockCatalog();
     const sessionId = 'agent-codex-test';
 
-    // ── 首轮：事件形状 + 审批 + 持久化（ask 模式保留审批卡链路）─────
+    // ── 首轮：事件形状 + 完全放行 + 持久化 ──────────────────────────
     const emitted = [];
     const service = createProtocolAgentService({ catalog, ideSessionRepository: repo, dataDir: tmpDir, logger: silentLogger });
     const socket = createFakeSocket(emitted);
@@ -244,7 +244,9 @@ async function testProtocolAgentService() {
       return r;
     };
 
-    await service.handleMessage({ socket, sessionId, message: 'hi there', agentId: 'mock-codex', cwd: tmpDir, settings: { approvalMode: 'ask' } });
+    // 审批模式固定 auto（完全放行）：mock 的 requestApproval 由自动放行桥
+    // 应答 accept，不出审批卡（「每次询问」已下线）
+    await service.handleMessage({ socket, sessionId, message: 'hi there', agentId: 'mock-codex', cwd: tmpDir, settings: { effort: '', fast: false } });
 
     const legacy = emitted.filter((e) => e.event !== 'ide:event');
     const legacySeq = legacy.map((e) => e.event);
@@ -255,7 +257,6 @@ async function testProtocolAgentService() {
       'ide:text-delta',
       'ide:text',            // agentMessage 定稿
       'ide:tool-start',
-      'ide:approve-request',
       'ide:tool-delta',      // 命令输出流
       'ide:tool-end',
       'ide:done',
@@ -264,17 +265,14 @@ async function testProtocolAgentService() {
     const unifiedTypes = emitted.filter((e) => e.event === 'ide:event').map((e) => e.payload.type);
     assert.deepStrictEqual(unifiedTypes, [
       'thinking', 'thinking', 'text_delta', 'text_delta', 'text',
-      'tool_start', 'approval_request', 'tool_delta', 'tool_end', 'done',
+      'tool_start', 'tool_delta', 'tool_end', 'done',
     ], `统一事件序列不符: ${unifiedTypes.join(',')}`);
 
-    const approve = legacy.find((e) => e.event === 'ide:approve-request').payload;
-    assert.ok(approve.requestId, '审批请求应带 requestId');
-    assert.strictEqual(approve.toolName, '命令执行');
-    assert.strictEqual(approve.input.command, 'echo hi', '审批载荷应带命令');
+    assert.ok(!legacy.some((e) => e.event === 'ide:approve-request'), '完全放行模式不应出审批卡');
 
     const toolEnd = legacy.find((e) => e.event === 'ide:tool-end').payload;
     assert.strictEqual(toolEnd.is_error, false);
-    assert.ok(String(toolEnd.result).includes('hi'), '命令聚合输出应回流');
+    assert.ok(String(toolEnd.result).includes('hi'), '命令聚合输出应回流（自动放行后命令应执行）');
 
     // 持久化：绑定三元组 + 消息结构 + 设置 + 会话日志
     const record = repo.getSession(sessionId);
@@ -285,7 +283,7 @@ async function testProtocolAgentService() {
     assert.strictEqual(record.messages.length, 3, 'user + assistant(text/tool_use) + tool_result');
     assert.strictEqual(record.messages[1].content.find((b) => b.type === 'tool_use').id, 'cmd-1');
     assert.strictEqual(record.messages[2].content[0].type, 'tool_result');
-    assert.strictEqual(record.agentSettings.approvalMode, 'ask', '会话设置应随消息持久化');
+    assert.strictEqual(record.agentSettings.approvalMode, 'auto', '审批模式固定 auto 持久化');
 
     const logPath = path.join(tmpDir, 'agent-session-logs', `${sessionId}.log`);
     assert.ok(fs.existsSync(logPath), '会话日志应已写盘');
@@ -373,6 +371,81 @@ async function testProtocolAgentService() {
     assert.strictEqual(record2.nativeSessionId, 'th-mock-1', '原生会话绑定应保持');
 
     service2.shutdown();
+
+    // ── 第六节：切回 1Shell AI（releaseSessionToOneshell）→ oneshell 轮次
+    //    → 再领养（补课提示 + resume 旧绑定）────────────────────────────
+    const service3 = createProtocolAgentService({ catalog, ideSessionRepository: repo, dataDir: tmpDir, logger: silentLogger });
+
+    // 非 live 交还：直接翻转持久化记录归属，绑定表保留
+    assert.ok(service3.ownsSession(sessionId), '交还前协议层应认领会话');
+    let released = service3.releaseSessionToOneshell(sessionId);
+    assert.strictEqual(released.ok, true, '非 live 交还应成功');
+    let record3 = repo.getSession(sessionId);
+    assert.strictEqual(record3.agentId, 'oneshell', '交还后记录归属应翻转为 oneshell');
+    assert.strictEqual(record3.nativeSessionId, '', '交还后不应残留当前原生会话 id');
+    assert.strictEqual(record3.agentBindings['mock-codex-b'].nativeSessionId, 'th-mock-1', '绑定表应保留，回切可 resume');
+    assert.strictEqual(record3.messages.length, 15, '交还不应动消息历史');
+    assert.ok(!service3.ownsSession(sessionId), '交还后协议层不再认领');
+
+    // 模拟 1Shell AI 侧继续对话：ide.service 持久化不带 agentId/cwd → repo
+    // 回退语义保留归属与绑定
+    repo.upsertSession({
+      id: sessionId,
+      title: record3.title,
+      entry: 'core',
+      hostId: 'local',
+      workspaceHostIds: record3.workspaceHostIds,
+      modelLabel: 'mock-oneshell-model',
+      messages: [
+        ...record3.messages,
+        { role: 'user', content: [{ type: 'text', text: 'oneshell turn' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'oneshell answer' }] },
+      ],
+      preview: 'oneshell answer',
+    });
+    record3 = repo.getSession(sessionId);
+    assert.strictEqual(record3.agentId, 'oneshell', 'oneshell 侧持久化不应翻转归属');
+    assert.strictEqual(record3.agentBindings['mock-codex-b'].ctxSeq, 15, 'oneshell 侧持久化不应洗掉绑定表');
+    assert.strictEqual(record3.cwd, tmpDir, 'oneshell 侧持久化不应洗掉 cwd');
+
+    // 再领养：带历史的 oneshell 会话交给协议 agent → 注入补课提示 + resume 旧绑定
+    // （approvalMode 显式给 auto，mock 的命令审批直接放行，不依赖审批卡回环）
+    const emitted3 = [];
+    const socket3 = createFakeSocket(emitted3, 'sock-codex-test-3');
+    await service3.handleMessage({ socket: socket3, sessionId, message: 'take over again', agentId: 'mock-codex-b', cwd: tmpDir, settings: { approvalMode: 'auto' } });
+    const adoptText = emitted3
+      .filter((e) => e.event === 'ide:text')
+      .map((e) => e.payload.text)
+      .join('');
+    assert.ok(adoptText.includes('[handoff-seen]'), `领养 oneshell 会话应注入交接补课提示，实际: ${adoptText}`);
+    assert.ok(adoptText.includes('[resumed]'), `有旧绑定时应 thread/resume 原生会话，实际: ${adoptText}`);
+    const record4 = repo.getSession(sessionId);
+    assert.strictEqual(record4.agentId, 'mock-codex-b', '领养后记录归属应回到协议 agent');
+    assert.strictEqual(record4.nativeSessionId, 'th-mock-1', '领养后应绑回原生会话');
+    assert.strictEqual(record4.messages.length, 20, 'oneshell 轮次 + 领养轮次都应在历史里');
+    assert.strictEqual(record4.entry, 'core', '协议侧持久化不应洗掉 entry');
+    assert.strictEqual(record4.hostId, 'local', '协议侧持久化不应洗掉 hostId');
+    const handoffLog = fs.readFileSync(path.join(tmpDir, 'agent-session-logs', `${sessionId}.log`), 'utf8').trim().split('\n');
+    assert.strictEqual(handoffLog.length, 20, '会话日志应含 oneshell 轮次（领养时补写全量）');
+    assert.ok(handoffLog.some((line) => line.includes('oneshell turn')), '补课日志应包含 oneshell 侧消息');
+
+    // live 交还：杀进程 + 翻转归属 + 水位推进
+    assert.ok(service3.hasSession(sessionId), '领养后会话应为 live');
+    released = service3.releaseSessionToOneshell(sessionId);
+    assert.strictEqual(released.ok, true, 'live 交还应成功');
+    assert.ok(!service3.hasSession(sessionId), 'live 交还应销毁内存会话');
+    const record5 = repo.getSession(sessionId);
+    assert.strictEqual(record5.agentId, 'oneshell', 'live 交还后归属应翻转');
+    assert.strictEqual(record5.agentBindings['mock-codex-b'].ctxSeq, 20, '交还时水位应推进到当前消息数');
+
+    // 协议层拒收 oneshell 消息（路由层负责 release，这里绝不静默错跑旧 agent）
+    const emitted4 = [];
+    const socket4 = createFakeSocket(emitted4, 'sock-codex-test-4');
+    await service3.handleMessage({ socket: socket4, sessionId, message: 'should fail', agentId: 'oneshell' });
+    assert.ok(emitted4.some((e) => e.event === 'ide:error'), '协议层应显式拒绝 agentId=oneshell 的消息');
+    assert.ok(!service3.hasSession(sessionId), '拒收不应把 oneshell 会话拉进协议层 live map');
+
+    service3.shutdown();
   } finally {
     for (let attempt = 0; ; attempt++) {
       try {
@@ -406,10 +479,11 @@ async function testProtocolAgentService() {
   await testProtocolAgentService();
   console.log('✓ protocol-agent.service codex 全链路测试通过');
   console.log('  - ide:* 事件形状与 1Shell AI / ACP 一致');
-  console.log('  - 审批挂起/应答与持久化（含 agentSettings / workspaceHostIds）');
+  console.log('  - 完全放行（审批自动应答）与持久化（含 agentSettings / workspaceHostIds）');
   console.log('  - 目标 VPS 提示注入（变化时一次，不进展示记录）');
   console.log('  - 会话内切换 agent：绑定表 / 交接补课提示 / 会话日志');
   console.log('  - 服务重启后 thread/resume 恢复并续写历史');
+  console.log('  - 切回 1Shell AI（release）/ 再领养（补课 + resume）/ 拒收 oneshell 消息');
   process.exit(0);
 })().catch((err) => {
   console.error(`✗ test-codex-adapter 失败: ${err.stack || err.message}`);

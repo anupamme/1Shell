@@ -21,7 +21,7 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
       ORDER BY updated_at DESC
     `),
     countAll: db.prepare('SELECT COUNT(*) AS total FROM ide_sessions'),
-    selectMeta: db.prepare('SELECT id, agent_id, cwd, native_session_id, files_json, agent_bindings_json, agent_settings_json FROM ide_sessions WHERE id = ?'),
+    selectMeta: db.prepare('SELECT id, entry, host_id, model_label, agent_id, cwd, native_session_id, files_json, agent_bindings_json, agent_settings_json FROM ide_sessions WHERE id = ?'),
     selectFull: db.prepare('SELECT * FROM ide_sessions WHERE id = ?'),
     selectWithFiles: db.prepare(`
       SELECT id, title, entry, host_id, workspace_hosts_json, model_label, message_count, preview, agent_id, cwd, native_session_id, created_at, updated_at, files_json
@@ -57,17 +57,18 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
 
   // INSERT sets the (auto-derived) title; UPDATE preserves it so a user rename
   // is never clobbered by the per-turn snapshot.
-  // agent_id/cwd/native_session_id fall back to the existing row so 1Shell AI
-  // snapshot writes (which don't know about protocol agents) can't wipe them.
+  // entry/host_id/model_label/agent_id/cwd/native_session_id 及 json 附件字段
+  // 均按「payload 未携带（undefined）→ 保留既有行」的语义回退，双向 agent
+  // 切换时两侧服务只写各自知道的字段，互不洗掉对方的。
   const upsertTx = db.transaction((payload) => {
     const existing = stmts.selectMeta.get(payload.id) || null;
     const row = {
       id: payload.id,
       title: String(payload.title || '').slice(0, 200),
-      entry: payload.entry || 'core',
-      host_id: payload.hostId || null,
+      entry: payload.entry !== undefined ? (payload.entry || 'core') : (existing?.entry || 'core'),
+      host_id: payload.hostId !== undefined ? (payload.hostId || null) : (existing?.host_id || null),
       workspace_hosts_json: JSON.stringify(normalizeWorkspaceHostIds(payload.workspaceHostIds, payload.hostId)),
-      model_label: payload.modelLabel || null,
+      model_label: payload.modelLabel !== undefined ? (payload.modelLabel || null) : (existing?.model_label || null),
       message_count: Number.isFinite(payload.messageCount) ? payload.messageCount : (Array.isArray(payload.messages) ? payload.messages.length : 0),
       messages_json: JSON.stringify(Array.isArray(payload.messages) ? payload.messages : []),
       preview: String(payload.preview || '').slice(0, 400),
@@ -252,10 +253,10 @@ function createFileIdeSessionRepository(dataDir) {
     const row = normalizeFileRow({
       id: payload.id,
       title: existing?.title || String(payload.title || '').slice(0, 200),
-      entry: payload.entry || existing?.entry || 'core',
-      hostId: payload.hostId || existing?.hostId || '',
+      entry: payload.entry !== undefined ? (payload.entry || 'core') : (existing?.entry || 'core'),
+      hostId: payload.hostId !== undefined ? String(payload.hostId || '') : (existing?.hostId || ''),
       workspaceHostIds: normalizeWorkspaceHostIds(payload.workspaceHostIds, payload.hostId || existing?.hostId || ''),
-      modelLabel: payload.modelLabel || existing?.modelLabel || '',
+      modelLabel: payload.modelLabel !== undefined ? String(payload.modelLabel || '') : (existing?.modelLabel || ''),
       messageCount: Number.isFinite(payload.messageCount)
         ? payload.messageCount
         : (Array.isArray(payload.messages) ? payload.messages.length : (existing?.messageCount || 0)),

@@ -651,6 +651,64 @@ function repairDanglingToolUseMessages(messages) {
   }
 }
 
+// 模型 API 消息投影：会话可在 1Shell AI 与协议 agent（claude/codex/ACP）间
+// 来回切换，协议时期的历史块不是为回传模型 API 而生——tool_use.name 可能是
+// 任意标题（带空格/中文），块上还挂着 locations 等附加字段，直接回传会被
+// API 拒绝。这里在请求边界做只读投影（不动 session.messages，时间线与文件
+// chips 不受影响）：名字不合法的 tool_use 连同其 tool_result 一起转普通文
+// 本；形状合法但带附加字段的块复制成标准形状。
+const MODEL_API_TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+const MODEL_API_TOOL_USE_KEYS = new Set(['type', 'id', 'name', 'input']);
+const MODEL_API_TOOL_RESULT_KEYS = new Set(['type', 'tool_use_id', 'content', 'is_error']);
+
+function projectMessagesForModelApi(messages = []) {
+  const stringifyForPreview = (value) => {
+    if (typeof value === 'string') return value;
+    try { return JSON.stringify(value ?? {}); } catch { return ''; }
+  };
+  const droppedToolUseIds = new Set();
+  const projected = (Array.isArray(messages) ? messages : []).map((message) => {
+    if (message?.role !== 'assistant' || !Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map((block) => {
+      if (block?.type !== 'tool_use') return block;
+      const name = String(block.name || '');
+      if (!MODEL_API_TOOL_NAME_RE.test(name)) {
+        if (block.id) droppedToolUseIds.add(String(block.id));
+        changed = true;
+        return { type: 'text', text: `[外部 agent 工具调用] ${name || 'tool'} ${stringifyForPreview(block.input).slice(0, 400)}`.trim() };
+      }
+      if (Object.keys(block).some((key) => !MODEL_API_TOOL_USE_KEYS.has(key))) {
+        changed = true;
+        return { type: 'tool_use', id: block.id, name, input: block.input ?? {} };
+      }
+      return block;
+    });
+    return changed ? { ...message, content } : message;
+  });
+  return projected.map((message) => {
+    if (message?.role !== 'user' || !Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map((block) => {
+      if (block?.type !== 'tool_result') return block;
+      if (droppedToolUseIds.has(String(block.tool_use_id || ''))) {
+        changed = true;
+        return { type: 'text', text: `[外部 agent 工具结果] ${stringifyForPreview(block.content).slice(0, 400)}`.trim() };
+      }
+      if (Object.keys(block).some((key) => !MODEL_API_TOOL_RESULT_KEYS.has(key))) {
+        changed = true;
+        return { type: 'tool_result', tool_use_id: block.tool_use_id, content: block.content, is_error: Boolean(block.is_error) };
+      }
+      return block;
+    });
+    if (!changed) return message;
+    // API 要求 tool_result 位于 user 消息 content 的最前面；转文本后重排序
+    const results = content.filter((block) => block?.type === 'tool_result');
+    const others = content.filter((block) => block?.type !== 'tool_result');
+    return { ...message, content: [...results, ...others] };
+  });
+}
+
 const TASK_AUTHORING_SYSTEM_PROMPT = [
   '',
   '当前处于 /task 任务创作模式。',
@@ -2588,7 +2646,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       try {
         sanitizeProviderMessageHistory(session.messages);
         repairDanglingToolUseMessages(session.messages);
-        const compactedMessages = compactMessages(session.messages);
+        const compactedMessages = projectMessagesForModelApi(compactMessages(session.messages));
         const baseSystem = composeSystemPrompt(session.system, session.activeSkillContext);
         const apiBody = JSON.stringify({
           model,
@@ -3789,6 +3847,20 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return ideSessionRepository?.findSessionsByFile ? ideSessionRepository.findSessionsByFile(filePath) : [];
   }
 
+  // 会话交给协议 agent 前让出 live 状态：先落盘最新消息（协议侧从 repo 重
+  // 水化），再丢弃内存副本——否则切回来时 getOrCreateSession 命中的是缺了
+  // 协议轮次的旧缓存，历史会分叉。socket 路由在双向切换时调用。
+  function releaseLiveSession(sessionId) {
+    const session = sessions.get(sessionId);
+    if (!session) return { ok: true, live: false };
+    if (session.currentRunId && !session.cancelled) {
+      return { ok: false, error: '当前回合仍在运行，请先停止后再切换 agent' };
+    }
+    persistSessionSafe(sessionId, session, { modelLabel: '' });
+    sessions.delete(sessionId);
+    return { ok: true, live: true };
+  }
+
   async function handleMessage({ socket, sessionId, message, context, safeMode, claudeCodeEnabled, unlimitedTurns, entry, approvalMode, attachments = [] }) {
     if (!agentRuntime?.startRun || !agentRuntime?.getState) {
       emitToSession(null, socket, 'ide:error', { sessionId, error: 'Agent runtime 未初始化，1Shell AI 已停止旧聊天降级路径。' });
@@ -4211,7 +4283,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return { ok: true, running: !!session.currentRunId && !session.cancelled, runId: session.currentRunId };
   }
 
-  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord, findSessionsByFile };
+  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord, findSessionsByFile, releaseLiveSession };
 }
 
 module.exports = {
@@ -4223,6 +4295,7 @@ module.exports = {
     compactToolResultForModel,
     expandExactTextReferences,
     normalizeAgentAttachments,
+    projectMessagesForModelApi,
     streamAnthropicSSE,
   },
 };

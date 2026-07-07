@@ -14,13 +14,16 @@ const { emitIdeEvent } = require('../ide/ide.events');
  *   兼容事件仍保留：ide:thinking / ide:text-delta / ide:text / ide:tool-start / ide:tool-end / ide:done / ide:error / ide:cancelled
  *   同时额外发统一事件：ide:event { v, type, sessionId, runId, payload, ts }
  *
- * 路由：会话按归属分流——payload 带非 oneshell 的 agentId，或会话（live/持久化）
- * 已绑定第三方 agent 的，走 protocolAgentService；其余走 ideService（1Shell AI）。
+ * 路由：以消息携带的 agentId 为准双向分流——非 oneshell 的 agentId 走
+ * protocolAgentService；显式 oneshell 的走 ideService（若会话此前归协议层，
+ * 先 releaseSessionToOneshell 翻转归属）；未携带 agentId 的旧客户端按会话
+ * 归属（ownsSession）兜底。双向切换时让出对侧的 live 会话，避免历史分叉。
  */
 function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, mcpRegistry, protocolAgentService }) {
   function isProtocolSession(sessionId, agentId = '') {
     if (!protocolAgentService) return false;
-    if (agentId && agentId !== 'oneshell') return true;
+    if (agentId === 'oneshell') return false;
+    if (agentId) return true;
     return protocolAgentService.ownsSession(sessionId);
   }
 
@@ -52,6 +55,13 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
 
       const agentId = String(payload.agentId || '').trim();
       if (isProtocolSession(sessionId, agentId)) {
+        // 会话若在 1Shell AI 侧还有 live 副本（oneshell → 协议切换），先落
+        // 盘让出，协议侧从持久化记录重水化完整历史
+        const released = ideService.releaseLiveSession?.(sessionId);
+        if (released && !released.ok) {
+          emitIdeEvent(socket, 'ide:error', { sessionId, error: released.error || '切换 agent 失败' });
+          return;
+        }
         Promise.resolve().then(() => protocolAgentService.handleMessage({
           socket,
           sessionId,
@@ -67,6 +77,16 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
           emitIdeEvent(socket, 'ide:error', { sessionId, error: err?.message || 'ide:message 处理失败' });
         });
         return;
+      }
+
+      // 显式切回 1Shell AI：协议层若仍持有该会话（live 或记录归属），先交还
+      // ——杀协议进程、翻转记录归属，1Shell AI 侧从持久化记录恢复完整历史
+      if (agentId === 'oneshell' && protocolAgentService?.ownsSession(sessionId)) {
+        const released = protocolAgentService.releaseSessionToOneshell?.(sessionId);
+        if (released && !released.ok) {
+          emitIdeEvent(socket, 'ide:error', { sessionId, error: released.error || '切换回 1Shell AI 失败' });
+          return;
+        }
       }
 
       Promise.resolve().then(() => ideService.handleMessage({

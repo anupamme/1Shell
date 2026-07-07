@@ -275,7 +275,9 @@ interface ProtocolSessionSettings {
 
 function normalizeProtocolSettings(value?: Partial<ProtocolSessionSettings> | null): ProtocolSessionSettings {
   return {
-    approvalMode: value?.approvalMode === 'ask' ? 'ask' : 'auto',
+    // 审批模式固定 auto：第三方 agent 仅以完全访问接入（「每次询问」已下线，
+    // 真实 CLI 上审批卡链路不可靠，MCP 调用会被拒导致任务中断）
+    approvalMode: 'auto',
     effort: String(value?.effort || '').trim(),
     fast: value?.fast === true,
   };
@@ -381,7 +383,6 @@ async function loadProtocolAgents(): Promise<void> {
 // ── 协议会话 composer 选择器（agent 切换 / 审批 / 思考程度 / fast）──
 const showAgentDropdown = ref(false);
 const showEffortDropdown = ref(false);
-const showProtocolApprovalDropdown = ref(false);
 
 const EFFORT_LABELS: Record<string, string> = { '': '默认', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大' };
 const CLAUDE_EFFORT_OPTIONS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -407,32 +408,37 @@ function updateProtocolSettings(patch: Partial<ProtocolSessionSettings>): void {
 function toggleAgentDropdown(): void {
   showAgentDropdown.value = !showAgentDropdown.value;
   showEffortDropdown.value = false;
-  showProtocolApprovalDropdown.value = false;
+  showModeDropdown.value = false;
+  showModelDropdown.value = false;
   if (showAgentDropdown.value) void loadProtocolAgents();
 }
 
-function pickProtocolAgent(agentId: string): void {
+// 会话内切换 agent（双向）：1Shell AI ↔ claude/codex/…。1Shell 以 VPS 为
+// 维度，本地工作目录对切换无关紧要——不带 cwd 时后端兜底用户主目录（CLI
+// 进程总得有个启动目录），协议 agent 操作 VPS 走 1Shell MCP 工具。oneshell
+// 方向由后端 release 协议进程并翻转会话归属，服务端全量历史无缝带过去。
+function pickSessionAgent(agentId: string): void {
   showAgentDropdown.value = false;
   const runtime = activeRuntime.value;
-  if (!runtime || !isProtocolAgentId(agentId) || agentId === runtime.agentId.value) return;
+  if (!runtime) return;
+  const target = normalizeAgentId(agentId);
+  if (target === normalizeAgentId(runtime.agentId.value)) return;
   if (runtime.ide.isRunning.value) {
     notify.info('当前回合仍在运行，请先停止后再切换 agent。');
     return;
   }
-  runtime.agentId.value = agentId;
+  runtime.agentId.value = target;
   // effort 取值域随 agent 变化，切换后回到默认档
   updateProtocolSettings({ effort: '' });
-  notify.info(`已切换为 ${agentNameFor(agentId)}，下一条消息起由它接管（会自动补读会话上下文）。`);
+  rememberRuntimeSession(runtime);
+  notify.info(isProtocolAgentId(target)
+    ? `已切换为 ${agentNameFor(target)}，下一条消息起由它接管（会自动补读会话上下文）。`
+    : '已切换为 1Shell AI，下一条消息起由它接管（完整对话历史自动延续）。');
 }
 
 function pickProtocolEffort(effort: string): void {
   showEffortDropdown.value = false;
   updateProtocolSettings({ effort });
-}
-
-function pickProtocolApproval(mode: 'auto' | 'ask'): void {
-  showProtocolApprovalDropdown.value = false;
-  updateProtocolSettings({ approvalMode: mode });
 }
 
 function toggleProtocolFast(): void {
@@ -722,6 +728,9 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
         };
       }
       return {
+        // 显式声明归属：会话可能刚从协议 agent 切回 1Shell AI，路由层据此
+        // 让协议侧交还会话（杀进程 + 翻转记录归属）
+        agentId: ONESHELL_AGENT_ID,
         entry: runtimeTaskMode.value ? 'task' : 'core',
         approvalMode: approvalMode.value,
         goal: agentGoalObjective(agentGoal.value) || undefined,
@@ -896,6 +905,10 @@ async function refreshRuntimeProjection(runtime: AgentRuntime, attempt = 0): Pro
   const sessionId = runtime.ide.currentSessionId.value;
   const currentLength = runtime.ide.timeline.value.length;
   if (!sessionId || runtime.ide.isRunning.value) return;
+  // 刷新窗口内用户可能刚点了切换 agent / 改了 cwd：请求返回后只在用户没
+  // 动过的情况下才用记录值回写，避免把切换选择静默还原
+  const agentIdBefore = normalizeAgentId(runtime.agentId.value);
+  const cwdBefore = String(runtime.cwd.value || '').trim();
 
   try {
     await waitForSessionProjection(attempt);
@@ -916,8 +929,12 @@ async function refreshRuntimeProjection(runtime: AgentRuntime, attempt = 0): Pro
     const workspaceIds = normalizeWorkspaceHostIds(resp.session.workspaceHostIds || (resp.session.hostId ? [resp.session.hostId] : []));
     runtime.hostId.value = workspacePrimaryHostId(workspaceIds);
     runtime.workspaceHostIds.value = workspaceIds;
-    runtime.agentId.value = normalizeAgentId(resp.session.agentId);
-    runtime.cwd.value = String(resp.session.cwd || '').trim();
+    if (normalizeAgentId(runtime.agentId.value) === agentIdBefore) {
+      runtime.agentId.value = normalizeAgentId(resp.session.agentId);
+    }
+    if (String(runtime.cwd.value || '').trim() === cwdBefore) {
+      runtime.cwd.value = String(resp.session.cwd || '').trim();
+    }
     runtime.taskMode.value = resp.session.entry === 'task';
     runtime.ide.loadSession({
       id: resp.session.id,
@@ -2315,73 +2332,51 @@ function onSecretRefSubmit(secretRef: string): void {
               <AppIcon name="history" :size="16" />
             </button>
 
-            <!-- 协议 agent 会话：agent 切换 / 审批模式 / 思考程度 / fast -->
+            <!-- agent 切换（所有会话）：1Shell AI ↔ claude/codex/… 随时互切 -->
+            <div class="relative">
+              <button
+                type="button"
+                class="h-8 max-w-[180px] px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.03] text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5 cursor-pointer hover:border-sky-300 dark:hover:border-sky-400/30 transition-colors"
+                :title="activeCwd && activeIsProtocolAgent ? `${activeAgentName} · ${activeCwd}` : activeAgentName"
+                @click="toggleAgentDropdown"
+              >
+                <AppIcon :name="activeIsProtocolAgent ? 'robot' : 'spark'" :size="13" class="text-sky-500 shrink-0" />
+                <span class="truncate">{{ activeAgentName }}</span>
+                <AppIcon name="arrow-right" :size="11" class="rotate-90 opacity-70 shrink-0" />
+              </button>
+              <div v-if="showAgentDropdown" class="absolute bottom-full left-0 mb-2 w-56 bg-white dark:bg-[#161b2a] border border-slate-200 dark:border-white/[0.08] rounded-lg shadow-xl z-40 py-1 overflow-hidden">
+                <button
+                  type="button"
+                  class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-center gap-2"
+                  :class="!activeIsProtocolAgent ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                  @click="pickSessionAgent(ONESHELL_AGENT_ID)"
+                >
+                  <AppIcon name="spark" :size="12" class="shrink-0" :class="!activeIsProtocolAgent ? 'text-sky-500' : 'text-slate-400'" />
+                  <span class="truncate">1Shell AI</span>
+                </button>
+                <button
+                  v-for="agent in installedProtocolAgents"
+                  :key="agent.id"
+                  type="button"
+                  class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-center gap-2"
+                  :class="agent.id === activeAgentId ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                  @click="pickSessionAgent(agent.id)"
+                >
+                  <AppIcon name="robot" :size="12" class="shrink-0" :class="agent.id === activeAgentId ? 'text-sky-500' : 'text-slate-400'" />
+                  <span class="truncate">{{ agent.name }}</span>
+                </button>
+                <div v-if="!installedProtocolAgents.length" class="px-3 py-2 text-xs text-slate-400 dark:text-slate-600">未检测到已安装的协议 agent</div>
+              </div>
+            </div>
+
+            <!-- 协议 agent 会话：思考程度 / fast（完全访问权限接入，无审批模式选项） -->
             <template v-if="activeIsProtocolAgent">
-              <div class="relative">
-                <button
-                  type="button"
-                  class="h-8 max-w-[180px] px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.03] text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5 cursor-pointer hover:border-sky-300 dark:hover:border-sky-400/30 transition-colors"
-                  :title="activeCwd ? `${activeAgentName} · ${activeCwd}` : activeAgentName"
-                  @click="toggleAgentDropdown"
-                >
-                  <AppIcon name="robot" :size="13" class="text-sky-500 shrink-0" />
-                  <span class="truncate">{{ activeAgentName }}</span>
-                  <AppIcon name="arrow-right" :size="11" class="rotate-90 opacity-70 shrink-0" />
-                </button>
-                <div v-if="showAgentDropdown" class="absolute bottom-full left-0 mb-2 w-48 bg-white dark:bg-[#161b2a] border border-slate-200 dark:border-white/[0.08] rounded-lg shadow-xl z-40 py-1 overflow-hidden">
-                  <button
-                    v-for="agent in installedProtocolAgents"
-                    :key="agent.id"
-                    type="button"
-                    class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-center gap-2"
-                    :class="agent.id === activeAgentId ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
-                    @click="pickProtocolAgent(agent.id)"
-                  >
-                    <AppIcon name="robot" :size="12" class="shrink-0" :class="agent.id === activeAgentId ? 'text-sky-500' : 'text-slate-400'" />
-                    <span class="truncate">{{ agent.name }}</span>
-                  </button>
-                  <div v-if="!installedProtocolAgents.length" class="px-3 py-2 text-xs text-slate-400 dark:text-slate-600">未检测到已安装的 agent</div>
-                </div>
-              </div>
-
-              <div class="relative">
-                <button
-                  type="button"
-                  class="h-8 px-2.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
-                  :class="activeProtocolSettings.approvalMode === 'ask' ? 'bg-slate-100 dark:bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-500/20' : 'bg-red-100 dark:bg-red-500/10 text-red-700 dark:text-red-400 border-red-300 dark:border-red-500/20'"
-                  title="审批模式"
-                  @click="showProtocolApprovalDropdown = !showProtocolApprovalDropdown; showAgentDropdown = false; showEffortDropdown = false"
-                >
-                  <AppIcon name="shield" :size="13" />
-                  <span>{{ activeProtocolSettings.approvalMode === 'ask' ? '询问' : '完全' }}</span>
-                  <AppIcon name="arrow-right" :size="11" class="rotate-90 opacity-70" />
-                </button>
-                <div v-if="showProtocolApprovalDropdown" class="absolute bottom-full left-0 mb-2 w-44 bg-white dark:bg-[#161b2a] border border-slate-200 dark:border-white/[0.08] rounded-lg shadow-xl z-40 py-1 overflow-hidden">
-                  <button
-                    class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer"
-                    :class="activeProtocolSettings.approvalMode !== 'ask' ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
-                    @click="pickProtocolApproval('auto')"
-                  >
-                    <div class="font-medium">完全访问</div>
-                    <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600">命令 / 文件 / MCP 全部放行</div>
-                  </button>
-                  <button
-                    class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer"
-                    :class="activeProtocolSettings.approvalMode === 'ask' ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
-                    @click="pickProtocolApproval('ask')"
-                  >
-                    <div class="font-medium">每次询问</div>
-                    <div class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-600">敏感操作弹审批卡确认</div>
-                  </button>
-                </div>
-              </div>
-
               <div v-if="activeEffortOptions.length" class="relative">
                 <button
                   type="button"
                   class="h-8 px-2.5 rounded-lg border border-transparent text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-white/[0.04] flex items-center gap-1.5 cursor-pointer transition-colors"
                   title="思考程度"
-                  @click="showEffortDropdown = !showEffortDropdown; showAgentDropdown = false; showProtocolApprovalDropdown = false"
+                  @click="showEffortDropdown = !showEffortDropdown; showAgentDropdown = false"
                 >
                   <AppIcon name="spark" :size="13" />
                   <span>思考 · {{ activeEffortLabel }}</span>
@@ -2434,7 +2429,7 @@ function onSecretRefSubmit(secretRef: string): void {
                 type="button"
                 class="h-8 px-2.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
                 :class="modeBadge.cls"
-                @click="showModeDropdown = !showModeDropdown; showModelDropdown = false"
+                @click="showModeDropdown = !showModeDropdown; showModelDropdown = false; showAgentDropdown = false"
               >
                 <AppIcon name="shield" :size="13" />
                 <span>{{ modeBadge.label }}</span>
@@ -2511,7 +2506,7 @@ function onSecretRefSubmit(secretRef: string): void {
       </div>
     </footer>
 
-    <div v-if="showHostDropdown || showModeDropdown || showModelDropdown || showFilesDropdown || showAgentDropdown || showEffortDropdown || showProtocolApprovalDropdown" class="fixed inset-0 z-20" @click="showHostDropdown = false; showModeDropdown = false; showModelDropdown = false; showFilesDropdown = false; showAgentDropdown = false; showEffortDropdown = false; showProtocolApprovalDropdown = false"></div>
+    <div v-if="showHostDropdown || showModeDropdown || showModelDropdown || showFilesDropdown || showAgentDropdown || showEffortDropdown" class="fixed inset-0 z-20" @click="showHostDropdown = false; showModeDropdown = false; showModelDropdown = false; showFilesDropdown = false; showAgentDropdown = false; showEffortDropdown = false"></div>
 
     <Teleport to="body">
       <div

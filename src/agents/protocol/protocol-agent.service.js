@@ -39,14 +39,15 @@ const ONESHELL_AGENT_ID = 'oneshell';
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CODEX_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 
-// 协议会话运行设置：审批模式（auto=完全放行，mindfs 同款默认；ask=审批卡）、
-// 思考程度、codex fast 档
+// 协议会话运行设置：思考程度、codex fast 档。审批模式固定 auto（完全放行，
+// mindfs 同款）——「每次询问」已下线：真实 CLI 上审批卡链路不可靠（agent 的
+// MCP 工具调用会被拒导致任务中断），第三方 agent 仅以完全访问权限接入；
+// requestApproval 机制保留，作为 ACP/codex/claude 权限请求的自动放行桥。
 function normalizeSettings(value) {
   const raw = value && typeof value === 'object' ? value : {};
-  const approvalMode = raw.approvalMode === 'ask' ? 'ask' : 'auto';
   const effort = String(raw.effort || '').trim().toLowerCase();
   return {
-    approvalMode,
+    approvalMode: 'auto',
     effort: CLAUDE_EFFORTS.has(effort) || CODEX_EFFORTS.has(effort) ? effort : '',
     fast: raw.fast === true,
   };
@@ -88,6 +89,9 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
       // agentId → { nativeSessionId, ctxSeq }：会话内多 agent 各自的原生会话
       // 与已见上下文水位（ctxSeq = 该 agent 最近一次收口时的 messages 长度）
       agentBindings: record?.agentBindings && typeof record.agentBindings === 'object' ? { ...record.agentBindings } : {},
+      // 领养 1Shell AI 会话（记录归属还是 oneshell 但已有历史）：首条消息
+      // 前注入补课提示，让新 agent 读会话日志恢复上下文
+      handoffFromOneshell: Boolean(!recordAgentId && Array.isArray(record?.messages) && record.messages.length > 0),
       settings: normalizeSettings(record?.agentSettings),
       workspaceHostIds: normalizeWorkspaceHostIds(record?.workspaceHostIds),
       targetHosts: [], // [{id,name,host}] 最近一次消息带来的目标主机信息
@@ -165,22 +169,22 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
     return '';
   }
 
-  function persistSession(session) {
+  function persistSession(session, { agentIdOverride = '' } = {}) {
     try {
       if (!ideSessionRepository?.upsertSession || session.messages.length === 0) return;
       const spec = catalog?.getAgent?.(session.agentId);
+      // entry / hostId 不传：repo 回退到既有行，避免把 1Shell AI 会话的
+      // 主机绑定 / 入口洗掉（会话可在 oneshell 与协议 agent 间来回切换）
       ideSessionRepository.upsertSession({
         id: session.sessionId,
         title: redactCredentialPatterns(String(session.firstUserMessage || '').slice(0, 60)) || spec?.name || session.agentId,
-        entry: 'core',
-        hostId: '',
         workspaceHostIds: session.workspaceHostIds,
         modelLabel: spec?.name || session.agentId,
         messages: redactPotentialSecrets(session.messages),
         preview: redactCredentialPatterns(previewFromMessages(session.messages)),
-        agentId: session.agentId,
+        agentId: agentIdOverride || session.agentId,
         cwd: session.cwd,
-        nativeSessionId: session.nativeSessionId || '',
+        nativeSessionId: agentIdOverride === ONESHELL_AGENT_ID ? '' : (session.nativeSessionId || ''),
         files: session.files,
         agentBindings: session.agentBindings,
         agentSettings: session.settings,
@@ -237,7 +241,7 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
     const lines = Math.min(delta, SWITCH_LOG_TAIL_LINES);
     return [
       '[会话交接] 本会话此前由其他 agent 处理，你的上下文可能落后于当前会话。',
-      `回答前请先用文件读取工具查看会话记录 ${logPath} 的最后 ${lines} 行恢复上下文；若仍不足，可自行往前分批多读（每批不超过 ${SWITCH_LOG_TAIL_LINES} 行）。`,
+      `回答前请先用你自带的本地文件读取工具（该文件在本机磁盘上，不要用 1Shell MCP 的远程文件工具）查看会话记录 ${logPath} 的最后 ${lines} 行恢复上下文；若仍不足，可自行往前分批多读（每批不超过 ${SWITCH_LOG_TAIL_LINES} 行）。`,
       '执行顺序：先读历史，再回答；读取失败时简要说明后停止。',
     ].join('\n');
   }
@@ -245,20 +249,28 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
   // ── 目标 VPS 注入 ───────────────────────────────────────────────
   // 协议 agent 通过 1Shell 的 MCP 工具（list_hosts / host_exec / 文件读写等）
   // 操作 VPS。这里只负责把用户选择的目标主机告知 agent，权限由 MCP 侧管。
+  // 「local」不算目标：协议 agent 的 CLI 本来就在本机跑（oneshell 会话默认
+  // hostId=local，领养时不该为此注入提示）。
+
+  function protocolTargetIds(session) {
+    return session.workspaceHostIds.filter((id) => id !== 'local');
+  }
 
   function targetsKey(session) {
-    return session.workspaceHostIds.slice().sort().join(',');
+    return protocolTargetIds(session).slice().sort().join(',');
   }
 
   function buildTargetHint(session) {
-    if (!session.workspaceHostIds.length) return '';
-    const described = session.targetHosts.length
-      ? session.targetHosts.map((h) => `${h.name || h.id}（hostId: ${h.id}${h.host ? `, ${h.host}` : ''}）`)
-      : session.workspaceHostIds.map((id) => `hostId: ${id}`);
+    const targetIds = protocolTargetIds(session);
+    if (!targetIds.length) return '';
+    const allowed = new Set(targetIds);
+    const described = session.targetHosts.filter((h) => allowed.has(h.id)).length
+      ? session.targetHosts.filter((h) => allowed.has(h.id)).map((h) => `${h.name || h.id}（hostId: ${h.id}${h.host ? `, ${h.host}` : ''}）`)
+      : targetIds.map((id) => `hostId: ${id}`);
     return [
       `[目标 VPS] 用户为本会话指定了目标主机：${described.join('、')}。`,
       '需要在这些主机上执行命令或读写文件时，请使用 1Shell 提供的 MCP 工具（list_hosts / host_exec / read_remote_file / write_remote_file / upload_file / download_file 等），hostId 按上面给出的值传入。',
-      '若你的环境里没有 1Shell 的 MCP 工具，请直接告知用户先在该 CLI 中接入 1Shell MCP。',
+      '若你的环境里没有 1Shell 的 MCP 工具且本轮确实需要操作这些主机，再提醒用户接入 1Shell MCP；否则继续正常回答用户的问题，不要因此中断当前任务。',
     ].join('\n');
   }
 
@@ -716,8 +728,16 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
   // ── 对外 API ────────────────────────────────────────────────────
 
   async function handleMessage({ socket, sessionId, message, agentId = '', cwd = '', attachments = [], settings, workspaceHostIds, hosts }) {
+    // 切回 1Shell AI 由 socket 路由层调用 releaseSessionToOneshell 完成，消息
+    // 不该带着 oneshell 走到这里；在建会话之前显式拒绝（绝不能静默用旧 agent
+    // 继续跑，也不能把 oneshell 会话拉进本服务的 live map）
+    const incomingAgentId = String(agentId || '').trim();
+    if (incomingAgentId === ONESHELL_AGENT_ID) {
+      if (socket) emitIdeEvent(socket, 'ide:error', { sessionId, error: '该会话应由 1Shell AI 处理（协议层不接收 oneshell 消息），请重试或刷新页面' });
+      return;
+    }
     const session = getOrCreateSession(sessionId, {
-      agentId: String(agentId || '').trim(),
+      agentId: incomingAgentId,
       cwd: String(cwd || '').trim(),
     });
     session.socket = socket || session.socket;
@@ -738,9 +758,8 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
 
     // agent 中途切换（mindfs 模式）：消息带来的 agentId 与会话当前 agent 不同
     // 时，收下旧 agent 的绑定、换绑新 agent 的原生会话，并准备补课提示
-    const incomingAgentId = String(agentId || '').trim();
     let switchHint = '';
-    if (incomingAgentId && incomingAgentId !== ONESHELL_AGENT_ID && session.agentId && incomingAgentId !== session.agentId) {
+    if (incomingAgentId && incomingAgentId !== session.agentId && session.agentId) {
       if (session.turn) return fail('上一轮尚未结束，请等待或先停止后再切换 agent');
       const previous = session.agentId;
       session.agentBindings[previous] = {
@@ -756,7 +775,9 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
       const binding = session.agentBindings[incomingAgentId] || null;
       session.nativeSessionId = binding?.nativeSessionId || '';
       session.lastTargetsKey = ''; // 新 agent 上下文里还没有目标信息，重新注入
+      writeSessionLog(session); // 补课日志刷到最新（含可能的 oneshell 轮次）
       switchHint = buildSwitchHint(session, binding?.ctxSeq ?? 0);
+      session.handoffFromOneshell = false;
       logger.info?.(`[protocol-agent] 会话 ${sessionId} 切换 agent：${previous} → ${incomingAgentId}${binding?.nativeSessionId ? '（resume 原生会话）' : '（新建原生会话）'}`);
     }
 
@@ -771,6 +792,20 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
     if (!fs.existsSync(session.cwd)) return fail(`工作目录不存在: ${session.cwd}`);
 
     if (session.turn) return fail('上一轮尚未结束，请等待或先停止');
+
+    // 领养 1Shell AI 会话：记录归属原为 oneshell 且已有历史。放在全部校验
+    // 之后，避免 binary/cwd 配置错误时白白消耗补课标记。1Shell AI 侧不写
+    // 会话日志，这里补写全量后与 agent 间切换一样注入补课提示；该 agent
+    // 若有旧绑定（此前切走过）则恢复其原生会话
+    if (!switchHint && session.handoffFromOneshell) {
+      const binding = session.agentBindings[session.agentId] || null;
+      session.nativeSessionId = binding?.nativeSessionId || '';
+      session.lastTargetsKey = '';
+      writeSessionLog(session);
+      switchHint = buildSwitchHint(session, binding?.ctxSeq ?? 0);
+      session.handoffFromOneshell = false;
+      logger.info?.(`[protocol-agent] 会话 ${sessionId} 从 1Shell AI 交接给 ${session.agentId}${binding?.nativeSessionId ? '（resume 原生会话）' : '（新建原生会话）'}`);
+    }
 
     const runId = newRunId();
     session.currentRunId = runId;
@@ -877,6 +912,52 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
     }
   }
 
+  // 会话交还 1Shell AI：杀协议进程、留存各 agent 绑定（回来时可 resume）、
+  // 记录归属翻转为 oneshell。socket 路由在收到 agentId=oneshell 的消息且本
+  // 服务仍持有该会话时调用；成功后消息交 ideService 处理。
+  function releaseSessionToOneshell(sessionId) {
+    const session = sessions.get(sessionId);
+    if (session) {
+      if (session.turn) return { ok: false, error: '上一轮尚未结束，请等待或先停止后再切换 agent' };
+      if (session.agentId && session.agentId !== ONESHELL_AGENT_ID) {
+        session.agentBindings[session.agentId] = {
+          nativeSessionId: session.nativeSessionId || '',
+          ctxSeq: session.agentBindings[session.agentId]?.ctxSeq ?? session.messages.length,
+        };
+      }
+      persistSession(session, { agentIdOverride: ONESHELL_AGENT_ID });
+      destroySession(session, { keepRecord: true });
+      return { ok: true };
+    }
+    // 非 live：直接翻转持久化记录的归属。repo 的 upsert 对 messages/preview
+    // 等字段是整行覆盖语义，必须带全量字段回写。
+    let record = null;
+    try { record = ideSessionRepository?.getSession?.(sessionId) || null; } catch { record = null; }
+    if (!record?.agentId || record.agentId === ONESHELL_AGENT_ID) return { ok: true };
+    try {
+      ideSessionRepository.upsertSession({
+        id: record.id,
+        title: record.title,
+        entry: record.entry,
+        hostId: record.hostId,
+        workspaceHostIds: record.workspaceHostIds,
+        modelLabel: record.modelLabel,
+        messageCount: record.messageCount,
+        messages: record.messages,
+        preview: record.preview,
+        agentId: ONESHELL_AGENT_ID,
+        cwd: record.cwd,
+        nativeSessionId: '',
+        files: record.files,
+        agentBindings: record.agentBindings,
+        agentSettings: record.agentSettings,
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || '切换回 1Shell AI 失败' };
+    }
+  }
+
   function listAgents() {
     return catalog?.listAgents?.() || [];
   }
@@ -895,6 +976,7 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
     reattachSession,
     hasSession,
     ownsSession,
+    releaseSessionToOneshell,
     resolveApproval,
     listAgents,
     shutdown,

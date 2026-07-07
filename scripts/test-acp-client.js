@@ -136,8 +136,9 @@ async function testProtocolAgentService() {
     };
 
     assert.strictEqual(service.ownsSession(sessionId), false, '未创建前不应认领会话');
-    // approvalMode=ask：默认 auto 会直接放行不出审批卡，这里显式走审批链路
-    await service.handleMessage({ socket, sessionId, message: 'hi there', agentId: 'mock-acp', cwd: tmpDir, settings: { approvalMode: 'ask' } });
+    // 审批模式固定 auto（完全放行）：agent 的 request_permission 由
+    // requestApproval 自动放行桥应答，不出审批卡（「每次询问」已下线）
+    await service.handleMessage({ socket, sessionId, message: 'hi there', agentId: 'mock-acp', cwd: tmpDir });
 
     const legacy = emitted.filter((e) => e.event !== 'ide:event');
     const legacySeq = legacy.map((e) => e.event);
@@ -149,7 +150,6 @@ async function testProtocolAgentService() {
       'ide:text-delta',
       'ide:text',            // 工具卡片前文本段定稿
       'ide:tool-start',
-      'ide:approve-request',
       'ide:tool-delta',
       'ide:tool-end',
       'ide:text-delta',
@@ -161,14 +161,11 @@ async function testProtocolAgentService() {
     const unifiedTypes = emitted.filter((e) => e.event === 'ide:event').map((e) => e.payload.type);
     assert.deepStrictEqual(unifiedTypes, [
       'thinking', 'thinking', 'plan', 'text_delta', 'text_delta', 'text',
-      'tool_start', 'approval_request', 'tool_delta', 'tool_end',
+      'tool_start', 'tool_delta', 'tool_end',
       'text_delta', 'text', 'done',
     ], `统一事件序列不符: ${unifiedTypes.join(',')}`);
 
-    const approve = legacy.find((e) => e.event === 'ide:approve-request').payload;
-    assert.ok(approve.requestId, '审批请求应带 requestId');
-    assert.strictEqual(approve.toolName, 'read_file');
-    assert.strictEqual(approve.approval.options.length, 2, 'ACP 审批选项应透出');
+    assert.ok(!legacy.some((e) => e.event === 'ide:approve-request'), '完全放行模式不应出审批卡');
 
     const toolStartEvt = legacy.find((e) => e.event === 'ide:tool-start').payload;
     assert.deepStrictEqual(toolStartEvt.locations, [{ path: '/tmp/demo.txt' }], 'tool-start 事件应带 locations');
@@ -255,7 +252,7 @@ async function testProtocolAgentService() {
   await testProtocolAgentService();
   console.log('✓ protocol-agent.service 全链路测试通过');
   console.log('  - ide:* 事件形状与 1Shell AI 一致（legacy + 统一流）');
-  console.log('  - 审批挂起/应答与 ACP 选项映射');
+  console.log('  - 权限请求自动放行桥（审批模式固定 auto）与 ACP 选项映射');
   console.log('  - 会话持久化 (agent_id, cwd, native_session_id) 三元组');
   console.log('  - tool 事件 locations 透出 + 触碰文件收割进 files');
   console.log('  - 服务重启后 session/load 恢复并续写历史');
