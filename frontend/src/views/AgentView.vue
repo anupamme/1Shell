@@ -414,11 +414,18 @@ function toggleAgentDropdown(): void {
 function pickProtocolAgent(agentId: string): void {
   showAgentDropdown.value = false;
   const runtime = activeRuntime.value;
-  if (!runtime || !isProtocolAgentId(agentId) || agentId === runtime.agentId.value) return;
+  if (!runtime || agentId === runtime.agentId.value) return;
   if (runtime.ide.isRunning.value) {
     notify.info('当前回合仍在运行，请先停止后再切换 agent。');
     return;
   }
+  // 切回 1Shell AI：保留当前目标 VPS 选择，创建新 1Shell 会话（协议会话保留在 rail 里）
+  if (agentId === ONESHELL_AGENT_ID) {
+    const currentIds = runtime.workspaceHostIds.value;
+    onNewSession(currentIds.length ? currentIds : selectedWorkspaceHostIds.value, { agentId: ONESHELL_AGENT_ID });
+    return;
+  }
+  if (!isProtocolAgentId(agentId)) return;
   runtime.agentId.value = agentId;
   // effort 取值域随 agent 变化，切换后回到默认档
   updateProtocolSettings({ effort: '' });
@@ -2324,11 +2331,21 @@ function onSecretRefSubmit(secretRef: string): void {
                   :title="activeCwd ? `${activeAgentName} · ${activeCwd}` : activeAgentName"
                   @click="toggleAgentDropdown"
                 >
-                  <AppIcon name="robot" :size="13" class="text-sky-500 shrink-0" />
+                  <AppIcon :name="activeIsProtocolAgent ? 'robot' : 'sparkle'" :size="13" class="text-sky-500 shrink-0" />
                   <span class="truncate">{{ activeAgentName }}</span>
                   <AppIcon name="arrow-right" :size="11" class="rotate-90 opacity-70 shrink-0" />
                 </button>
                 <div v-if="showAgentDropdown" class="absolute bottom-full left-0 mb-2 w-48 bg-white dark:bg-[#161b2a] border border-slate-200 dark:border-white/[0.08] rounded-lg shadow-xl z-40 py-1 overflow-hidden">
+                  <button
+                    type="button"
+                    class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-center gap-2"
+                    :class="'oneshell' === activeAgentId ? 'bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
+                    @click="pickProtocolAgent(ONESHELL_AGENT_ID)"
+                  >
+                    <AppIcon name="sparkle" :size="12" class="shrink-0" :class="'oneshell' === activeAgentId ? 'text-sky-500' : 'text-slate-400'" />
+                    <span>1Shell AI</span>
+                  </button>
+                  <div class="h-px bg-slate-100 dark:bg-white/[0.06] mx-3"></div>
                   <button
                     v-for="agent in installedProtocolAgents"
                     :key="agent.id"
