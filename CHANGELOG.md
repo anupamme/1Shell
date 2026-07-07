@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.7.1 - 2026-07-08
+
+4.7.1 实现 1Shell AI 与第三方 agent（Claude Code / Codex）在同一会话内的无缝互切，并简化第三方 agent 的权限接入方式。
+
+- 会话内随时切换 agent：composer 的 agent 选择器对所有会话可见（含 1Shell AI 选项），切换即生效——切到第三方 agent 时自动补写会话日志并注入交接提示，agent 自行补读上下文；切回 1Shell AI 时后端交还会话（结束 CLI 进程、翻转会话归属），完整历史自动延续，无需新建对话。
+- 会话归属改为可变状态：消息按其携带的 agentId 双向分流；各 agent 的原生会话绑定（`--resume` / `thread/resume`）在切换间保留，切回原 agent 可继续其原生上下文；回合运行中拒绝切换并提示先停止。
+- 第三方 agent 时期的历史回传 1Shell AI 模型前做只读投影（外来工具调用块转文本、剥离附加字段），时间线与文件面板显示不受影响；两侧持久化互不覆盖对方字段（主机绑定、工作目录等）。
+- 第三方 agent 改为仅以完全访问权限接入：移除「每次询问」审批模式（真实环境下审批链路会拒绝 agent 的 MCP 工具调用导致任务中断）；权限请求由服务端自动放行。
+- 切换到第三方 agent 不再要求填写工作目录（1Shell 以 VPS 为维度，本地目录自动使用用户主目录）；目标 VPS 提示不再把本机（local）当作目标注入，且缺少 1Shell MCP 工具时不再中断当前回合。
+
+### Verification
+
+- `npm test`（34 个脚本，含新增 `test-agent-switch-routing.js` 路由编排 / 消息投影套件与协议服务交还-领养往返用例）
+- `npm --prefix frontend run build`
+- 真实 claude / codex CLI 冒烟（`scripts/test-agent-switch-real.js`：1Shell AI 历史 → claude 领养补课 → 交还 → codex 领养，上下文全程保留）
+- staged source secret/path scan before release
+
 ## 4.7.0 - 2026-07-05
 
 4.7.0 让第三方 agent（Claude Code / Codex）以结构化协议方式进入 Agent 板块，与 1Shell AI 共用同一套时间线，并为 Agent 板块加上 IDE 式文件面板。
