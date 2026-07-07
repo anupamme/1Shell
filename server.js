@@ -242,6 +242,7 @@ const protocolAgentCatalog = createProtocolAgentCatalog({
 const protocolAgentService = createProtocolAgentService({
   catalog: protocolAgentCatalog,
   ideSessionRepository,
+  dataDir,
   logger: log,
 });
 

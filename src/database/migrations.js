@@ -549,6 +549,21 @@ const migrations = [
       }
     },
   },
+  {
+    version: 17,
+    name: 'ide sessions: multi-agent bindings & settings',
+    up(db) {
+      // agent_bindings_json：agentId → { nativeSessionId, ctxSeq }。一个会话可
+      // 在多个协议 agent 之间切换，各自的原生会话与已见上下文水位在此登记。
+      if (!columnExists(db, 'ide_sessions', 'agent_bindings_json')) {
+        db.exec("ALTER TABLE ide_sessions ADD COLUMN agent_bindings_json TEXT NOT NULL DEFAULT '{}'");
+      }
+      // agent_settings_json：{ approvalMode, effort, fast } 等协议会话运行设置。
+      if (!columnExists(db, 'ide_sessions', 'agent_settings_json')) {
+        db.exec("ALTER TABLE ide_sessions ADD COLUMN agent_settings_json TEXT NOT NULL DEFAULT '{}'");
+      }
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

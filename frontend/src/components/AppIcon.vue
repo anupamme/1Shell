@@ -105,6 +105,11 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M12 2C12.5 8 16 11.5 22 12C16 12.5 12.5 16 12 22C11.5 16 8 12.5 2 12C8 11.5 11.5 8 12 2Z" />
     </template>
 
+    <!-- 极速：闪电 -->
+    <template v-else-if="name === 'zap'">
+      <path d="M13 2L4.5 13.5H11l-1.5 8.5L19.5 10.5H13L13 2z" />
+    </template>
+
     <!-- 目标：靶心 -->
     <template v-else-if="name === 'target'">
       <circle cx="12" cy="12" r="9" />

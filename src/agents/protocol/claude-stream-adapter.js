@@ -21,6 +21,9 @@ function createClaudeStreamAgent({
   env = process.env,
   model = '',
   permissionMode = '',
+  // 思考程度（claude CLI ≥2.1 的 --effort low|medium|high|xhigh|max），
+  // CLI 参数在 spawn 时定死——变更由服务层杀进程重建（--resume 保留上下文）
+  effort = '',
   resumeSessionId = '',
   logger = console,
   // ({ toolName, input, suggestions }) => Promise<{ behavior:'allow'|'deny', updatedInput?, message? }>
@@ -34,6 +37,7 @@ function createClaudeStreamAgent({
   let nativeSessionId = resumeSessionId || '';
   let currentTurn = null; // { resolve, reject }
   let permissionPromptEnabled = true;
+  let effortEnabled = Boolean(effort);
   let stderrTail = '';
   const openToolInputs = new Map(); // tool_use_id -> { name, input }
 
@@ -52,6 +56,7 @@ function createClaudeStreamAgent({
     if (permissionPromptEnabled && onPermissionRequest) args.push('--permission-prompt-tool', 'stdio');
     if (permissionMode) args.push('--permission-mode', permissionMode);
     if (model) args.push('--model', model);
+    if (effortEnabled) args.push('--effort', effort);
     if (nativeSessionId) args.push('--resume', nativeSessionId);
     return args;
   }
@@ -79,6 +84,13 @@ function createClaudeStreamAgent({
 
     child.on('exit', (code, signal) => {
       exited = true;
+      // 老版本 CLI 不支持 --effort：先降级 effort 重启一次
+      if (code !== 0 && effortEnabled && /--effort|unknown option.*effort/i.test(stderrTail) && !currentTurn) {
+        effortEnabled = false;
+        logger.warn?.('[claude-stream] CLI 不支持 --effort，忽略思考程度设置');
+        start();
+        return;
+      }
       // 老版本 CLI 不支持 --permission-prompt-tool：降级重启一次
       if (code !== 0 && permissionPromptEnabled && /permission-prompt-tool|unknown option/i.test(stderrTail) && !currentTurn) {
         permissionPromptEnabled = false;

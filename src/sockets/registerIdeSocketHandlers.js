@@ -6,7 +6,7 @@ const { emitIdeEvent } = require('../ide/ide.events');
  * IDE Socket Handlers
  *
  * 事件（前端 → 后端）：
- *   ide:message   { sessionId, message, context?, agentId?, cwd? }
+ *   ide:message   { sessionId, message, context?, agentId?, cwd?, settings?, workspaceHostIds?, hosts? }
  *   ide:stop      { sessionId }
  *   ide:clear     { sessionId }
  *
@@ -59,6 +59,10 @@ function registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, 
           agentId,
           cwd: String(payload.cwd || '').trim(),
           attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+          // 协议会话运行设置与目标 VPS：composer 每条消息都带最新值
+          settings: payload.settings && typeof payload.settings === 'object' ? payload.settings : undefined,
+          workspaceHostIds: Array.isArray(payload.workspaceHostIds) ? payload.workspaceHostIds : undefined,
+          hosts: Array.isArray(payload.hosts) ? payload.hosts : undefined,
         })).catch((err) => {
           emitIdeEvent(socket, 'ide:error', { sessionId, error: err?.message || 'ide:message 处理失败' });
         });

@@ -136,7 +136,8 @@ async function testProtocolAgentService() {
     };
 
     assert.strictEqual(service.ownsSession(sessionId), false, '未创建前不应认领会话');
-    await service.handleMessage({ socket, sessionId, message: 'hi there', agentId: 'mock-acp', cwd: tmpDir });
+    // approvalMode=ask：默认 auto 会直接放行不出审批卡，这里显式走审批链路
+    await service.handleMessage({ socket, sessionId, message: 'hi there', agentId: 'mock-acp', cwd: tmpDir, settings: { approvalMode: 'ask' } });
 
     const legacy = emitted.filter((e) => e.event !== 'ide:event');
     const legacySeq = legacy.map((e) => e.event);

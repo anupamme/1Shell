@@ -5,6 +5,12 @@
 // turn/start / turn/interrupt、agentMessage 与 reasoning delta、commandExecution
 // item 生命周期（含 requestApproval 审批往返与 outputDelta）、tokenUsage、
 // 未知服务端请求的宽容处理。thread/resume 后首个回复带 [resumed] 前缀供断言。
+// 特殊触发词：
+//   showparams —— 回复 JSON：{ thread: thread/start|resume 参数, turn: 本回合
+//                 approvalPolicy/sandboxPolicy/effort/serviceTier }（策略传参断言）
+//   mcpperm    —— 发起 item/permissions/requestApproval，按响应回 granted/denied
+//   文本含 [会话交接] / [目标 VPS] —— 回复前缀 [handoff-seen] / [targets-seen]
+//                 （service 层的 prompt 注入断言）
 
 const readline = require('readline');
 
@@ -12,6 +18,7 @@ let resumed = false;
 let interrupted = false;
 let turnSeq = 0;
 let nextOutId = 9000;
+let lastThreadParams = null;
 const pendingOut = new Map();
 
 function send(msg) {
@@ -67,6 +74,57 @@ async function handleTurnStart(msg) {
     return;
   }
 
+  // 策略传参断言：把收到的 thread/turn 策略参数原样回给测试
+  if (text.includes('showparams')) {
+    const dump = JSON.stringify({
+      thread: lastThreadParams,
+      turn: {
+        approvalPolicy: msg.params?.approvalPolicy ?? null,
+        sandboxPolicy: msg.params?.sandboxPolicy ?? null,
+        effort: msg.params?.effort ?? null,
+        serviceTier: msg.params?.serviceTier ?? null,
+      },
+    });
+    notify('item/completed', { threadId, turnId, item: { type: 'agentMessage', id: `msg-p-${turnId}`, text: dump } });
+    notify('turn/completed', { threadId, turn: { id: turnId, items: [], status: 'completed', error: null } });
+    return;
+  }
+
+  // MCP 权限申请审批往返：响应形状与 command/file 审批不同（granted profile）
+  if (text.includes('mcpperm')) {
+    const requested = { network: { enabled: true } };
+    notify('item/started', { threadId, turnId, item: { type: 'mcpToolCall', id: 'mcp-1', server: '1shell', tool: 'host_exec' } });
+    let grant = null;
+    try {
+      grant = await request('item/permissions/requestApproval', {
+        threadId,
+        turnId,
+        itemId: 'mcp-1',
+        cwd: '/tmp',
+        permissions: requested,
+        reason: 'mcp needs network',
+        startedAtMs: Date.now(),
+      });
+    } catch {
+      grant = null;
+    }
+    const granted = Boolean(grant?.permissions?.network?.enabled);
+    notify('item/completed', {
+      threadId,
+      turnId,
+      item: {
+        type: 'mcpToolCall',
+        id: 'mcp-1',
+        server: '1shell',
+        tool: 'host_exec',
+        status: granted ? 'completed' : 'declined',
+        result: { content: [{ type: 'text', text: granted ? 'granted' : 'denied' }] },
+      },
+    });
+    notify('turn/completed', { threadId, turn: { id: turnId, items: [], status: 'completed', error: null } });
+    return;
+  }
+
   // 用户消息回显（适配器应忽略）
   notify('item/started', { threadId, turnId, item: { type: 'userMessage', id: 'um-1', content: [{ type: 'text', text }] } });
   notify('item/completed', { threadId, turnId, item: { type: 'userMessage', id: 'um-1', content: [{ type: 'text', text }] } });
@@ -76,8 +134,12 @@ async function handleTurnStart(msg) {
   notify('item/reasoning/textDelta', { threadId, turnId, itemId: 'rs-1', contentIndex: 0, delta: 'pondering' });
   notify('item/completed', { threadId, turnId, item: { type: 'reasoning', id: 'rs-1' } });
 
-  // 文本流 + 定稿
-  const greeting = resumed ? '[resumed] Hello codex.' : 'Hello codex.';
+  // 文本流 + 定稿（service 层注入的交接/目标提示以前缀标记回显，供断言）
+  const marks = [];
+  if (resumed) marks.push('[resumed]');
+  if (text.includes('[会话交接]')) marks.push('[handoff-seen]');
+  if (text.includes('[目标 VPS]')) marks.push('[targets-seen]');
+  const greeting = `${marks.join(' ')}${marks.length ? ' ' : ''}Hello codex.`;
   notify('item/started', { threadId, turnId, item: { type: 'agentMessage', id: 'msg-1', text: '', phase: 'final_answer' } });
   notify('item/agentMessage/delta', { threadId, turnId, itemId: 'msg-1', delta: greeting.slice(0, 6) });
   notify('item/agentMessage/delta', { threadId, turnId, itemId: 'msg-1', delta: greeting.slice(6) });
@@ -156,10 +218,12 @@ rl.on('line', (line) => {
       return;
     case 'thread/start':
       resumed = false;
+      lastThreadParams = msg.params || null;
       respond(msg.id, { thread: { id: THREAD_ID, sessionId: THREAD_ID, status: { type: 'idle' } }, model: 'mock-gpt' });
       return;
     case 'thread/resume':
       resumed = true;
+      lastThreadParams = msg.params || null;
       respond(msg.id, { thread: { id: msg.params?.threadId || THREAD_ID, status: { type: 'idle' } }, model: 'mock-gpt' });
       return;
     case 'turn/start':

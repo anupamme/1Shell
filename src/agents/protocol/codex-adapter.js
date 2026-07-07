@@ -10,7 +10,12 @@
 //        item/commandExecution/outputDelta、item/completed、
 //        thread/tokenUsage/updated、turn/completed、error
 //   审批（服务端请求）：item/commandExecution/requestApproval、
-//        item/fileChange/requestApproval → { decision: 'accept'|'decline' }
+//        item/fileChange/requestApproval → { decision: 'accept'|'decline' }；
+//        item/permissions/requestApproval（MCP 调用等触发的权限申请）→
+//        { permissions: <granted>, scope }。未接住的审批方法会被 codex 视为
+//        拒绝——4.7.0 里 MCP 调用审批就是这样被"拦截"的，务必宽接。
+//   权限策略：thread/start|resume 传 approvalPolicy + sandbox；turn/start 可
+//        逐回合覆盖 approvalPolicy / sandboxPolicy / effort / serviceTier / model。
 //   thread id 即原生会话 id，rollout 落盘 ~/.codex/sessions，可跨重启 resume。
 
 const { spawn } = require('child_process');
@@ -20,6 +25,23 @@ const { extractToolLocations } = require('./tool-locations');
 
 const CLIENT_INFO = { name: '1shell', title: '1Shell Agent', version: '4.7.0' };
 
+// 审批/沙箱策略组合：auto = mindfs 同款完全放行（approval never + 全量沙箱），
+// ask = codex 主动请求审批（on-request）+ 工作区写沙箱，审批卡交给前端。
+function approvalPlan(approvalMode) {
+  if (approvalMode === 'ask') {
+    return {
+      approvalPolicy: 'on-request',
+      sandboxMode: 'workspace-write',
+      sandboxPolicy: { type: 'workspaceWrite', networkAccess: true },
+    };
+  }
+  return {
+    approvalPolicy: 'never',
+    sandboxMode: 'danger-full-access',
+    sandboxPolicy: { type: 'dangerFullAccess' },
+  };
+}
+
 function createCodexAppServerAgent({
   binary = 'codex',
   args = ['app-server'],
@@ -28,6 +50,8 @@ function createCodexAppServerAgent({
   model = '',
   resumeThreadId = '',
   logger = console,
+  // () => { approvalMode:'auto'|'ask', effort:'', fast:false }：每回合取最新会话设置
+  sessionSettings = null,
   // ({ toolName, kind, input }) => Promise<{ behavior:'allow'|'deny', message? }>
   onPermissionRequest,
   onEvent,
@@ -116,20 +140,31 @@ function createCodexAppServerAgent({
 
   // ── 会话就绪（initialize + thread/start|resume）──────────────────
 
+  function currentSettings() {
+    try { return sessionSettings?.() || {}; } catch { return {}; }
+  }
+
   function ensureReady() {
     if (!readyPromise) {
       readyPromise = (async () => {
         await request('initialize', { clientInfo: CLIENT_INFO });
+        const plan = approvalPlan(currentSettings().approvalMode);
+        const startParams = {
+          cwd,
+          model: model || null,
+          approvalPolicy: plan.approvalPolicy,
+          sandbox: plan.sandboxMode,
+        };
         let started = null;
         if (resumeThreadId) {
           try {
-            started = await request('thread/resume', { threadId: resumeThreadId, cwd, model: model || null });
+            started = await request('thread/resume', { threadId: resumeThreadId, ...startParams });
           } catch (err) {
             logger.warn?.(`[codex] thread/resume 失败（${err.message}），改为新建会话`);
           }
         }
         if (!started) {
-          started = await request('thread/start', { cwd, model: model || null });
+          started = await request('thread/start', startParams);
         }
         threadId = started?.thread?.id || started?.thread?.sessionId || '';
         if (!threadId) throw new Error('codex thread/start 未返回 thread id');
@@ -182,6 +217,34 @@ function createCodexAppServerAgent({
         toolName: '文件修改',
         kind: 'edit',
         input: { reason: params.reason || '', grantRoot: params.grantRoot || '' },
+      });
+      respond(msg.id, { decision: decision.behavior === 'allow' ? 'accept' : 'decline' });
+      return;
+    }
+    // MCP 调用等触发的权限申请（文件系统/网络扩权）。响应形状与其余审批
+    // 不同：允许 = 原样授予申请的 profile（会话级），拒绝 = 空授予。
+    if (msg.method === 'item/permissions/requestApproval') {
+      const decision = await askPermission({
+        toolName: '权限申请',
+        kind: 'permissions',
+        input: { reason: params.reason || '', permissions: params.permissions || {} },
+      });
+      if (decision.behavior === 'allow') {
+        respond(msg.id, { permissions: params.permissions || {}, scope: 'session' });
+      } else {
+        respond(msg.id, { permissions: {} });
+      }
+      return;
+    }
+    // 未知审批方法兜底：宽接为一次审批（codex 对 error 响应按拒绝处理，
+    // 4.7.0 的 MCP 拦截问题就来自这里）。响应形状按 accept/decline 猜测，
+    // 若 codex 不认会在其侧报错，但不会静默卡死回合。
+    if (/requestApproval|Approval$/.test(msg.method)) {
+      logger.warn?.(`[codex] 未知审批方法 ${msg.method}，按通用审批处理`);
+      const decision = await askPermission({
+        toolName: msg.method,
+        kind: 'other',
+        input: params,
       });
       respond(msg.id, { decision: decision.behavior === 'allow' ? 'accept' : 'decline' });
       return;
@@ -382,9 +445,20 @@ function createCodexAppServerAgent({
     for (const att of attachments) {
       if (att?.path) content += `\n\n[附件] ${att.path}`;
     }
+    // 逐回合覆盖：审批/沙箱/思考程度/fast 档随会话设置即时生效，无需重启进程
+    const settings = currentSettings();
+    const plan = approvalPlan(settings.approvalMode);
+    const turnParams = {
+      threadId,
+      input: [{ type: 'text', text: content }],
+      approvalPolicy: plan.approvalPolicy,
+      sandboxPolicy: plan.sandboxPolicy,
+      effort: String(settings.effort || '').trim() || null,
+      serviceTier: settings.fast ? 'fast' : null,
+    };
     return new Promise((resolve, reject) => {
       currentTurn = { resolve, reject, turnId: '', usage: null, lastError: '' };
-      request('turn/start', { threadId, input: [{ type: 'text', text: content }] })
+      request('turn/start', turnParams)
         .then((result) => {
           if (currentTurn) currentTurn.turnId = result?.turn?.id || '';
         })

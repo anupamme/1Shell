@@ -3732,6 +3732,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       messageCount: record.messageCount,
       agentId: record.agentId || 'oneshell',
       cwd: record.cwd || '',
+      settings: record.agentSettings && typeof record.agentSettings === 'object' ? record.agentSettings : {},
       files: Array.isArray(record.files) ? record.files : [],
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
