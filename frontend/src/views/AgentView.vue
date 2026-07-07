@@ -419,30 +419,17 @@ function pickProtocolAgent(agentId: string): void {
     notify.info('当前回合仍在运行，请先停止后再切换 agent。');
     return;
   }
-  // 切回 1Shell AI：保留当前目标 VPS，创建新 1Shell 会话；旧会话留在左侧栏
+  // 切回 1Shell AI：保留当前目标 VPS 选择，创建新 1Shell 会话（协议会话保留在 rail 里）
   if (agentId === ONESHELL_AGENT_ID) {
     const currentIds = runtime.workspaceHostIds.value;
     onNewSession(currentIds.length ? currentIds : selectedWorkspaceHostIds.value, { agentId: ONESHELL_AGENT_ID });
-    notify.info('已切换为 1Shell AI（新会话）。旧协议会话保留在左侧 Agent 栏。');
     return;
   }
-  // 从 1Shell AI 切到协议 agent：同理创建新协议会话，旧 1Shell 会话留在左侧栏
   if (!isProtocolAgentId(agentId)) return;
-  // 若当前已在 1Shell AI 会话里（非协议会话），打开新建会话弹窗让用户选 cwd
-  if (!activeIsProtocolAgent.value) {
-    newSessionAgentDraft.value = agentId;
-    newSessionHostDraft.value = runtime.workspaceHostIds.value;
-    newSessionCwdDraft.value = '';
-    void loadProtocolAgents();
-    newSessionModalOpen.value = true;
-    notify.info('选择协议 agent 需指定工作目录。旧 1Shell AI 会话保留在左侧栏。');
-    return;
-  }
-  const previousName = agentNameFor(runtime.agentId.value);
   runtime.agentId.value = agentId;
   // effort 取值域随 agent 变化，切换后回到默认档
   updateProtocolSettings({ effort: '' });
-  notify.info(`已切换为 ${agentNameFor(agentId)}。旧 ${previousName} 会话保留在左侧栏。`, 4000);
+  notify.info(`已切换为 ${agentNameFor(agentId)}，下一条消息起由它接管（会自动补读会话上下文）。`);
 }
 
 function pickProtocolEffort(effort: string): void {
@@ -2447,42 +2434,6 @@ function onSecretRefSubmit(secretRef: string): void {
             </template>
 
             <template v-else>
-            <!-- agent 切换（1Shell AI ↔ protocol agent，两边都可互切） -->
-            <div class="relative">
-              <button
-                type="button"
-                class="h-8 max-w-[180px] px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.03] text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5 cursor-pointer hover:border-sky-300 dark:hover:border-sky-400/30 transition-colors"
-                title="切换 agent"
-                @click="toggleAgentDropdown"
-              >
-                <AppIcon name="sparkle" :size="13" class="text-sky-500 shrink-0" />
-                <span class="truncate">1Shell AI</span>
-                <AppIcon name="arrow-right" :size="11" class="rotate-90 opacity-70 shrink-0" />
-              </button>
-              <div v-if="showAgentDropdown" class="absolute bottom-full left-0 mb-2 w-48 bg-white dark:bg-[#161b2a] border border-slate-200 dark:border-white/[0.08] rounded-lg shadow-xl z-40 py-1 overflow-hidden">
-                <button
-                  type="button"
-                  class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-center gap-2 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300"
-                  @click="showAgentDropdown = false"
-                >
-                  <AppIcon name="sparkle" :size="12" class="shrink-0 text-sky-500" />
-                  <span>1Shell AI</span>
-                </button>
-                <div class="h-px bg-slate-100 dark:bg-white/[0.06] mx-3"></div>
-                <button
-                  v-for="agent in installedProtocolAgents"
-                  :key="agent.id"
-                  type="button"
-                  class="w-full text-left px-3 py-2 text-xs transition-colors cursor-pointer flex items-center gap-2 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/[0.04]"
-                  @click="pickProtocolAgent(agent.id)"
-                >
-                  <AppIcon name="robot" :size="12" class="shrink-0 text-slate-400" />
-                  <span class="truncate">{{ agent.name }}</span>
-                </button>
-                <div v-if="!installedProtocolAgents.length" class="px-3 py-2 text-xs text-slate-400 dark:text-slate-600">未检测到已安装的 agent</div>
-              </div>
-            </div>
-
             <button
               type="button"
               class="shrink-0 h-8 px-2.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors disabled:cursor-not-allowed disabled:opacity-50"
