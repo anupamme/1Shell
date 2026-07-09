@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// FileBrowserPanel.vue — MainConsole 刀 3 阶段 2 · 文件浏览器面板
+// FileBrowserPanel.vue — 文件浏览器面板
 // 1:1 复刻 [public/file-browser.js](public/file-browser.js) + [public/index.html](public/index.html) #file-tree
-// 占左栏 aside 内 flex:5 块 (HostListSidebar 之下),自身容器内滚动,不外溢
+// 自身容器内滚动,不外溢
 import { computed, onBeforeUnmount, onMounted, toRef } from 'vue';
 
 import AppIcon from '@/components/AppIcon.vue';

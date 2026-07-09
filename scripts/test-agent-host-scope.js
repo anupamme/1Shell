@@ -97,11 +97,8 @@ assert.ok(agentViewSource.includes("allowedHosts: ['*']"), 'Agent page should ex
 assert.ok(agentViewSource.includes('allowedHosts: ids'), 'Agent page should lock policy to the selected workspace hosts');
 assert.ok(agentViewSource.includes('workspaceHostIds:'), 'Agent page should carry workspaceHostIds in session context');
 
-const idePanelSource = fs.readFileSync(path.join(root, 'frontend/src/components/main/IdePanel.vue'), 'utf8');
-assert.ok(idePanelSource.includes("source: 'agent_workspace'"), 'Main IDE panel should send workspace policy for the active terminal host');
-
 const railSource = fs.readFileSync(path.join(root, 'frontend/src/components/AgentSessionRail.vue'), 'utf8');
-assert.ok(railSource.includes('chatGroups'), 'Agent history rail should group sessions by workspace');
-assert.ok(railSource.includes('workspaceLabel'), 'Agent history rail should label workspace groups');
+assert.ok(railSource.includes('hostGroups'), 'Agent history rail should group sessions by host workspace');
+assert.ok(railSource.includes("'__global__'"), 'Agent history rail should keep a global group for host-less sessions');
 
 console.log('agent host scope tests passed');

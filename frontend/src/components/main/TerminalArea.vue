@@ -4,7 +4,6 @@
 // 结构（自上而下）：terminal-tabs → 状态栏 → SuggestionBox → CmdInlinePanel → terminal-main（含 terminal-hint / terminal-container / Ghost / fab）
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 
-import AppIcon from '@/components/AppIcon.vue';
 import AnalyzeFab from '@/components/main/AnalyzeFab.vue';
 import AnalyzePanel from '@/components/main/AnalyzePanel.vue';
 import CmdInlinePanel from '@/components/main/CmdInlinePanel.vue';
@@ -26,16 +25,12 @@ const props = defineProps<{
   memory: string;
   load: string;
   disk: string;
-  sidebarCollapsed?: boolean;
-  aiPanelCollapsed?: boolean;
 }>();
 
 const emit = defineEmits<{
   'host-change': [hostId: string];
   'host-close': [hostId: string];
   'fullscreen-toggle': [value: boolean];
-  'toggle-sidebar': [];
-  'toggle-ai-panel': [];
 }>();
 
 const hosts = useHostsStore();
@@ -49,7 +44,6 @@ const terminalEl = ref<HTMLElement | null>(null);
 const isFullscreen = ref(false);
 const showSuggestionBox = ref(true);
 
-const statusDotClass = computed(() => sessionTerminal.statusKind.value);
 const sessionsList = computed(() => [...sessionTerminal.sessions.value.values()].filter((s) => s.status !== 'closed'));
 
 function tabName(session: SessionInfo): string {
@@ -104,7 +98,7 @@ function refitTerminalSoon(): void {
 }
 
 watch(
-  () => [props.sidebarCollapsed, props.aiPanelCollapsed, isFullscreen.value],
+  () => isFullscreen.value,
   () => refitTerminalSoon(),
   { flush: 'post' },
 );
@@ -137,62 +131,33 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="terminal-area" :class="{ fullscreen: isFullscreen }">
-    <!-- 终端 tabs（老 index.html row 329-336 + layout.js renderTabs） -->
+    <!-- 单行工具条：左=会话 tabs+连接状态 / 中=主机简况 / 右=操作 -->
     <div id="terminal-tabs" class="terminal-tabs">
-      <button
-        type="button"
-        class="terminal-rail-toggle terminal-rail-toggle--left"
-        :title="props.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏'"
-        :aria-label="props.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏'"
-        @click="emit('toggle-sidebar')"
-      >
-        <AppIcon name="arrow-right" :size="14" :class="props.sidebarCollapsed ? '' : 'rotate-180'" />
-        <span class="terminal-rail-toggle-label">左栏</span>
-      </button>
-      <div class="terminal-tab-strip">
-        <div
-          v-for="session in sessionsList"
-          :key="session.id"
-          :data-tab-host="session.hostId"
-          class="terminal-tab"
-          :class="{ active: session.id === sessionTerminal.activeSessionId.value }"
-          @click="switchSession(session)"
-        >
-          <span class="terminal-tab-status" :class="`status-${session.status}`"></span>
-          <span class="terminal-tab-name">{{ tabName(session) }}</span>
-          <span class="terminal-tab-meta">{{ tabMeta(session) }}</span>
-          <button
-            type="button"
-            class="terminal-tab-close"
-            :data-tab-close="session.hostId"
-            @click="closeSession(session, $event)"
-          >×</button>
+      <div class="terminal-tabs-left">
+        <div class="terminal-tab-strip">
+          <div
+            v-for="session in sessionsList"
+            :key="session.id"
+            :data-tab-host="session.hostId"
+            class="terminal-tab"
+            :class="{ active: session.id === sessionTerminal.activeSessionId.value }"
+            @click="switchSession(session)"
+          >
+            <span class="terminal-tab-status" :class="`status-${session.status}`"></span>
+            <span class="terminal-tab-name">{{ tabName(session) }}</span>
+            <span class="terminal-tab-meta">{{ tabMeta(session) }}</span>
+            <button
+              type="button"
+              class="terminal-tab-close"
+              :data-tab-close="session.hostId"
+              @click="closeSession(session, $event)"
+            >×</button>
+          </div>
         </div>
-        <!-- "+ 新终端"：第 16 节决策 A，dead button 不绑 handler（仅渲染） -->
-        <button class="terminal-tab-add" type="button">+ 新终端</button>
-      </div>
-      <button
-        type="button"
-        class="terminal-rail-toggle terminal-rail-toggle--right"
-        :title="props.aiPanelCollapsed ? '展开 AI 面板' : '收起 AI 面板'"
-        :aria-label="props.aiPanelCollapsed ? '展开 AI 面板' : '收起 AI 面板'"
-        @click="emit('toggle-ai-panel')"
-      >
-        <AppIcon name="arrow-right" :size="14" :class="props.aiPanelCollapsed ? 'rotate-180' : ''" />
-        <span class="terminal-rail-toggle-label">AI栏</span>
-      </button>
-    </div>
-
-    <!-- 状态栏（老 index.html row 339-354） -->
-    <div class="terminal-toolbar">
-      <div class="terminal-status-wrap">
-        <span id="session-status-dot" class="status-dot" :class="statusDotClass"></span>
-        <span id="session-status-text" class="terminal-status-text">{{ sessionTerminal.statusText.value }}</span>
-        <span
-          id="terminal-inline-preview"
-          class="terminal-inline-preview"
-          :class="{ hidden: !terminalAi.inlinePreviewText.value }"
-        >{{ terminalAi.inlinePreviewText.value }}</span>
+        <div class="terminal-status-mini" :title="sessionTerminal.statusText.value">
+          <span class="status-dot" :class="sessionTerminal.statusKind.value"></span>
+          <span class="terminal-status-mini-text">{{ sessionTerminal.statusText.value }}</span>
+        </div>
       </div>
       <div class="terminal-probe-strip" aria-label="主机简况">
         <span class="terminal-probe-host">{{ props.hostName }}</span>
@@ -200,10 +165,10 @@ onBeforeUnmount(() => {
         <span>CPU <b>{{ props.cpu }}</b></span>
         <span class="terminal-probe-sep"></span>
         <span>内存 <b>{{ props.memory }}</b></span>
-        <span class="terminal-probe-sep"></span>
-        <span>负载 <b>{{ props.load }}</b></span>
-        <span class="terminal-probe-sep"></span>
-        <span>硬盘 <b>{{ props.disk }}</b></span>
+        <span class="terminal-probe-extra terminal-probe-sep"></span>
+        <span class="terminal-probe-extra">负载 <b>{{ props.load }}</b></span>
+        <span class="terminal-probe-extra terminal-probe-sep"></span>
+        <span class="terminal-probe-extra">硬盘 <b>{{ props.disk }}</b></span>
       </div>
       <div class="terminal-actions">
         <button

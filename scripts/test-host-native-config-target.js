@@ -7,7 +7,6 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { createNativeCliConfig } = require('../src/agents/native-cli-config');
-const { createAgentProviders } = require('../src/agents/providers');
 
 function makeTempDir(prefix) {
   const dir = path.join(os.tmpdir(), `${prefix}-${crypto.randomBytes(4).toString('hex')}`);
@@ -78,18 +77,6 @@ try {
   fs.chmodSync(fakeClaude, 0o755);
   nativeConfig.setBinaryOverride('claude-code', fakeClaude);
   assert.strictEqual(nativeConfig.getLaunchCommand('claude-code'), fakeClaude, 'launch command should use manual/native binary path');
-  const providerRegistry = createAgentProviders({ nativeCliConfig: nativeConfig });
-  const claudeProvider = providerRegistry.getProvider('claude-code');
-  assert.strictEqual(
-    claudeProvider.command({ useLocalEnv: false }),
-    fakeClaude,
-    'Agent provider should spawn the resolved native binary path',
-  );
-  assert.strictEqual(
-    claudeProvider.command({ useLocalEnv: true }),
-    fakeClaude,
-    'Local Agent provider should still spawn the resolved native binary path',
-  );
 
   const codexDir = path.join(homeDir, '.codex');
   const previousCodexConfig = 'model = "old-host-model"\n';

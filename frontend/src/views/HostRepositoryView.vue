@@ -771,7 +771,7 @@ async function onRepositoryHostDrop(event: DragEvent, targetHost: RepositoryHost
 }
 
 function openConsole(host: RepositoryHost): void {
-  router.push({ path: '/console', query: { host: host.id } });
+  router.push({ path: '/agent', query: { host: host.id } });
 }
 
 function openProbe(host?: RepositoryHost): void {

@@ -1,13 +1,20 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Ref } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Ref } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import AppIcon from '@/components/AppIcon.vue';
 import HostListToolResult from '@/components/ide/HostListToolResult.vue';
 import ProbeListToolResult from '@/components/ide/ProbeListToolResult.vue';
 import IdeApprovalCard from '@/components/ide/IdeApprovalCard.vue';
 import AgentSessionRail from '@/components/AgentSessionRail.vue';
+import TerminalArea from '@/components/main/TerminalArea.vue';
+import HostModal from '@/components/main/HostModal.vue';
+import AnalyzeContextMenu from '@/components/main/AnalyzeContextMenu.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
+import { useSessionTerminal } from '@/composables/useSessionTerminal';
+import { useTopbarProbe } from '@/composables/useTopbarProbe';
+import { readStorageState, writeStorageState } from '@/composables/usePageState';
+import { useHostsStore } from '@/stores/hosts';
 import { useIdeChat, type IdeApprovalMode, type IdeTimelineItem, type IdeChatApi, type IdeChatMessage, type IdeThinkingTimelineItem, type IdeToolTimelineItem, type IdeSystemTimelineItem, type IdeRewindPoint, type IdeFileLocation } from '@/composables/useIdeChat';
 import { useNotifyStore } from '@/stores/notify';
 import {
@@ -20,11 +27,12 @@ import {
   type AgentGoalCommand,
 } from '@/utils/agentGoal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
+import type { MainHost, HostFormPayload, HostLink } from '@/utils/mainConsole';
 import { renderMarkdown, streamingPlainText } from '@/utils/markdown';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 import { parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlashCommand } from '@/utils/agentSlashCommands';
-import type { HostInfo, HostsListResponse } from '@/utils/scripts';
+import type { HostInfo } from '@/utils/scripts';
 
 // 异步加载：CodeMirror 体积大，只在真正打开文件面板时拉取
 const AgentFilePanel = defineAsyncComponent(() => import('@/components/ide/AgentFilePanel.vue'));
@@ -180,7 +188,10 @@ const route = useRoute();
 const router = useRouter();
 
 const scrollEl = ref<HTMLElement | null>(null);
-const hosts = ref<HostInfo[]>([]);
+const shellEl = ref<HTMLElement | null>(null);
+const hostsStore = useHostsStore();
+// AgentView 老代码消费 HostInfo 形状（id/name/host），从 hosts store 投影
+const hosts = computed<HostInfo[]>(() => hostsStore.items.map((h: MainHost) => ({ id: h.id, name: h.name, host: h.host })));
 const providers = ref<AgentProvider[]>([]);
 const protocolAgents = ref<ProtocolAgentInfo[]>([]);
 const activeProviderId = ref<string | null>(null);
@@ -226,6 +237,160 @@ const fileFocus = ref<FileFocus | null>(null);
 // 右栏文件面板（M3 IDE 壳）：桌面端点击工具卡文件 chip 打开
 const filePanelFile = ref<IdeFileLocation | null>(null);
 let lastToolFocusKey = '';
+
+// ── 工作模式：Agent 对话 / 终端（同一主区切换，composer 常驻共用，Warp 式命令输入）──
+type WorkMode = 'agent' | 'terminal';
+const WORKMODE_KEY = '1shell.agent.workmode.v1';
+
+const sessionTerminal = useSessionTerminal();
+const termHostId = sessionTerminal.activeHostId;
+const probe = useTopbarProbe(termHostId);
+
+const storedWorkMode = readStorageState<{ mode?: WorkMode }>(WORKMODE_KEY, { mode: 'agent' });
+const workMode = ref<WorkMode>(storedWorkMode.mode === 'terminal' ? 'terminal' : 'agent');
+const isTerminalMode = computed(() => workMode.value === 'terminal');
+// 终端全屏 = 主区（终端+输入条）整体 fixed 铺满窗口
+const terminalFullscreen = ref(false);
+// 终端惰性启动：首次切到终端模式才建 xterm / 连 PTY 会话
+const terminalStarted = ref(false);
+
+function refitTerminalSoon(): void {
+  setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
+}
+
+function ensureTerminalStarted(): void {
+  if (terminalStarted.value) return;
+  terminalStarted.value = true;
+  // 共享 socket 已就绪时直接进默认会话（activeHostId 决定连谁）
+  sessionTerminal.connectSocket();
+}
+
+function setWorkMode(mode: WorkMode): void {
+  if (workMode.value === mode) return;
+  workMode.value = mode;
+  slashSubView.value = null;
+  if (mode === 'terminal') ensureTerminalStarted();
+  else terminalFullscreen.value = false;
+  writeStorageState(WORKMODE_KEY, { mode });
+  refitTerminalSoon();
+  void nextTick(() => composerInputEl.value?.focus());
+}
+
+function onTerminalFullscreen(value: boolean): void {
+  terminalFullscreen.value = value;
+  refitTerminalSoon();
+}
+
+// Warp 式：终端模式下，底部输入框即命令行（也可直接点击 xterm 输入）
+function sendToTerminal(): void {
+  const raw = composerInput.value;
+  if (!raw.trim()) return;
+  const ok = sessionTerminal.sendSessionInput(raw.replace(/\r?\n/g, '\r') + '\r');
+  if (!ok) {
+    notify.error('终端未连接，请稍候或重新选择主机');
+    return;
+  }
+  composerInput.value = '';
+}
+
+// ── 主机管理（合并自原 /terminal 页左栏）──
+const hostModalOpen = ref(false);
+const hostEditing = ref<MainHost | null>(null);
+const hostModalRef = ref<InstanceType<typeof HostModal> | null>(null);
+const sshHosts = computed(() => hostsStore.items.filter((h: MainHost) => h.type === 'ssh' || h.id !== LOCAL_HOST_ID));
+
+function openAddHost(): void {
+  hostEditing.value = null;
+  hostModalOpen.value = true;
+}
+
+function onHostEdit(hostId: string): void {
+  const h = hostsStore.hostMap.get(hostId);
+  if (!h) return;
+  hostEditing.value = h;
+  hostModalOpen.value = true;
+}
+
+async function onHostDelete(hostId: string): Promise<void> {
+  const h = hostsStore.hostMap.get(hostId);
+  if (!h) return;
+  const ok = await confirm({ title: '删除主机', message: `确认删除主机"${h.name}"吗？`, okText: '删除' });
+  if (!ok) return;
+  try {
+    await requestJson(`/api/hosts/${encodeURIComponent(hostId)}`, { method: 'DELETE' });
+    if (termHostId.value === hostId) {
+      sessionTerminal.closeHostSession(hostId);
+      termHostId.value = LOCAL_HOST_ID;
+    }
+    await loadHosts();
+    notify.success('主机已删除');
+  } catch (err) {
+    notify.error((err as Error).message);
+  }
+}
+
+async function onHostSubmit(
+  payload: HostFormPayload | { isLocal: true; name: string; links: HostLink[] },
+  hostId: string | null
+): Promise<void> {
+  try {
+    if ('isLocal' in payload && payload.isLocal) {
+      await requestJson('/api/hosts/local-config', {
+        method: 'PUT',
+        body: JSON.stringify({ name: payload.name, links: payload.links }),
+      });
+    } else if (hostId) {
+      await requestJson(`/api/hosts/${encodeURIComponent(hostId)}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+    } else {
+      await requestJson('/api/hosts', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    }
+    await loadHosts();
+    hostModalOpen.value = false;
+    notify.success(hostId === LOCAL_HOST_ID ? '本机配置已更新' : (hostId ? '主机已更新' : '主机已添加'));
+  } catch (err) {
+    hostModalRef.value?.setError((err as Error).message);
+  }
+}
+
+function onHostConnect(hostId: string): void {
+  hostsStore.select(hostId);
+  termHostId.value = hostId;
+  // 记住最近连接主机，供主页"最近主机"卡使用
+  if (hostId && hostId !== LOCAL_HOST_ID) {
+    try { localStorage.setItem('1shell-last-host', hostId); } catch { /* ignore */ }
+  }
+  const firstStart = !terminalStarted.value;
+  setWorkMode('terminal');
+  if (firstStart) {
+    // 首次启动：connectSocket 的默认会话逻辑会连 activeHostId（setWorkMode 同模式重入时不触发,这里兜底）
+    ensureTerminalStarted();
+    return;
+  }
+  sessionTerminal.connectToHost(hostId, false).catch((err) => {
+    notify.error((err as Error).message || '连接主机失败');
+  });
+}
+
+// ?host=<id>（来自地图主页/面板「立即连接」）→ 选中主机 + 切到终端模式
+function activateQueryHost(): void {
+  const queryHost = typeof route.query.host === 'string' ? route.query.host : null;
+  if (!queryHost || !hostsStore.hostMap.has(queryHost)) return;
+  if (termHostId.value === queryHost && isTerminalMode.value && terminalStarted.value) return;
+  onHostConnect(queryHost);
+}
+
+// rail 主机卡片「新对话」：在该主机（或全局）上开新 Agent 会话
+function onHostNewSession(key: string): void {
+  const ids = key && key !== '__global__' ? [key] : [];
+  setWorkMode('agent');
+  onNewSession(ids);
+}
 
 type AttachmentKind = 'image' | 'text' | 'document' | 'file';
 
@@ -497,12 +662,14 @@ function modelOptionMeta(option: AgentModelOption): string {
 
 const isGoalComposerMode = computed(() => composerMode.value === 'goal');
 const composerPlaceholder = computed(() => {
+  if (isTerminalMode.value) return '输入命令，Enter 发送到终端；Shift + Enter 换行…';
   return isGoalComposerMode.value
     ? '1Shell 应继续朝哪个目标努力？'
     : '输入目标、命令，或直接粘贴图片/文件后发送…';
 });
 
 const slashCmds = computed<AgentSlashCommand[]>(() => {
+  if (isTerminalMode.value) return [];
   if (isGoalComposerMode.value) return [];
   if (slashSubView.value) return [];
   return filterAgentSlashCommands(composerInput.value, SLASH_COMMANDS);
@@ -1105,6 +1272,8 @@ const modeBadge = computed(() => {
 const hasTimeline = computed(() => ide.timeline.value.length > 0);
 const isBusy = computed(() => ide.isRunning.value);
 const canSubmitComposer = computed(() => {
+  // 终端模式：agent 忙不影响发命令
+  if (isTerminalMode.value) return Boolean(composerInput.value.trim());
   if (isBusy.value) return false;
   if (isGoalComposerMode.value) return Boolean(composerInput.value.trim());
   return Boolean(composerInput.value.trim() || composerAttachments.value.length);
@@ -1401,11 +1570,21 @@ watch(() => [route.query.taskAuthoring, route.query.taskIntent], () => {
 onMounted(() => {
   syncRailLayout();
   window.addEventListener('resize', syncRailLayout);
-  void loadHosts();
+  void loadHosts().then(() => {
+    activateQueryHost();
+    // 上次离开时是终端模式 → 恢复连接
+    if (workMode.value === 'terminal') ensureTerminalStarted();
+  });
   void loadProviders();
   void loadProtocolAgents();
   void loadSessions();
   consumeTaskAuthoringRoute();
+});
+onActivated(() => {
+  void loadHosts().then(() => activateQueryHost());
+});
+watch(() => route.query.host, () => {
+  activateQueryHost();
 });
 onBeforeUnmount(() => {
   window.removeEventListener('resize', syncRailLayout);
@@ -1413,10 +1592,19 @@ onBeforeUnmount(() => {
   runtimes.value = [];
 });
 
+interface ConsoleHostsResponse {
+  hosts?: MainHost[];
+  warnings?: { usingFallbackSecret?: boolean };
+}
+
 async function loadHosts(): Promise<void> {
   try {
-    const resp = await requestJson<HostsListResponse>('/api/hosts');
-    hosts.value = Array.isArray(resp.hosts) ? resp.hosts : [];
+    const data = await requestJson<ConsoleHostsResponse>('/api/hosts/console');
+    hostsStore.setHosts(data.hosts || []);
+    hostsStore.setSecretWarning(Boolean(data.warnings?.usingFallbackSecret));
+    if (!hostsStore.hostMap.has(termHostId.value)) {
+      termHostId.value = LOCAL_HOST_ID;
+    }
   } catch { /* ignore */ }
 }
 
@@ -1591,6 +1779,7 @@ function filesFromClipboard(event: ClipboardEvent): File[] {
 }
 
 async function onComposerPaste(event: ClipboardEvent): Promise<void> {
+  if (isTerminalMode.value) return; // 终端模式：按普通文本粘贴，不收附件
   const files = filesFromClipboard(event);
   if (!files.length) return;
   event.preventDefault();
@@ -1633,6 +1822,10 @@ function attachmentPayload(): Record<string, unknown>[] {
 }
 
 function send(): void {
+  if (isTerminalMode.value) {
+    sendToTerminal();
+    return;
+  }
   const t = composerInput.value.trim();
   if (isBusy.value) return;
   if (isGoalComposerMode.value) {
@@ -1847,6 +2040,13 @@ function onRewindModalKeydown(event: KeyboardEvent): void {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (isTerminalMode.value) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendToTerminal();
+    }
+    return;
+  }
   if (isGoalComposerMode.value) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -1891,7 +2091,8 @@ function onSecretRefSubmit(secretRef: string): void {
 
 <template>
   <div
-    class="agent-view-shell flex h-full bg-[#f7f8fb] dark:bg-[#090d15] text-slate-800 dark:text-slate-200 transition-colors"
+    ref="shellEl"
+    class="agent-view-shell flex h-full p-2 text-slate-800 dark:text-slate-200 transition-colors"
     :class="{ 'agent-view-shell--mobile-rail': mobileRailLayout, 'agent-view-shell--rail-open': !railCollapsed }"
   >
     <button
@@ -1903,7 +2104,7 @@ function onSecretRefSubmit(secretRef: string): void {
     ></button>
     <AgentSessionRail
       v-if="!railCollapsed"
-      class="agent-view-rail"
+      class="agent-view-rail agent-view-panel"
       :sessions="railSessions"
       :active-id="ide.currentSessionId.value"
       :loading="sessionsLoading"
@@ -1911,6 +2112,9 @@ function onSecretRefSubmit(secretRef: string): void {
       :hosts="hosts"
       :selected-host-id="selectedHostId"
       :file-focus="fileFocus"
+      :console-hosts="hostsStore.items"
+      :active-console-host-id="termHostId"
+      :secret-warning="hostsStore.secretWarning"
       @select="onRailSelectSession"
       @new-session="onRailNewSession"
       @new-session-at="onRailNewSessionAt"
@@ -1918,10 +2122,15 @@ function onSecretRefSubmit(secretRef: string): void {
       @copy="onCopySession"
       @delete="onDeleteSession"
       @select-host="onRailSelectHost"
+      @host-connect="onHostConnect"
+      @host-edit="onHostEdit"
+      @host-delete="onHostDelete"
+      @host-add="openAddHost"
+      @host-new-session="onHostNewSession"
     />
-    <div class="agent-view-main flex flex-col flex-1 min-w-0 min-h-0 h-full">
-    <!-- ── status bar ── -->
-    <header class="agent-view-header shrink-0 flex items-center gap-3 px-6 h-12 border-b border-slate-200/80 dark:border-white/[0.06] bg-white/90 dark:bg-[#0d111b]/95 select-none">
+    <div class="agent-view-main agent-view-panel flex flex-col flex-1 min-w-0 min-h-0 h-full" :class="{ 'agent-view-main--fullscreen': isTerminalMode && terminalFullscreen }">
+    <!-- ── status bar（对话专属；终端模式下隐藏省空间） ── -->
+    <header v-if="!isTerminalMode" class="agent-view-header shrink-0 flex items-center gap-3 px-6 h-12 border-b border-slate-200/80 dark:border-white/[0.06] bg-white/90 dark:bg-[#0d111b]/95 select-none">
       <button
         type="button"
         class="agent-view-rail-toggle"
@@ -1979,7 +2188,7 @@ function onSecretRefSubmit(secretRef: string): void {
     <!-- ── body ── -->
     <div class="agent-view-body flex-1 flex min-h-0 overflow-hidden">
       <!-- timeline -->
-      <div ref="scrollEl" class="flex-1 overflow-y-auto overflow-x-hidden" @scroll="onScroll">
+      <div v-show="!isTerminalMode" ref="scrollEl" class="flex-1 overflow-y-auto overflow-x-hidden" @scroll="onScroll">
         <!-- empty state -->
         <div v-if="!hasTimeline" class="flex flex-col items-center justify-center min-h-full py-16 px-6 text-center">
           <div class="w-14 h-14 rounded-2xl bg-white dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.08] shadow-sm flex items-center justify-center mb-5">
@@ -2117,9 +2326,22 @@ function onSecretRefSubmit(secretRef: string): void {
         </div>
       </div>
 
+      <!-- 终端（与时间线同一主区，composer 开关切换；首次进入终端模式才挂载） -->
+      <div v-if="terminalStarted" v-show="isTerminalMode" class="flex-1 min-w-0 min-h-0 flex flex-col">
+        <TerminalArea
+          :host-name="probe.displayName.value"
+          :cpu="probe.cpuText.value"
+          :memory="probe.memoryText.value"
+          :load="probe.loadText.value"
+          :disk="probe.diskText.value"
+          @host-change="onHostConnect"
+          @fullscreen-toggle="onTerminalFullscreen"
+        />
+      </div>
+
       <!-- file panel (M3 IDE 壳右栏；审批面板打开时隐藏但保留编辑状态) -->
       <AgentFilePanel
-        v-if="filePanelFile && !mobileRailLayout"
+        v-if="filePanelFile && !mobileRailLayout && !isTerminalMode"
         v-show="!ide.approveRequest.value"
         class="w-[420px] shrink-0 min-h-0 h-full border-l border-slate-200 dark:border-white/[0.06]"
         :path="filePanelFile.path"
@@ -2249,7 +2471,7 @@ function onSecretRefSubmit(secretRef: string): void {
         </div>
       </div>
 
-      <div class="max-w-[1020px] mx-auto px-6 py-3">
+      <div :class="isTerminalMode ? 'px-4 py-2' : 'max-w-[1020px] mx-auto px-6 py-3'">
         <input
           ref="attachmentInput"
           type="file"
@@ -2305,13 +2527,39 @@ function onSecretRefSubmit(secretRef: string): void {
           <textarea
             ref="composerInputEl"
             v-model="composerInput"
-            class="w-full min-h-[56px] max-h-[180px] px-2 py-1.5 text-sm leading-6 text-slate-700 dark:text-slate-200 bg-transparent border-0 resize-none focus:outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
+            class="w-full max-h-[180px] px-2 py-1.5 text-sm leading-6 text-slate-700 dark:text-slate-200 bg-transparent border-0 resize-none focus:outline-none placeholder:text-slate-400 dark:placeholder:text-slate-600"
+            :class="isTerminalMode ? 'min-h-[32px]' : 'min-h-[56px]'"
             :placeholder="composerPlaceholder"
-            rows="2"
+            :rows="isTerminalMode ? 1 : 2"
             @keydown="onKeydown"
             @paste="onComposerPaste"
           ></textarea>
           <div class="mt-1.5 flex items-center gap-2">
+            <!-- Agent / 终端模式切换：输入框常驻共用，切换后内容保留（Warp 式命令输入） -->
+            <div class="shrink-0 h-8 p-0.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-100/80 dark:bg-white/[0.03] flex items-center gap-0.5" role="tablist" aria-label="输入模式">
+              <button
+                type="button"
+                class="h-7 px-2.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                :class="!isTerminalMode ? 'bg-white dark:bg-white/[0.1] text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'"
+                title="Agent 对话模式"
+                @click="setWorkMode('agent')"
+              >
+                <AppIcon name="spark" :size="12" />
+                Agent
+              </button>
+              <button
+                type="button"
+                class="h-7 px-2.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                :class="isTerminalMode ? 'bg-white dark:bg-white/[0.1] text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'"
+                title="终端模式：输入框直接发命令到终端"
+                @click="setWorkMode('terminal')"
+              >
+                <AppIcon name="terminal" :size="12" />
+                终端
+              </button>
+            </div>
+
+            <template v-if="!isTerminalMode">
             <button
               type="button"
               class="shrink-0 w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-400/10 flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
@@ -2492,6 +2740,24 @@ function onSecretRefSubmit(secretRef: string): void {
               </div>
             </div>
             </template>
+            </template>
+
+            <!-- 终端模式：侧栏开关 + 当前主机徽标 -->
+            <template v-else>
+              <button
+                type="button"
+                class="shrink-0 w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/[0.06] flex items-center justify-center transition-colors cursor-pointer"
+                :title="railCollapsed ? '显示侧栏' : '隐藏侧栏'"
+                @click="toggleRail"
+              >
+                <AppIcon name="panel-left" :size="14" />
+              </button>
+              <span class="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.03] text-xs font-medium text-slate-600 dark:text-slate-300 flex items-center gap-1.5 min-w-0">
+                <AppIcon name="server" :size="13" class="text-sky-500 shrink-0" />
+                <span class="truncate max-w-[160px]">{{ probe.displayName.value }}</span>
+              </span>
+              <div class="ml-auto"></div>
+            </template>
 
             <button
               class="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer"
@@ -2499,7 +2765,7 @@ function onSecretRefSubmit(secretRef: string): void {
               :disabled="!canSubmitComposer"
               @click="send"
             >
-              <AppIcon :name="canSubmitComposer ? (isGoalComposerMode ? 'target' : 'send') : 'arrow-right'" :size="16" />
+              <AppIcon :name="canSubmitComposer ? (isTerminalMode ? 'terminal' : (isGoalComposerMode ? 'target' : 'send')) : 'arrow-right'" :size="16" />
             </button>
           </div>
         </div>
@@ -2754,6 +3020,19 @@ function onSecretRefSubmit(secretRef: string): void {
       </div>
     </Teleport>
     </div>
+
+    <!-- Host 编辑 modal（rail 主机区的增改） -->
+    <HostModal
+      ref="hostModalRef"
+      :open="hostModalOpen"
+      :editing="hostEditing"
+      :ssh-hosts="sshHosts"
+      @close="hostModalOpen = false"
+      @submit="onHostSubmit"
+    />
+
+    <!-- 终端选区分析右键菜单（position:fixed 全局） -->
+    <AnalyzeContextMenu />
   </div>
 </template>
 
@@ -2790,6 +3069,43 @@ function onSecretRefSubmit(secretRef: string): void {
 
 .agent-view-rail-backdrop {
   display: none;
+}
+
+/* ── 纸面卡片（三栏统一质感，沿用原终端页 paper-panel 视觉） ── */
+.agent-view-panel {
+  border-radius: 16px;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.07);
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+
+:global(.dark) .agent-view-panel {
+  border-color: rgba(30, 41, 59, 0.95);
+  background: rgba(11, 19, 36, 0.88);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
+}
+
+.agent-view-rail {
+  margin-right: 8px;
+}
+
+/* 终端全屏：主区（终端+输入条）整体铺满窗口，盖过顶栏/侧栏 */
+.agent-view-main--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  height: auto !important;
+  border-radius: 0;
+}
+
+/* 窄屏（与 style.css 的 .agent-view-shell 纵排断点一致） */
+@media (max-width: 768px) {
+  .agent-view-rail {
+    margin-right: 0;
+    margin-top: 8px;
+  }
 }
 
 .agent-approval-panel :deep(.ide-approval-card) {

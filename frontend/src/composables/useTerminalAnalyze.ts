@@ -306,7 +306,7 @@ function create(): TerminalAnalyzeApi {
 
   function onDocClick(event: MouseEvent): void {
     if (!ctxVisible.value) return;
-    // 右键菜单 DOM 在 MainConsoleView，组件根带 data-analyze-ctx 标记。
+    // 右键菜单 DOM 在 AgentView（终端分栏宿主页），组件根带 data-analyze-ctx 标记。
     // 点击落在菜单内不关；其他位置（含 FAB）关闭。
     const target = event.target as HTMLElement | null;
     if (target?.closest('[data-analyze-ctx]')) return;

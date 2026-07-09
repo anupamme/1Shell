@@ -122,10 +122,10 @@ onBeforeUnmount(() => {
 function gotoRecentHost(): void {
   const h = recentHost.value;
   if (!h) {
-    router.push('/console');
+    router.push('/agent');
     return;
   }
-  router.push({ path: '/console', query: { host: h.id } });
+  router.push({ path: '/agent', query: { host: h.id } });
 }
 
 function gotoProbe(): void {

@@ -56,7 +56,7 @@ const slashHighlight = ref(0);
 const slashSubView = ref<'model' | null>(null);
 const slashSubHighlight = ref(0);
 
-const EXCLUDED_ROUTES = new Set(['ide', 'agent', 'terminal']);
+const EXCLUDED_ROUTES = new Set(['agent']);
 const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
 
 const MODULE_MAP: Record<string, ModuleContext> = {

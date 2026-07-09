@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// AnalyzeContextMenu.vue — MainConsole 刀 3 阶段 1 · 终端右键菜单
-// position: fixed 全局浮层,挂在 MainConsoleView 顶层
+// AnalyzeContextMenu.vue — 终端右键菜单
+// position: fixed 全局浮层,挂在 AgentView（终端分栏宿主页）顶层
 import { useTerminalAnalyze } from '@/composables/useTerminalAnalyze';
 
 const analyze = useTerminalAnalyze();

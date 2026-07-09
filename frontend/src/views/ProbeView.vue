@@ -900,7 +900,7 @@ function diagnoseFromAlert(ev: AlertEvent): void {
 }
 function openConsoleFromAlert(ev: AlertEvent): void {
   alertDropdownOpen.value = false;
-  router.push({ path: '/console', query: { host: ev.hostId } });
+  router.push({ path: '/agent', query: { host: ev.hostId } });
 }
 function viewAgentLogsFromAlert(ev: AlertEvent): void {
   alertDropdownOpen.value = false;

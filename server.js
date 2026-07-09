@@ -59,9 +59,6 @@ const { createIdeSessionRouter } = require('./src/routes/ide-session.routes');
 const { createScriptRouter } = require('./src/routes/script.routes');
 const { createNativeCliConfig } = require('./src/agents/native-cli-config');
 const { createMcpPresetStore } = require('./src/agents/mcp-preset-store');
-const { createAgentProviders } = require('./src/agents/providers');
-const { createAgentPtyService } = require('./src/agents/agent-pty.service');
-const { registerAgentSocketHandlers } = require('./src/sockets/registerAgentSocketHandlers');
 const { registerSessionSocketHandlers } = require('./src/sockets/registerSessionSocketHandlers');
 const { createAIService } = require('./src/services/ai.service');
 const { createAuditService } = require('./src/services/audit.service');
@@ -149,8 +146,6 @@ const auditService = createAuditService({ db, dataDir });
 const sessionService = createSessionService({ hostService });
 const mcpPresetStore = createMcpPresetStore({ dataDir });
 const nativeCliConfig = createNativeCliConfig({ dataDir, bridgeToken: BRIDGE_TOKEN, port: PORT, proxyConfigStore, mcpPresetStore, logger: log });
-const agentProviders = createAgentProviders({ nativeCliConfig });
-const agentPtyService = createAgentPtyService({ hostService, providerRegistry: agentProviders });
 const sshPool = createSshPool({ hostService });
 const sshShellPool = createSshShellPool({ hostService });
 const probeTrafficService = createProbeTrafficService({ db, logger: log });
@@ -335,7 +330,6 @@ app.use('/api', createUpdaterRouter({ updaterService }));
 // ─── Socket.IO ──────────────────────────────────────────────────────────
 io.use(authService.authenticateSocket);
 registerSessionSocketHandlers(io, { sessionService });
-registerAgentSocketHandlers(io, { agentPtyService });
 registerSkillSocketHandlers(io, { skillRunner });
 registerIdeSocketHandlers(io, { ideService, ideTools, localMcpService, mcpRegistry, protocolAgentService });
 

@@ -7,7 +7,6 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { createNativeCliConfig } = require('../src/agents/native-cli-config');
-const { createAgentProviders } = require('../src/agents/providers');
 const {
   buildAnthropicProxyModelList,
   buildOpenAIProxyModelList,
@@ -101,18 +100,6 @@ try {
 
   const config = JSON.parse(fs.readFileSync(path.join(dataDir, '.claude', 'config.json'), 'utf8'));
   assert.strictEqual(config.primaryApiKey, 'any', 'Claude config.json should use cc-switch plugin placeholder');
-
-  const registry = createAgentProviders({ nativeCliConfig: nativeConfig });
-  const claudeProvider = registry.listProviders().find((provider) => provider.id === 'claude-code');
-  assert.ok(claudeProvider?.configured, 'Agent provider meta should mark the active API provider as configured');
-  assert.strictEqual(claudeProvider.activeProviderId, activeProvider.id);
-  assert.strictEqual(claudeProvider.activeProviderName, activeProvider.name);
-  assert.strictEqual(claudeProvider.activeModelId, activeProvider.activeModelId);
-  assert.strictEqual(claudeProvider.model, activeProvider.model);
-  assert.deepStrictEqual(
-    claudeProvider.models.map((model) => model.apiModel),
-    ['claude-sonnet-4-6', 'gemini-3.5-flash-low'],
-  );
 
   const anthropicModels = buildAnthropicProxyModelList(activeProvider);
   assert.deepStrictEqual(

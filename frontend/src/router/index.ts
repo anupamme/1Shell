@@ -4,7 +4,6 @@ const routes: RouteRecordRaw[] = [
   // ========== 顶层页面 + 独立设置 ==========
   { path: '/',         name: 'home',     component: () => import('@/views/WorldHomeView.vue') },
   { path: '/agent',    name: 'agent',    component: () => import('@/views/AgentView.vue') },
-  { path: '/terminal', name: 'terminal', component: () => import('@/views/MainConsoleView.vue') },
   { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
   {
     path: '/panel',
@@ -36,8 +35,10 @@ const routes: RouteRecordRaw[] = [
   },
 
   // ========== 兼容旧路径 ==========
-  { path: '/console',   redirect: '/terminal' },
-  { path: '/ide',       redirect: '/terminal' },
+  // 终端页已并入 Agent 页（4.7.2）：?host= 语义保留（选中主机 + 展开终端分栏）
+  { path: '/terminal',  redirect: (to) => ({ path: '/agent', query: to.query }) },
+  { path: '/console',   redirect: (to) => ({ path: '/agent', query: to.query }) },
+  { path: '/ide',       redirect: '/agent' },
   { path: '/hosts',     redirect: '/panel/hosts' },
   { path: '/runtime',   redirect: '/panel/runtime' },
   { path: '/workloads', redirect: '/panel/workloads' },

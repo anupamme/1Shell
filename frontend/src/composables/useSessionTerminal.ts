@@ -8,7 +8,7 @@ import { shallowRef, ref, markRaw, type Ref, type ShallowRef } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { io, type Socket } from 'socket.io-client';
+import type { Socket } from 'socket.io-client';
 
 import {
   DARK_THEME, LIGHT_THEME,
@@ -17,6 +17,7 @@ import {
   type SessionInputMeta, type LifecyclePayload,
 } from '@/utils/terminal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
+import { useSocket } from '@/composables/useSocket';
 import { useHostsStore } from '@/stores/hosts';
 import { useAuthStore } from '@/stores/auth';
 import { useNotifyStore } from '@/stores/notify';
@@ -121,6 +122,7 @@ function create(): SessionTerminalApi {
 
   /* ── 状态 ─────────────────────────────────── */
   let socket: Socket | null = null;
+  let socketCleanup: (() => void) | null = null;
   let initialized = false;
   let onDataDispose: { dispose(): void } | null = null;
   let mountedContainer: HTMLElement | null = null;
@@ -475,31 +477,35 @@ function create(): SessionTerminalApi {
     return true;
   }
 
-  /* ── socket bind(1:1 沿用 session-terminal.js attachSocketListeners) ────── */
-  function attachSocketListeners(sock: Socket): void {
-    sock.on('connect', async () => {
-      terminalHint.value = 'Socket 已连接,正在进入默认本机会话…';
-      notifyLifecycle('socket-connect');
-      try {
-        if (!hosts.hostMap.has(activeHostId.value)) {
-          activeHostId.value = LOCAL_HOST_ID;
-        }
-        await connectToHost(activeHostId.value || LOCAL_HOST_ID, true);
-      } catch (error) {
-        const msg = (error as Error).message;
-        setStatus('error', msg);
-        terminalHint.value = msg;
+  /* ── socket bind(1:1 沿用 session-terminal.js attachSocketListeners；改共享连接后只注册具名 handler,可精确摘除) ────── */
+  async function enterActiveHostSession(): Promise<void> {
+    terminalHint.value = 'Socket 已连接,正在进入默认本机会话…';
+    notifyLifecycle('socket-connect');
+    try {
+      if (!hosts.hostMap.has(activeHostId.value)) {
+        activeHostId.value = LOCAL_HOST_ID;
       }
-    });
+      await connectToHost(activeHostId.value || LOCAL_HOST_ID, true);
+    } catch (error) {
+      const msg = (error as Error).message;
+      setStatus('error', msg);
+      terminalHint.value = msg;
+    }
+  }
 
-    sock.on('disconnect', (reason: string) => {
+  function attachSocketListeners(sock: Socket): () => void {
+    const onConnect = (): void => {
+      void enterActiveHostSession();
+    };
+
+    const onDisconnect = (reason: string): void => {
       const byLogout = reason === 'io client disconnect';
       setStatus(byLogout ? 'closed' : 'error', byLogout ? '已退出登录' : `连接断开: ${reason},正在重连…`);
       terminalHint.value = byLogout ? '已退出登录' : 'Socket 连接断开,正在重连…';
       notifyLifecycle('socket-disconnect', { reason });
-    });
+    };
 
-    sock.on('connect_error', (error: Error) => {
+    const onConnectError = (error: Error): void => {
       if (error?.message === 'UNAUTHORIZED') {
         auth.setAuthenticated(false);
         notify.error('登录已失效,请重新登录');
@@ -510,21 +516,21 @@ function create(): SessionTerminalApi {
       setStatus('error', msg);
       terminalHint.value = msg;
       notifyLifecycle('socket-error', { error: msg });
-    });
+    };
 
-    sock.on('reconnect', () => {
+    const onReconnect = (): void => {
       setStatus('ready', '已重新连接');
       notify.success('WebSocket 已重新连接');
       if (activeHostId.value) {
         connectToHost(activeHostId.value, true).catch(() => { /* 静默 */ });
       }
-    });
+    };
 
-    sock.on('reconnect_attempt', (attempt: number) => {
+    const onReconnectAttempt = (attempt: number): void => {
       setStatus('error', `正在重连… (第 ${attempt} 次)`);
-    });
+    };
 
-    sock.on('session:output', ({ sessionId, data }: { sessionId: string; data: string }) => {
+    const onSessionOutput = ({ sessionId, data }: { sessionId: string; data: string }): void => {
       if (!sessionId) return;
       const output = String(data || '');
       const previous = sessionBuffers.get(sessionId) || '';
@@ -534,9 +540,9 @@ function create(): SessionTerminalApi {
       notifyOutput({ sessionId, data: output });
       _term.write(output, () => scrollTerminalToBottom());
       scrollTerminalToBottom();
-    });
+    };
 
-    sock.on('session:status', (session: SessionInfo) => {
+    const onSessionStatus = (session: SessionInfo): void => {
       updateSessionMap((m) => { m.set(session.id, session); });
       notifyLifecycle('session-status', {
         hostId: session.hostId,
@@ -577,25 +583,45 @@ function create(): SessionTerminalApi {
           sessionBuffers.delete(session.id);
         }
       }
-    });
+    };
+
+    sock.on('connect', onConnect);
+    sock.on('disconnect', onDisconnect);
+    sock.on('connect_error', onConnectError);
+    sock.on('reconnect', onReconnect);
+    sock.on('reconnect_attempt', onReconnectAttempt);
+    sock.on('session:output', onSessionOutput);
+    sock.on('session:status', onSessionStatus);
+
+    return () => {
+      sock.off('connect', onConnect);
+      sock.off('disconnect', onDisconnect);
+      sock.off('connect_error', onConnectError);
+      sock.off('reconnect', onReconnect);
+      sock.off('reconnect_attempt', onReconnectAttempt);
+      sock.off('session:output', onSessionOutput);
+      sock.off('session:status', onSessionStatus);
+    };
   }
 
   function connectSocket(): void {
     if (socket) return;
-    socket = io({
-      transports: ['websocket'],
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 10_000,
-    });
-    attachSocketListeners(socket);
+    // 与 ide:* / probe:update 共用全局唯一 socket.io 连接（原先这里自建第二条连接）
+    socket = useSocket();
+    socketCleanup = attachSocketListeners(socket);
+    if (socket.connected) {
+      // 共享连接可能早已就绪,'connect' 不会再触发——直接进默认会话
+      void enterActiveHostSession();
+    } else if (socket.disconnected) {
+      socket.connect();
+    }
   }
 
   function disconnectSocket(): void {
     if (!socket) return;
-    socket.removeAllListeners();
-    socket.disconnect();
+    // 共享连接:只摘掉本模块的监听器,不断开传输层（ide 聊天/探针推送还在用）
+    socketCleanup?.();
+    socketCleanup = null;
     socket = null;
     activeSessionId.value = null;
     sessions.value = new Map();

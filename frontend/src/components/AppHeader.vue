@@ -17,7 +17,6 @@ interface NavItem {
 const navItems: NavItem[] = [
   { to: '/',          label: '主页',   matchPrefix: '/',         icon: 'globe' },
   { to: '/agent',     label: 'Agent',  matchPrefix: '/agent',    icon: 'robot' },
-  { to: '/terminal',  label: '终端',   matchPrefix: '/terminal', icon: 'terminal' },
   { to: '/panel',     label: '面板',   matchPrefix: '/panel',    icon: 'chart' },
   { to: '/config',    label: '配置',   matchPrefix: '/config',   icon: 'toolbox' },
 ];

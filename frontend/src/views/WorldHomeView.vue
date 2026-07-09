@@ -58,7 +58,7 @@ function onStageClick(): void {
 }
 
 function onConnect(hostId: string): void {
-  router.push({ path: '/console', query: { host: hostId } });
+  router.push({ path: '/agent', query: { host: hostId } });
 }
 
 function onLocateFromTooltip(hostId: string, hostName: string): void {
@@ -135,13 +135,13 @@ onBeforeUnmount(() => {
       >
         <div class="px-6 py-4 rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700 text-center pointer-events-auto">
           <div class="text-lg font-semibold text-slate-100">还没有 VPS</div>
-          <div class="mt-1 text-sm text-slate-400">去主控添加第一台主机</div>
+          <div class="mt-1 text-sm text-slate-400">去 Agent 页添加第一台主机</div>
           <button
             type="button"
             class="mt-3 px-4 h-8 rounded-lg bg-gradient-to-r from-sky-500 to-blue-600 text-white text-sm hover:shadow-lg"
-            @click.stop="router.push('/console')"
+            @click.stop="router.push('/agent')"
           >
-            打开主控 →
+            打开 Agent →
           </button>
         </div>
       </div>

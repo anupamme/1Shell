@@ -4,6 +4,8 @@ import AppIcon from '@/components/AppIcon.vue';
 import AgentToolsRail from '@/components/AgentToolsRail.vue';
 import { useFileBrowser, type DirItem } from '@/composables/useFileBrowser';
 import type { HostInfo } from '@/utils/scripts';
+import { formatOsInfo, isLocalHost } from '@/utils/mainConsole';
+import type { MainHost } from '@/utils/mainConsole';
 
 type RailTab = 'chat' | 'files' | 'tools';
 
@@ -43,11 +45,18 @@ const props = withDefaults(defineProps<{
   hosts?: HostInfo[];
   selectedHostId?: string;
   fileFocus?: FileFocus | null;
+  /* 对话 tab 顶部的主机区（对话本就绑定主机，合并管理） */
+  consoleHosts?: MainHost[];
+  activeConsoleHostId?: string | null;
+  secretWarning?: boolean;
 }>(), {
   loading: false,
   activeTab: 'chat',
   selectedHostId: '',
   fileFocus: null,
+  consoleHosts: () => [],
+  activeConsoleHostId: null,
+  secretWarning: false,
 });
 
 const emit = defineEmits<{
@@ -59,42 +68,51 @@ const emit = defineEmits<{
   (e: 'delete', id: string): void;
   (e: 'update:activeTab', tab: RailTab): void;
   (e: 'select-host', id: string): void;
+  (e: 'host-connect', id: string): void;
+  (e: 'host-edit', id: string): void;
+  (e: 'host-delete', id: string): void;
+  (e: 'host-add'): void;
+  (e: 'host-new-session', key: string): void;
 }>();
 
 const keyword = ref('');
 const renamingId = ref<string | null>(null);
 const renameText = ref('');
 const fileHostId = ref('local');
-const COLLAPSED_GROUP_SESSION_LIMIT = 2;
-const expandedGroupKeys = ref<Set<string>>(new Set());
+// 主机卡片展开状态（展开后显示绑定在该主机上的对话）
+const expandedHostKeys = ref<Set<string>>(new Set());
 
 const fb = useFileBrowser({ hostId: fileHostId, singleton: false });
 
 const tabs: Array<{ key: RailTab; label: string }> = [
-  { key: 'chat', label: '对话' },
+  { key: 'chat', label: '主机' },
   { key: 'files', label: '文件' },
   { key: 'tools', label: '工具' },
 ];
 
-const hostList = computed(() => props.hosts || []);
-
-const filtered = computed(() => {
-  const kw = keyword.value.trim().toLowerCase();
-  if (!kw) return props.sessions;
-  return props.sessions.filter((s) => `${s.title} ${s.preview}`.toLowerCase().includes(kw));
-});
-
-const chatSessions = computed(() => filtered.value.slice().sort((a, b) => parseTime(b.updatedAt) - parseTime(a.updatedAt)));
-
-interface SessionGroup {
-  key: string;
-  label: string;
-  sublabel?: string;
-  sessions: SessionMeta[];
-  updatedAt: string;
+function hostMeta(h: MainHost): string {
+  if (isLocalHost(h)) return '本地 Shell';
+  return `${h.username || 'root'}@${h.host}:${h.port || 22}`;
 }
 
-// 协议 agent 会话（Claude Code / Codex…）不绑 VPS 工作区，按本机 cwd 分组
+function hostOsText(h: MainHost): string {
+  return formatOsInfo(h.osInfo);
+}
+
+const hostList = computed(() => props.hosts || []);
+
+const chatSessions = computed(() => props.sessions.slice().sort((a, b) => parseTime(b.updatedAt) - parseTime(a.updatedAt)));
+
+// ── 主机树：主机卡片为主体，对话挂在其绑定的主机下 ──
+interface HostGroup {
+  /** hostId 或 '__global__'（不绑定主机的对话）/ 已删除主机的残留 id */
+  key: string;
+  host: MainHost | null;
+  label: string;
+  sessions: SessionMeta[];
+}
+
+// 协议 agent 会话（Claude Code / Codex…）运行在本机，挂在本机卡片下
 function isProtocolSession(session: SessionMeta): boolean {
   const id = String(session.agentId || '').trim();
   return Boolean(id) && id !== 'oneshell';
@@ -107,37 +125,59 @@ function cwdBasename(path: string): string {
   return idx >= 0 ? (normalized.slice(idx + 1) || normalized) : normalized;
 }
 
-const chatGroups = computed<SessionGroup[]>(() => {
-  const groups = new Map<string, SessionGroup>();
-  for (const session of chatSessions.value) {
-    let key = '';
-    let label = '';
-    let sublabel = '';
-    if (isProtocolSession(session)) {
-      const cwd = String(session.cwd || '').trim();
-      key = `cwd:${cwd || '__default__'}`;
-      label = cwd ? (cwdBasename(cwd) || cwd) : '默认目录';
-      sublabel = cwd || '本机目录';
-    } else {
-      const ids = sessionWorkspaceIds(session);
-      key = workspaceKey(ids);
-      label = workspaceLabel(ids);
-    }
-    const group = groups.get(key) || {
-      key,
-      label,
-      sublabel,
-      sessions: [],
-      updatedAt: session.updatedAt || '',
-    };
-    group.sessions.push(session);
-    if (parseTime(session.updatedAt) > parseTime(group.updatedAt)) group.updatedAt = session.updatedAt;
-    groups.set(key, group);
+function sessionHostKey(session: SessionMeta): string {
+  if (isProtocolSession(session)) return 'local';
+  const ids = sessionWorkspaceIds(session);
+  return ids[0] || '__global__';
+}
+
+// 条目附加信息：协议会话的工作目录 / 多主机工作区
+function sessionExtraMeta(session: SessionMeta): string {
+  if (isProtocolSession(session)) {
+    const base = cwdBasename(String(session.cwd || ''));
+    return base ? `· ${base}` : '';
   }
-  return [...groups.values()].sort((a, b) => parseTime(b.updatedAt) - parseTime(a.updatedAt));
-});
+  const ids = sessionWorkspaceIds(session);
+  return ids.length > 1 ? `· +${ids.length - 1} 主机` : '';
+}
+
+function matchText(text: string, kw: string): boolean {
+  return text.toLowerCase().includes(kw);
+}
 
 const searchActive = computed(() => keyword.value.trim().length > 0);
+
+const hostGroups = computed<HostGroup[]>(() => {
+  const kw = keyword.value.trim().toLowerCase();
+  const byKey = new Map<string, SessionMeta[]>();
+  for (const session of chatSessions.value) {
+    if (kw && !matchText(`${session.title} ${session.preview}`, kw)) continue;
+    const key = sessionHostKey(session);
+    const list = byKey.get(key) || [];
+    list.push(session);
+    byKey.set(key, list);
+  }
+
+  const groups: HostGroup[] = [];
+  const covered = new Set<string>();
+  for (const host of props.consoleHosts || []) {
+    covered.add(host.id);
+    const sessions = byKey.get(host.id) || [];
+    if (kw && !matchText(`${host.name} ${host.host || ''} ${host.username || ''}`, kw) && !sessions.length) continue;
+    groups.push({ key: host.id, host, label: host.name, sessions });
+  }
+
+  // 已删除主机的残留会话 / 全局会话
+  for (const [key, sessions] of byKey) {
+    if (covered.has(key) || key === '__global__') continue;
+    groups.push({ key, host: null, label: hostName(key), sessions });
+  }
+  const globalSessions = byKey.get('__global__') || [];
+  if (globalSessions.length) {
+    groups.push({ key: '__global__', host: null, label: '全局', sessions: globalSessions });
+  }
+  return groups;
+});
 
 const visibleItems = computed<DirItem[]>(() => {
   const list = fb.showHidden.value
@@ -229,11 +269,16 @@ watch(() => props.fileFocus, async (focus) => {
   if (targetDir !== fb.currentPath.value) fb.navigate(targetDir);
 }, { deep: true });
 
-watch(chatGroups, (groups) => {
-  const validKeys = new Set(groups.map((group) => group.key));
-  const next = new Set([...expandedGroupKeys.value].filter((key) => validKeys.has(key)));
-  if (next.size !== expandedGroupKeys.value.size) expandedGroupKeys.value = next;
-});
+// 当前会话所在主机自动展开（手动收起后不强制再展开，除非切换会话）
+watch(() => props.activeId, (id) => {
+  if (!id) return;
+  const session = props.sessions.find((item) => item.id === id);
+  if (!session) return;
+  const key = sessionHostKey(session);
+  if (!expandedHostKeys.value.has(key)) {
+    expandedHostKeys.value = new Set([...expandedHostKeys.value, key]);
+  }
+}, { immediate: true });
 
 function setTab(tab: RailTab): void {
   emit('update:activeTab', tab);
@@ -292,48 +337,22 @@ function sessionWorkspaceIds(session: SessionMeta): string[] {
   return hostId && hostId !== 'all' ? [hostId] : [];
 }
 
-function workspaceKey(ids: string[]): string {
-  const normalized = normalizeWorkspaceHostIds(ids).slice().sort();
-  return normalized.length ? normalized.join('|') : '__global__';
-}
-
-function workspaceLabel(ids: string[]): string {
-  const normalized = normalizeWorkspaceHostIds(ids);
-  if (!normalized.length) return '全局';
-  const names = normalized.map((id) => hostName(id));
-  if (names.length <= 2) return names.join('、');
-  return `${names.slice(0, 2).join('、')} +${names.length - 2}`;
-}
-
 function hostName(id: string): string {
   if (!id || id === 'local') return '本机';
   const host = hostList.value.find((item) => item.id === id);
   return host?.name || id;
 }
 
-function isGroupExpanded(groupKey: string): boolean {
-  return searchActive.value || expandedGroupKeys.value.has(groupKey);
+function isHostExpanded(group: HostGroup): boolean {
+  if (searchActive.value) return group.sessions.length > 0;
+  return expandedHostKeys.value.has(group.key);
 }
 
-function groupCanToggle(group: SessionGroup): boolean {
-  return !searchActive.value && group.sessions.length > COLLAPSED_GROUP_SESSION_LIMIT;
-}
-
-function hiddenGroupCount(group: SessionGroup): number {
-  if (isGroupExpanded(group.key)) return 0;
-  return Math.max(0, group.sessions.length - COLLAPSED_GROUP_SESSION_LIMIT);
-}
-
-function visibleGroupSessions(group: SessionGroup): SessionMeta[] {
-  if (isGroupExpanded(group.key)) return group.sessions;
-  return group.sessions.slice(0, COLLAPSED_GROUP_SESSION_LIMIT);
-}
-
-function toggleGroupExpanded(groupKey: string): void {
-  const next = new Set(expandedGroupKeys.value);
-  if (next.has(groupKey)) next.delete(groupKey);
-  else next.add(groupKey);
-  expandedGroupKeys.value = next;
+function toggleHostExpanded(key: string): void {
+  const next = new Set(expandedHostKeys.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedHostKeys.value = next;
 }
 
 function selectHost(id: string): void {
@@ -378,7 +397,7 @@ function isFocusedItem(item: DirItem): boolean {
 </script>
 
 <template>
-  <aside class="w-[352px] min-w-[312px] max-w-[380px] shrink-0 h-full flex flex-col border-r border-slate-200/80 dark:border-white/[0.06] bg-white dark:bg-[#0d111b]">
+  <aside class="w-[352px] min-w-[312px] max-w-[380px] shrink-0 h-full flex flex-col bg-white dark:bg-[#0d111b]">
     <div class="shrink-0 p-2.5 border-b border-slate-200/80 dark:border-white/[0.06]">
       <div class="grid grid-cols-3 gap-1 rounded-xl bg-slate-100/70 dark:bg-white/[0.035] border border-slate-200/80 dark:border-white/[0.06] p-1">
         <button
@@ -395,45 +414,108 @@ function isFocusedItem(item: DirItem): boolean {
     </div>
 
     <template v-if="props.activeTab === 'chat'">
-      <div class="shrink-0 flex items-center gap-2 px-3.5 h-12 border-b border-slate-200/70 dark:border-white/[0.05]">
-        <span class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">对话</span>
-        <button
-          class="ml-auto h-7 flex items-center gap-1.5 px-2.5 text-xs font-medium rounded-lg bg-slate-900 dark:bg-sky-500 text-white border border-slate-900 dark:border-sky-400 hover:bg-slate-800 dark:hover:bg-sky-400 cursor-pointer transition-colors shadow-sm"
-          title="新对话"
-          @click="emit('new-session')"
-        >
-          <AppIcon name="plus" :size="13" />
-          新对话
-        </button>
-      </div>
-
-      <div class="shrink-0 px-3.5 py-2.5 border-b border-slate-200/70 dark:border-white/[0.04]">
+      <!-- 头行：搜索 + 添加主机 + 新对话 -->
+      <div class="shrink-0 px-3 py-2.5 border-b border-slate-200/70 dark:border-white/[0.04] flex items-center gap-1.5">
         <input
           v-model="keyword"
           type="text"
-          placeholder="搜索对话..."
-          class="w-full h-8 px-2.5 text-xs text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-[#090d15] border border-slate-200/90 dark:border-white/[0.07] rounded-lg focus:outline-none focus:border-sky-400/40 placeholder:text-slate-400 dark:placeholder:text-slate-600 transition-colors"
+          placeholder="搜索主机或对话..."
+          class="min-w-0 flex-1 h-8 px-2.5 text-xs text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-[#090d15] border border-slate-200/90 dark:border-white/[0.07] rounded-lg focus:outline-none focus:border-sky-400/40 placeholder:text-slate-400 dark:placeholder:text-slate-600 transition-colors"
         />
+        <button
+          class="shrink-0 h-8 w-8 flex items-center justify-center rounded-lg border border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:border-sky-300 hover:text-sky-600 dark:hover:border-sky-400/40 dark:hover:text-sky-300 cursor-pointer transition-colors"
+          title="添加主机"
+          @click="emit('host-add')"
+        >
+          <AppIcon name="server" :size="14" />
+        </button>
+        <button
+          class="shrink-0 h-8 w-8 flex items-center justify-center rounded-lg bg-slate-900 dark:bg-sky-500 text-white border border-slate-900 dark:border-sky-400 hover:bg-slate-800 dark:hover:bg-sky-400 cursor-pointer transition-colors shadow-sm"
+          title="新对话"
+          @click="emit('new-session')"
+        >
+          <AppIcon name="plus" :size="14" />
+        </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
-        <div v-if="props.loading && !props.sessions.length" class="px-2 py-6 text-center text-xs text-slate-400 dark:text-slate-600">加载中...</div>
-        <div v-else-if="!filtered.length" class="px-2 py-8 text-center text-xs text-slate-400 dark:text-slate-600">
-          {{ keyword ? '没有匹配的对话' : '暂无历史对话' }}
+      <div v-if="props.secretWarning" class="shrink-0 mx-3 mt-2 rounded-lg border border-amber-100 dark:border-amber-700/40 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1.5 text-[10px] leading-4 text-amber-600 dark:text-amber-300">
+        当前未设置 APP_SECRET，仍可继续使用；上线前建议配置强随机密钥。
+      </div>
+
+      <!-- 主机树：主机卡片（老终端页样式）为主体，点击卡片展开挂在其上的对话 -->
+      <div class="flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-2.5 flex flex-col gap-2">
+        <div v-if="props.loading && !props.sessions.length && !(props.consoleHosts || []).length" class="px-2 py-6 text-center text-xs text-slate-400 dark:text-slate-600">加载中...</div>
+        <div v-else-if="!hostGroups.length" class="px-2 py-8 text-center text-xs text-slate-400 dark:text-slate-600">
+          {{ keyword ? '没有匹配的主机或对话' : '暂无主机' }}
         </div>
 
-        <section v-for="group in chatGroups" :key="group.key" class="agent-chat-group">
-          <div class="agent-chat-group-header sticky top-0 z-10">
-            <div class="min-w-0 flex-1">
-              <div class="truncate text-[13px] font-bold text-slate-700 dark:text-slate-200">{{ group.label }}</div>
-              <div class="mt-0.5 text-[10px] font-medium tracking-wider text-slate-400 dark:text-slate-600 truncate" :title="group.sublabel || ''">{{ group.sublabel || '工作区' }}</div>
+        <section v-for="g in hostGroups" :key="g.key">
+          <!-- 主机卡片 -->
+          <div
+            class="rounded-xl border cursor-pointer transition-all p-3"
+            :class="g.host && g.host.id === props.activeConsoleHostId
+              ? 'border-sky-300/90 dark:border-sky-400/30 bg-gradient-to-br from-sky-50/90 to-indigo-50/60 dark:from-sky-400/10 dark:to-indigo-400/10 shadow-sm'
+              : 'border-slate-200/90 dark:border-white/[0.07] bg-slate-50/70 dark:bg-white/[0.02] hover:border-sky-200 dark:hover:border-sky-400/25 hover:shadow-sm'"
+            :title="g.sessions.length ? '点击展开/收起该主机的对话' : ''"
+            @click="toggleHostExpanded(g.key)"
+          >
+            <div class="flex items-start gap-2">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="min-w-0 truncate text-[13px] font-bold" :class="g.host && g.host.id === props.activeConsoleHostId ? 'text-sky-800 dark:text-sky-200' : 'text-slate-800 dark:text-slate-100'">{{ g.label }}</span>
+                  <span v-if="g.host?.proxyHostId" class="shrink-0 px-1.5 py-0.5 rounded text-[10px] bg-violet-100 dark:bg-violet-400/15 text-violet-600 dark:text-violet-300">经跳板机中继</span>
+                </div>
+                <div class="mt-0.5 text-[11px] text-slate-400 dark:text-slate-500 truncate">{{ g.host ? hostMeta(g.host) : (g.key === '__global__' ? '不绑定主机的对话' : '主机已删除') }}</div>
+                <div v-if="g.host && hostOsText(g.host)" class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 truncate">OS {{ hostOsText(g.host) }}</div>
+              </div>
+              <div class="shrink-0 flex items-center gap-1.5 pt-0.5">
+                <span
+                  v-if="g.sessions.length"
+                  class="min-w-5 h-5 px-1.5 rounded-full bg-white dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.07] text-center text-[10px] leading-[18px] font-semibold text-slate-500 dark:text-slate-400"
+                  title="绑定在该主机上的对话数"
+                >{{ g.sessions.length }}</span>
+                <AppIcon
+                  name="arrow-right"
+                  :size="12"
+                  class="text-slate-400 dark:text-slate-500 transition-transform"
+                  :class="isHostExpanded(g) ? 'rotate-90' : ''"
+                />
+              </div>
             </div>
-            <span class="min-w-6 h-5 px-1.5 rounded-full bg-white dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.07] text-center text-[11px] leading-5 font-semibold text-slate-500 dark:text-slate-400">{{ group.sessions.length }}</span>
+
+            <!-- 网站任意门 -->
+            <div v-if="g.host?.links?.length" class="mt-2">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">网站任意门</div>
+              <div class="mt-1 flex flex-wrap gap-1">
+                <a
+                  v-for="(lk, idx) in g.host.links"
+                  :key="idx"
+                  class="px-2 py-0.5 rounded-full bg-sky-100/80 dark:bg-sky-400/15 text-[10px] text-sky-600 dark:text-sky-300 hover:bg-sky-200/80 dark:hover:bg-sky-400/25 transition-colors"
+                  :href="lk.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="lk.description || lk.url"
+                  @click.stop
+                >{{ lk.name }}</a>
+              </div>
+            </div>
+
+            <!-- 操作排：切换 / 编辑 / 删除 / 新对话 -->
+            <div class="mt-2.5 grid gap-1.5" :class="g.host ? (isLocalHost(g.host) ? 'grid-cols-3' : 'grid-cols-4') : 'grid-cols-1'">
+              <template v-if="g.host">
+                <button type="button" class="h-7 rounded-md border border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-white/[0.03] text-[11px] font-medium text-slate-500 dark:text-slate-300 hover:border-sky-300 hover:text-sky-600 dark:hover:border-sky-400/40 dark:hover:text-sky-300 transition-colors cursor-pointer" title="连接终端" @click.stop="emit('host-connect', g.host!.id)">切换</button>
+                <button type="button" class="h-7 rounded-md border border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-white/[0.03] text-[11px] font-medium text-slate-500 dark:text-slate-300 hover:border-sky-300 hover:text-sky-600 dark:hover:border-sky-400/40 dark:hover:text-sky-300 transition-colors cursor-pointer" @click.stop="emit('host-edit', g.host!.id)">编辑</button>
+                <button v-if="!isLocalHost(g.host)" type="button" class="h-7 rounded-md border border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-white/[0.03] text-[11px] font-medium text-slate-500 dark:text-slate-300 hover:border-red-300 hover:text-red-500 dark:hover:border-red-400/40 dark:hover:text-red-400 transition-colors cursor-pointer" @click.stop="emit('host-delete', g.host!.id)">删除</button>
+              </template>
+              <button type="button" class="h-7 rounded-md border border-sky-200 dark:border-sky-400/25 bg-sky-50/80 dark:bg-sky-400/10 text-[11px] font-semibold text-sky-600 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-400/20 transition-colors cursor-pointer" title="在该主机上新建 Agent 对话" @click.stop="emit('host-new-session', g.key)">新对话</button>
+            </div>
           </div>
 
-          <div class="agent-chat-group-list">
+          <!-- 展开：挂在该主机上的对话 -->
+          <div v-if="isHostExpanded(g)" class="mt-1.5 ml-2.5 pl-2 border-l border-slate-200/80 dark:border-white/[0.07] grid gap-1.5">
+            <div v-if="!g.sessions.length" class="px-2 py-2.5 text-[11px] text-slate-400 dark:text-slate-600">该主机暂无对话 · 点上方「新对话」开始</div>
             <div
-              v-for="s in visibleGroupSessions(group)"
+              v-for="s in g.sessions"
               :key="s.id"
               class="group relative rounded-xl cursor-pointer transition-all border overflow-hidden"
               :class="s.id === props.activeId ? 'bg-sky-50/80 dark:bg-sky-400/10 border-sky-200/90 dark:border-sky-400/20 shadow-sm' : 'bg-white/70 dark:bg-white/[0.02] border-transparent hover:bg-white dark:hover:bg-white/[0.04] hover:border-slate-200/80 dark:hover:border-white/[0.06]'"
@@ -468,6 +550,7 @@ function isFocusedItem(item: DirItem): boolean {
                     <span class="shrink-0">{{ relTime(s.updatedAt) }}</span>
                     <span v-if="s.messageCount" class="shrink-0">· {{ s.messageCount }} 条</span>
                     <span v-if="s.modelLabel" class="min-w-0 truncate">· {{ s.modelLabel }}</span>
+                    <span v-if="sessionExtraMeta(s)" class="min-w-0 truncate">{{ sessionExtraMeta(s) }}</span>
                   </div>
                   <p
                     v-if="s.preview"
@@ -489,22 +572,6 @@ function isFocusedItem(item: DirItem): boolean {
                 </button>
               </div>
             </div>
-
-            <button
-              v-if="groupCanToggle(group)"
-              type="button"
-              class="agent-chat-group-toggle"
-              :aria-expanded="isGroupExpanded(group.key)"
-              @click="toggleGroupExpanded(group.key)"
-            >
-              <AppIcon
-                name="arrow-right"
-                :size="12"
-                class="agent-chat-group-toggle-icon"
-                :class="{ 'agent-chat-group-toggle-icon--expanded': isGroupExpanded(group.key) }"
-              />
-              <span>{{ isGroupExpanded(group.key) ? '收起' : `展开 ${hiddenGroupCount(group)} 条` }}</span>
-            </button>
           </div>
         </section>
       </div>
@@ -616,76 +683,6 @@ function isFocusedItem(item: DirItem): boolean {
 </template>
 
 <style scoped>
-.agent-chat-group {
-  margin-bottom: 18px;
-}
-
-.agent-chat-group + .agent-chat-group {
-  padding-top: 8px;
-}
-
-.agent-chat-group-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  margin: 0 -2px 8px;
-  padding: 8px 10px 8px 12px;
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 12px;
-  background:
-    linear-gradient(90deg, rgba(14, 165, 233, 0.08), rgba(255, 255, 255, 0) 48%),
-    rgba(248, 250, 252, 0.96);
-}
-
-.agent-chat-group-header::before {
-  content: "";
-  width: 3px;
-  height: 24px;
-  border-radius: 999px;
-  background: #38bdf8;
-  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.08);
-}
-
-.agent-chat-group-list {
-  display: grid;
-  gap: 6px;
-  padding-left: 10px;
-  border-left: 1px solid rgba(203, 213, 225, 0.72);
-}
-
-.agent-chat-group-toggle {
-  width: 100%;
-  min-height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px dashed rgba(148, 163, 184, 0.5);
-  border-radius: 10px;
-  color: rgb(71, 85, 105);
-  background: rgba(248, 250, 252, 0.74);
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
-}
-
-.agent-chat-group-toggle:hover {
-  color: rgb(2, 132, 199);
-  border-color: rgba(14, 165, 233, 0.42);
-  background: rgba(240, 249, 255, 0.78);
-}
-
-.agent-chat-group-toggle-icon {
-  transform: rotate(90deg);
-  transition: transform 160ms ease;
-}
-
-.agent-chat-group-toggle-icon--expanded {
-  transform: rotate(-90deg);
-}
-
 .agent-session-preview {
   display: -webkit-box;
   max-height: 32px;
@@ -703,28 +700,5 @@ function isFocusedItem(item: DirItem): boolean {
   .agent-session-text-guard {
     padding-right: 82px;
   }
-}
-
-:global(.dark) .agent-chat-group-header {
-  border-color: rgba(255, 255, 255, 0.07);
-  background:
-    linear-gradient(90deg, rgba(56, 189, 248, 0.12), rgba(15, 23, 42, 0) 48%),
-    rgba(255, 255, 255, 0.035);
-}
-
-:global(.dark) .agent-chat-group-list {
-  border-left-color: rgba(255, 255, 255, 0.08);
-}
-
-:global(.dark) .agent-chat-group-toggle {
-  color: rgb(148, 163, 184);
-  border-color: rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.025);
-}
-
-:global(.dark) .agent-chat-group-toggle:hover {
-  color: rgb(125, 211, 252);
-  border-color: rgba(56, 189, 248, 0.28);
-  background: rgba(56, 189, 248, 0.08);
 }
 </style>
