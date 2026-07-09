@@ -959,18 +959,34 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="h-screen flex flex-col p-2 gap-2">
-    <!-- 顶栏 -->
-    <header class="shrink-0 h-14 flex items-center px-5 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
-      <div class="flex items-center gap-3 shrink-0">
-        <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-          <AppIcon name="radio" :size="20" />
-        </span>
-        <div>
-          <div class="text-base font-bold text-slate-700 dark:text-slate-200">探针中心</div>
-          <div class="text-[11px] text-slate-400">查看全部主机在线状态与资源指标</div>
+    <!-- 统计 + 操作栏 -->
+    <div class="shrink-0 flex flex-wrap items-center gap-y-2 px-2 pt-1">
+      <div class="probe-summary flex-1 min-w-0">
+        <div class="probe-summary-item">
+          <span class="probe-stat-label">总主机数</span>
+          <span class="probe-stat-value">{{ total }}</span>
+        </div>
+        <div class="probe-summary-item">
+          <span class="probe-stat-label">在线</span>
+          <span class="probe-stat-value">{{ onlineCount }}</span>
+        </div>
+        <div class="probe-summary-item">
+          <span class="probe-stat-label">离线</span>
+          <span class="probe-stat-value">{{ offlineCount }}</span>
+        </div>
+        <div class="probe-summary-item">
+          <span class="probe-stat-label">旧数据主机</span>
+          <span class="probe-stat-value">{{ staleCount }}</span>
+        </div>
+        <div class="probe-summary-item">
+          <span class="probe-stat-label">最近推送</span>
+          <span class="probe-stat-value">{{ lastPushText }}</span>
+        </div>
+        <div class="probe-summary-item">
+          <span class="probe-stat-label">采样间隔</span>
+          <span class="probe-stat-value">{{ intervalText }}</span>
         </div>
       </div>
-      <div class="flex-1"></div>
       <div v-if="activeRelayUpstream" class="hidden sm:block mr-2 text-[11px] text-emerald-600 dark:text-emerald-400">
         安装 Relay: {{ activeRelayUpstream.name }}
       </div>
@@ -1076,39 +1092,11 @@ onBeforeUnmount(() => {
       >
         {{ refreshing ? '刷新中...' : '立即刷新' }}
       </button>
-    </header>
+    </div>
 
     <!-- 主面板 -->
     <main class="flex-1 min-h-0 overflow-hidden">
       <div ref="pageScrollRef" class="h-full flex flex-col min-h-0 overflow-y-auto">
-        <!-- 统计区（6 项） -->
-        <div class="probe-summary p-4">
-          <div class="probe-summary-item">
-            <span class="probe-stat-label">总主机数</span>
-            <span class="probe-stat-value">{{ total }}</span>
-          </div>
-          <div class="probe-summary-item">
-            <span class="probe-stat-label">在线</span>
-            <span class="probe-stat-value">{{ onlineCount }}</span>
-          </div>
-          <div class="probe-summary-item">
-            <span class="probe-stat-label">离线</span>
-            <span class="probe-stat-value">{{ offlineCount }}</span>
-          </div>
-          <div class="probe-summary-item">
-            <span class="probe-stat-label">旧数据主机</span>
-            <span class="probe-stat-value">{{ staleCount }}</span>
-          </div>
-          <div class="probe-summary-item">
-            <span class="probe-stat-label">最近推送</span>
-            <span class="probe-stat-value">{{ lastPushText }}</span>
-          </div>
-          <div class="probe-summary-item">
-            <span class="probe-stat-label">采样间隔</span>
-            <span class="probe-stat-value">{{ intervalText }}</span>
-          </div>
-        </div>
-
         <!-- 卡片网格 -->
         <div class="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           <div v-if="probes.length === 0" class="col-span-full probe-empty">暂无探针数据</div>

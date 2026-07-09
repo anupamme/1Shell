@@ -3,7 +3,6 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useApiClient } from '@/composables/useApiClient';
 import { useNotifyStore } from '@/stores/notify';
-import AppIcon from '@/components/AppIcon.vue';
 import FileBrowserPanel from '@/components/main/FileBrowserPanel.vue';
 import ProbeTrendChart from '@/components/ProbeTrendChart.vue';
 import type { HostPreference, HostRole, OsInfo } from '@/utils/mainConsole';
@@ -171,28 +170,6 @@ const archiveOptions: { value: typeof archiveFilter.value; label: string }[] = [
   { value: 'archived', label: '归档资产' },
   { value: 'all', label: '全部资产' },
 ];
-
-const pageMeta = computed(() => {
-  if (props.mode === 'runtime') {
-    return {
-      title: '详情',
-      subtitle: '按 VPS 查看探针摘要、资源图表、内部体检与带宽趋势',
-      icon: 'chart',
-    };
-  }
-  if (props.mode === 'files') {
-    return {
-      title: '文件',
-      subtitle: '按 VPS 切换远程文件，路径、排序、新建与上传集中在文件工具栏',
-      icon: 'folder',
-    };
-  }
-  return {
-    title: 'VPS 仓库',
-    subtitle: '管理主机分组、主控显示与连接顺序',
-    icon: 'server',
-  };
-});
 
 const panelSelectorHosts = computed(() => hosts.value.slice().sort(sortPanelSelectorHosts));
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value) || panelSelectorHosts.value[0] || hosts.value[0] || null);
@@ -826,24 +803,6 @@ onMounted(() => { void loadHosts(); });
 <template>
   <div class="host-repository-page h-full min-h-0 overflow-hidden p-3 bg-slate-100 text-slate-900 dark:bg-[#07111f] dark:text-slate-100">
     <div class="h-full min-h-0 flex flex-col gap-3">
-      <header class="host-repository-header shrink-0 min-h-14 flex items-center px-5 py-2 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
-        <div class="flex items-center gap-3 shrink-0">
-          <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-            <AppIcon :name="pageMeta.icon" :size="20" />
-          </span>
-          <div>
-            <div class="text-base font-bold text-slate-700 dark:text-slate-200">{{ pageMeta.title }}</div>
-            <div class="text-[11px] text-slate-400">{{ pageMeta.subtitle }}</div>
-          </div>
-        </div>
-        <div class="flex-1"></div>
-        <button
-          type="button"
-          class="h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 dark:hover:border-blue-400 dark:hover:text-blue-400 transition-all"
-          @click="loadHosts"
-        >刷新</button>
-      </header>
-
       <main
         class="host-repository-layout grid flex-1 min-h-0 grid-cols-1 gap-3"
         :class="props.mode === 'hosts' ? 'lg:grid-cols-[20%_30%_50%]' : props.mode === 'files' ? 'lg:grid-cols-1' : 'lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)]'"
@@ -950,7 +909,14 @@ onMounted(() => { void loadHosts(); });
           <div class="shrink-0 border-b border-slate-200/70 p-3 dark:border-white/10">
             <div class="flex items-center justify-between gap-2">
               <h2 class="text-base font-semibold">{{ props.mode === 'hosts' ? '全部 VPS' : 'VPS' }}</h2>
-              <span v-if="repositoryDropActive" class="rounded-full bg-rose-50 px-2 py-1 text-[11px] text-rose-600 dark:bg-rose-400/10 dark:text-rose-200">松手取消主控显示</span>
+              <div class="flex items-center gap-2">
+                <span v-if="repositoryDropActive" class="rounded-full bg-rose-50 px-2 py-1 text-[11px] text-rose-600 dark:bg-rose-400/10 dark:text-rose-200">松手取消主控显示</span>
+                <button
+                  type="button"
+                  class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-slate-800 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 dark:hover:border-blue-400 dark:hover:text-blue-400 transition-all"
+                  @click="loadHosts"
+                >刷新</button>
+              </div>
             </div>
             <div class="mt-3 grid gap-2" :class="props.mode === 'hosts' ? 'grid-cols-2' : 'grid-cols-1'">
               <input

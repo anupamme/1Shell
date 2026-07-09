@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import AppIcon from '@/components/AppIcon.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { getCachedPageState, isPageStateFresh, readStorageState, setCachedPageState, writeStorageState } from '@/composables/usePageState';
 import { useNotifyStore } from '@/stores/notify';
@@ -480,48 +479,26 @@ onMounted(() => {
 
 <template>
   <div class="h-screen flex flex-col p-2 gap-2">
-    <!-- 顶栏 -->
-    <header class="topbar shrink-0 h-14 flex items-center px-5 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
-      <div class="flex items-center gap-3 shrink-0">
-        <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-          <AppIcon name="clipboard" :size="20" />
-        </span>
-        <div>
-          <div class="text-base font-bold text-slate-700 dark:text-slate-200">审计日志</div>
-          <div class="text-[11px] text-slate-400">查看主机操作、脚本执行与配置变更记录</div>
-        </div>
-      </div>
-      <!-- Tab 切换 -->
-      <div class="ml-6 flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-[#0b1324] p-1">
-        <button
-          type="button"
-          class="h-7 px-3 rounded-lg text-xs font-semibold transition-all"
-          :class="activeTab === 'audit' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'"
-          @click="switchTab('audit')"
-        >审计日志</button>
-        <button
-          type="button"
-          class="h-7 px-3 rounded-lg text-xs font-semibold transition-all"
-          :class="activeTab === 'harness' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'"
-          @click="switchTab('harness')"
-        >Harness 轨迹</button>
-      </div>
-      <div class="flex-1"></div>
-      <button
-        type="button"
-        class="h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 dark:hover:border-blue-400 dark:hover:text-blue-400 transition-all"
-        @click="activeTab === 'audit' ? refresh() : loadTraces(0)"
-      >
-        立即刷新
-      </button>
-    </header>
-
     <!-- 主面板 -->
     <main class="main-panel flex-1 min-h-0 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm overflow-hidden">
       <div v-show="activeTab === 'audit'" class="h-full flex flex-col min-h-0">
         <!-- 筛选栏 -->
         <div class="shrink-0 px-4 pt-4 pb-2 border-b border-slate-100 dark:border-[#1e293b]">
           <div class="flex flex-wrap items-end gap-3">
+            <div class="flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-[#0b1324] p-1 self-end">
+              <button
+                type="button"
+                class="h-7 px-3 rounded-lg text-xs font-semibold transition-all"
+                :class="activeTab === 'audit' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'"
+                @click="switchTab('audit')"
+              >审计日志</button>
+              <button
+                type="button"
+                class="h-7 px-3 rounded-lg text-xs font-semibold transition-all"
+                :class="activeTab === 'harness' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'"
+                @click="switchTab('harness')"
+              >Harness 轨迹</button>
+            </div>
             <div class="flex flex-col gap-1">
               <label class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">操作类型</label>
               <select
@@ -576,6 +553,11 @@ onMounted(() => {
               type="button"
               class="h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-blue-500 hover:border-blue-300 dark:hover:text-blue-400 dark:hover:border-blue-400 transition-all"
             >重置</button>
+            <button
+              @click="refresh()"
+              type="button"
+              class="ml-auto h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 dark:hover:border-blue-400 dark:hover:text-blue-400 transition-all"
+            >立即刷新</button>
           </div>
         </div>
 
@@ -675,6 +657,20 @@ onMounted(() => {
         <!-- 筛选栏 -->
         <div class="shrink-0 px-4 pt-4 pb-2 border-b border-slate-100 dark:border-[#1e293b]">
           <div class="flex flex-wrap items-end gap-3">
+            <div class="flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-[#0b1324] p-1 self-end">
+              <button
+                type="button"
+                class="h-7 px-3 rounded-lg text-xs font-semibold transition-all"
+                :class="activeTab === 'audit' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'"
+                @click="switchTab('audit')"
+              >审计日志</button>
+              <button
+                type="button"
+                class="h-7 px-3 rounded-lg text-xs font-semibold transition-all"
+                :class="activeTab === 'harness' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'"
+                @click="switchTab('harness')"
+              >Harness 轨迹</button>
+            </div>
             <div class="flex flex-col gap-1">
               <label class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">决策</label>
               <select
@@ -708,6 +704,11 @@ onMounted(() => {
               type="button"
               class="h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-blue-500 hover:border-blue-300 dark:hover:text-blue-400 dark:hover:border-blue-400 transition-all"
             >重置</button>
+            <button
+              @click="loadTraces(0)"
+              type="button"
+              class="h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-white dark:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-300 hover:text-blue-500 dark:hover:border-blue-400 dark:hover:text-blue-400 transition-all"
+            >立即刷新</button>
             <div class="ml-auto text-[11px] text-slate-400 self-center">
               AI 与外部世界的边界关口决策记录 · 当前页拦截/拒绝 <span class="font-bold text-rose-500">{{ traceBlockedCount }}</span> 条
             </div>
