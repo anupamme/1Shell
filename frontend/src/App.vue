@@ -4,7 +4,7 @@ import { RouterView } from 'vue-router';
 import { useApiClient, ApiError } from '@/composables/useApiClient';
 import { prefetchProbePageState } from '@/composables/useProbePrefetch';
 import { useAuthStore } from '@/stores/auth';
-import AppHeader from './components/AppHeader.vue';
+import AppNavRail from './components/AppNavRail.vue';
 import ToastHost from './components/ToastHost.vue';
 import AppAiFab from './components/AppAiFab.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
@@ -68,11 +68,11 @@ onMounted(() => {
   <!-- 全局登录 gate -->
   <LoginScreen v-else-if="needLogin" @logged-in="onLoggedIn" />
 
-  <!-- 已登录或 auth 关闭 → 正常 app shell -->
-  <div v-else class="h-screen flex flex-col text-slate-100 isolate">
+  <!-- 已登录或 auth 关闭 → 正常 app shell（左侧导航栏 + 主内容） -->
+  <div v-else class="h-screen flex text-slate-100 isolate">
     <AppBackground />
-    <AppHeader />
-    <main class="flex-1 min-h-0 overflow-hidden relative">
+    <AppNavRail />
+    <main class="flex-1 min-w-0 overflow-hidden relative">
       <RouterView v-slot="{ Component }">
         <div class="absolute inset-0 overflow-hidden">
           <KeepAlive>

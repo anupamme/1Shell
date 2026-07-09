@@ -205,9 +205,129 @@ onBeforeUnmount(() => {
 <template>
   <div class="h-full min-h-0 overflow-auto bg-slate-50 text-slate-800 dark:bg-[#07111f] dark:text-slate-100" @click="closeTooltip">
     <div class="mx-auto flex min-h-full w-full max-w-[1500px] flex-col gap-4 p-4">
-      <!-- 左地图 + 右信息栏 -->
-      <section class="grid flex-1 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <div class="relative h-[56vh] min-h-[420px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-white/[0.04] xl:h-auto xl:min-h-[520px]">
+      <!-- 品牌 Hero：主页的主角是 1Shell 本身 -->
+      <section class="relative flex min-h-[300px] flex-1 flex-col items-center justify-center text-center">
+        <div class="pointer-events-none absolute inset-0 flex items-center justify-center" aria-hidden="true">
+          <div class="h-72 w-[42rem] max-w-full rounded-full bg-gradient-to-r from-sky-300/35 via-cyan-200/30 to-indigo-300/35 blur-3xl dark:from-sky-500/15 dark:via-cyan-400/10 dark:to-purple-500/15"></div>
+        </div>
+
+        <h1 class="relative bg-gradient-to-r from-sky-600 via-cyan-500 to-indigo-500 bg-clip-text text-6xl font-extrabold tracking-wide text-transparent sm:text-7xl dark:from-blue-400 dark:via-cyan-300 dark:to-purple-400">
+          1Shell
+        </h1>
+        <p class="relative mt-3 text-xs italic tracking-[0.35em] text-slate-400 sm:text-sm">One Shell to rule them all.</p>
+        <p class="relative mt-2 text-sm text-slate-500 dark:text-slate-400">自托管 VPS 运维控制台 · 探针监控 · AI Agent</p>
+
+        <!-- KPI chips -->
+        <div class="relative mt-7 flex flex-wrap items-center justify-center gap-2">
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs text-slate-500 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-400">
+            主机总数 <b class="text-sm font-semibold text-slate-900 dark:text-white">{{ totalCount }}</b>
+          </span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs text-slate-500 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-400">
+            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+            在线 <b class="text-sm font-semibold text-emerald-600 dark:text-emerald-300">{{ onlineCount }}</b>
+          </span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs text-slate-500 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-400">
+            <span class="h-1.5 w-1.5 rounded-full" :class="abnormalCount > 0 ? 'bg-rose-500' : 'bg-slate-300 dark:bg-slate-600'"></span>
+            异常 <b class="text-sm font-semibold" :class="abnormalCount > 0 ? 'text-rose-600 dark:text-rose-300' : 'text-slate-900 dark:text-white'">{{ abnormalCount }}</b>
+          </span>
+          <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs text-slate-500 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-400">
+            部署 <b class="text-sm font-semibold text-slate-900 dark:text-white">{{ countryCount }}</b> 国 · <b class="text-sm font-semibold text-slate-900 dark:text-white">{{ cityCount }}</b> 城
+          </span>
+        </div>
+
+        <!-- 主行动 + 快捷入口 -->
+        <div class="relative mt-6 flex flex-wrap items-center justify-center gap-2">
+          <button
+            type="button"
+            class="inline-flex h-10 items-center gap-2 rounded-xl bg-sky-600 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-sky-500"
+            @click="connectRecent"
+          >
+            <AppIcon name="robot" :size="16" />
+            {{ recentHost ? `连接 ${recentHost.name}` : '打开 Agent' }} →
+          </button>
+          <button
+            v-for="link in quickLinks"
+            :key="link.to"
+            type="button"
+            class="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-4 text-sm text-slate-600 backdrop-blur transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-300 dark:hover:bg-sky-400/10 dark:hover:text-sky-200"
+            @click="router.push(link.to)"
+          >
+            <AppIcon :name="link.icon" :size="15" />
+            <span>{{ link.label }}</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- 底部：左信息卡 + 右下角地图（约 1/4 屏） -->
+      <section class="grid shrink-0 grid-cols-1 gap-4 lg:h-[42vh] lg:min-h-[320px] lg:grid-cols-2">
+        <div class="grid min-h-0 grid-cols-1 gap-4 sm:grid-cols-2">
+          <!-- 最近主机 -->
+          <div class="flex min-h-0 flex-col rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+            <div class="flex items-center gap-2 text-sm font-semibold">
+              <AppIcon name="recent-host" :size="16" class="text-slate-400" />
+              <span>最近主机</span>
+            </div>
+            <div v-if="recentHost" class="mt-3 flex min-h-0 flex-1 flex-col">
+              <p class="truncate text-base font-semibold text-slate-900 dark:text-slate-100">{{ recentHost.name }}</p>
+              <p class="mt-0.5 truncate font-mono text-xs text-slate-500 dark:text-slate-400">{{ recentHost.username }}@{{ recentHost.host }}</p>
+              <div class="mt-auto flex items-center justify-between gap-2 pt-3">
+                <span class="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                  <span
+                    class="h-2 w-2 rounded-full"
+                    :class="recentHostProbe?.online ? 'bg-emerald-500' : recentHostProbe ? 'bg-rose-500' : 'bg-slate-400'"
+                  ></span>
+                  {{ recentHostProbe?.online ? '在线' : (recentHostProbe ? '离线' : '未探测') }}
+                </span>
+                <button
+                  type="button"
+                  class="h-8 rounded-lg bg-sky-600 px-3 text-xs font-medium text-white transition hover:bg-sky-500"
+                  @click="connectRecent"
+                >
+                  连接
+                </button>
+              </div>
+            </div>
+            <p v-else class="mt-3 text-sm text-slate-500 dark:text-slate-400">还没有 VPS，去 Agent 页添加</p>
+          </div>
+
+          <!-- 异常主机 -->
+          <div class="flex min-h-0 flex-col rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 text-sm font-semibold">
+                <AppIcon name="alert" :size="16" class="text-slate-400" />
+                <span>异常主机</span>
+              </div>
+              <span
+                v-if="abnormalCount > 0"
+                class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700 dark:bg-rose-400/10 dark:text-rose-200"
+              >{{ abnormalCount }}</span>
+            </div>
+            <ul v-if="abnormalCount > 0" class="mt-3 min-h-0 flex-1 space-y-1.5 overflow-y-auto">
+              <li
+                v-for="host in abnormalHosts"
+                :key="host.id"
+                class="flex items-center justify-between gap-2 rounded-lg border border-rose-100 bg-rose-50/60 px-2.5 py-1.5 text-xs dark:border-rose-400/15 dark:bg-rose-400/[0.06]"
+              >
+                <span class="truncate font-medium text-slate-700 dark:text-slate-200">{{ host.name }}</span>
+                <span class="shrink-0 font-mono text-[11px] text-rose-600 dark:text-rose-300">{{ abnormalReason(host) }}</span>
+              </li>
+            </ul>
+            <div v-if="abnormalCount === 0" class="mt-3 flex flex-1 items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-300">
+              <AppIcon name="check" :size="14" :stroke-width="2.4" />
+              <span>{{ totalCount > 0 ? '全部主机运行正常' : '暂无主机' }}</span>
+            </div>
+            <button
+              type="button"
+              class="mt-3 w-full shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-sky-300 hover:text-sky-700 dark:border-white/10 dark:text-slate-300 dark:hover:text-sky-200"
+              @click="router.push('/panel/probe')"
+            >
+              打开探针中心
+            </button>
+          </div>
+        </div>
+
+        <!-- 全球部署地图（右下角） -->
+        <div class="relative h-[320px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-white/[0.04] lg:h-full lg:min-h-0">
           <HomeLeafletMap :hosts="geo.hosts.value" @node-click="onNodeClick" />
 
           <!-- 左上角信息 chip -->
@@ -240,115 +360,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-
-        <aside class="flex min-h-0 flex-col gap-4">
-          <!-- 概览 -->
-          <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
-            <div class="grid grid-cols-2 gap-x-3 gap-y-4">
-              <div>
-                <p class="text-xs text-slate-500 dark:text-slate-400">主机总数</p>
-                <p class="mt-1 text-2xl font-semibold leading-none">{{ totalCount }}</p>
-              </div>
-              <div>
-                <p class="text-xs text-slate-500 dark:text-slate-400">在线</p>
-                <p class="mt-1 text-2xl font-semibold leading-none text-emerald-600 dark:text-emerald-300">{{ onlineCount }}</p>
-              </div>
-              <div>
-                <p class="text-xs text-slate-500 dark:text-slate-400">异常</p>
-                <p class="mt-1 text-2xl font-semibold leading-none" :class="abnormalCount > 0 ? 'text-rose-600 dark:text-rose-300' : ''">{{ abnormalCount }}</p>
-              </div>
-              <div>
-                <p class="text-xs text-slate-500 dark:text-slate-400">部署范围</p>
-                <p class="mt-1 text-2xl font-semibold leading-none">{{ countryCount }} <span class="text-sm font-normal text-slate-500 dark:text-slate-400">国 · {{ cityCount }} 城</span></p>
-              </div>
-            </div>
-          </div>
-
-          <!-- 最近主机 -->
-          <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
-            <div class="flex items-center gap-2 text-sm font-semibold">
-              <AppIcon name="recent-host" :size="16" class="text-slate-400" />
-              <span>最近主机</span>
-            </div>
-            <div v-if="recentHost" class="mt-3">
-              <p class="truncate text-base font-semibold text-slate-900 dark:text-slate-100">{{ recentHost.name }}</p>
-              <p class="mt-0.5 truncate font-mono text-xs text-slate-500 dark:text-slate-400">{{ recentHost.username }}@{{ recentHost.host }}</p>
-              <div class="mt-3 flex items-center justify-between gap-2">
-                <span class="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-                  <span
-                    class="h-2 w-2 rounded-full"
-                    :class="recentHostProbe?.online ? 'bg-emerald-500' : recentHostProbe ? 'bg-rose-500' : 'bg-slate-400'"
-                  ></span>
-                  {{ recentHostProbe?.online ? '在线' : (recentHostProbe ? '离线' : '未探测') }}
-                </span>
-                <button
-                  type="button"
-                  class="h-8 rounded-lg bg-sky-600 px-3 text-xs font-medium text-white transition hover:bg-sky-500"
-                  @click="connectRecent"
-                >
-                  连接
-                </button>
-              </div>
-            </div>
-            <p v-else class="mt-3 text-sm text-slate-500 dark:text-slate-400">还没有 VPS，去 Agent 页添加</p>
-          </div>
-
-          <!-- 异常主机 -->
-          <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
-            <div class="flex items-center justify-between gap-2">
-              <div class="flex items-center gap-2 text-sm font-semibold">
-                <AppIcon name="alert" :size="16" class="text-slate-400" />
-                <span>异常主机</span>
-              </div>
-              <span
-                v-if="abnormalCount > 0"
-                class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700 dark:bg-rose-400/10 dark:text-rose-200"
-              >{{ abnormalCount }}</span>
-            </div>
-            <ul v-if="abnormalCount > 0" class="mt-3 space-y-1.5">
-              <li
-                v-for="host in abnormalHosts.slice(0, 5)"
-                :key="host.id"
-                class="flex items-center justify-between gap-2 rounded-lg border border-rose-100 bg-rose-50/60 px-2.5 py-1.5 text-xs dark:border-rose-400/15 dark:bg-rose-400/[0.06]"
-              >
-                <span class="truncate font-medium text-slate-700 dark:text-slate-200">{{ host.name }}</span>
-                <span class="shrink-0 font-mono text-[11px] text-rose-600 dark:text-rose-300">{{ abnormalReason(host) }}</span>
-              </li>
-            </ul>
-            <p v-if="abnormalCount > 5" class="mt-2 text-center text-[11px] text-slate-400">还有 {{ abnormalCount - 5 }} 台 …</p>
-            <div v-if="abnormalCount === 0" class="mt-3 flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-300">
-              <AppIcon name="check" :size="14" :stroke-width="2.4" />
-              <span>{{ totalCount > 0 ? '全部主机运行正常' : '暂无主机' }}</span>
-            </div>
-            <button
-              type="button"
-              class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-sky-300 hover:text-sky-700 dark:border-white/10 dark:text-slate-300 dark:hover:text-sky-200"
-              @click="router.push('/panel/probe')"
-            >
-              打开探针中心
-            </button>
-          </div>
-
-          <!-- 快捷入口 -->
-          <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
-            <div class="flex items-center gap-2 text-sm font-semibold">
-              <AppIcon name="zap" :size="16" class="text-slate-400" />
-              <span>快捷入口</span>
-            </div>
-            <div class="mt-3 grid grid-cols-2 gap-2">
-              <button
-                v-for="link in quickLinks"
-                :key="link.to"
-                type="button"
-                class="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 dark:border-white/10 dark:text-slate-300 dark:hover:bg-sky-400/10 dark:hover:text-sky-200"
-                @click="router.push(link.to)"
-              >
-                <AppIcon :name="link.icon" :size="15" />
-                <span>{{ link.label }}</span>
-              </button>
-            </div>
-          </div>
-        </aside>
       </section>
     </div>
 
