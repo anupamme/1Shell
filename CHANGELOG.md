@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.7.2 - 2026-07-09
+
+4.7.2 将终端页并入 Agent 页：一个页面同时承载 AI 对话与终端操作，并清理全部被取代的旧实现。
+
+- Agent 页新增可折叠终端分栏：header「终端」按钮开合，分隔条可拖宽（25–70%），支持全屏；终端惰性启动——不打开终端不再启动本机 PTY；开合状态与宽度本地持久化。
+- 主机管理并入 Agent 页左栏：新增「主机」标签页承载主机的添加/编辑/删除与连接，会话列表按主机分组展示（无主机归属的会话进「全局」分组）；`?host=` 链接直达＝选中主机并打开终端。
+- 终端与聊天复用同一条 socket 连接（此前终端页会单独再开一条）。
+- 路由收敛：/terminal、/console、/ide 全部重定向到 /agent（查询参数保留），主导航精简为 4 项。
+- 移除被协议 agent 取代的 agent:* PTY 通道（agent-pty 服务、socket 处理器、providers 目录）与旧版页面/面板（终端页、IDE 页、旧 AI 聊天面板等），连同孤儿组件与无用依赖一并清理，净删约 6200 行。
+
+### Verification
+
+- `npm test`（34 个脚本；守卫测试固化全部删除项，防止误恢复）
+- `npm --prefix frontend run build`
+- staged source secret/path scan before release
+
 ## 4.7.1 - 2026-07-08
 
 4.7.1 实现 1Shell AI 与第三方 agent（Claude Code / Codex）在同一会话内的无缝互切，并简化第三方 agent 的权限接入方式。
