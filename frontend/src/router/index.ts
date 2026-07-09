@@ -2,7 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 const routes: RouteRecordRaw[] = [
   // ========== 顶层页面 + 独立设置 ==========
-  // 4.7.3：主页重构为真实地图仪表盘（HomeDashboardView），旧 WorldHomeView 下线备查
+  // 4.7.3：主页 = 品牌 Hero + 右下角全球部署地图（HomeDashboardView）
   { path: '/',         name: 'home',     component: () => import('@/views/HomeDashboardView.vue') },
   { path: '/agent',    name: 'agent',    component: () => import('@/views/AgentView.vue') },
   { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
