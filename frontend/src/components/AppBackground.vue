@@ -8,18 +8,7 @@ function rand(seed: number, min: number, max: number): number {
   return min + (x - Math.floor(x)) * (max - min);
 }
 
-const petals = Array.from({ length: 48 }, (_, i) => ({
-  left: `${rand(i, 1, 94).toFixed(1)}%`,
-  width: `${rand(i + 100, 5, 12).toFixed(1)}px`,
-  height: `${rand(i + 200, 8, 16).toFixed(1)}px`,
-  duration: `${rand(i + 300, 10, 18).toFixed(1)}s`,
-  delay: `-${rand(i + 400, 0, 14).toFixed(1)}s`,
-  rotate: `${rand(i + 500, 0, 360).toFixed(0)}deg`,
-  drift: `${rand(i + 600, -70, 70).toFixed(0)}px`,
-  hue: `${rand(i + 700, 330, 360).toFixed(0)}`,
-}));
-
-const meteors = Array.from({ length: 18 }, (_, i) => ({
+const meteors = Array.from({ length: 5 }, (_, i) => ({
   left: `${rand(i + 10, -25, 60).toFixed(1)}%`,
   top: `${rand(i + 20, -15, 75).toFixed(1)}%`,
   length: `${rand(i + 30, 80, 220).toFixed(0)}px`,
@@ -50,24 +39,7 @@ onBeforeUnmount(() => mo?.disconnect());
 
 <template>
   <div class="app-bg-layer" aria-hidden="true">
-    <template v-if="!isDark">
-      <div class="bg-paper-noise" />
-      <div
-        v-for="(p, i) in petals"
-        :key="`petal-${i}`"
-        class="bg-petal"
-        :style="{
-          left: p.left,
-          width: p.width,
-          height: p.height,
-          animationDuration: p.duration,
-          animationDelay: p.delay,
-          '--bg-rotate': p.rotate,
-          '--bg-drift': p.drift,
-          '--bg-hue': p.hue,
-        }"
-      />
-    </template>
+    <div v-if="!isDark" class="bg-paper-noise" />
   </div>
   <div v-if="isDark" class="app-stars-layer" aria-hidden="true">
     <svg class="bg-moon" viewBox="0 0 70 70" aria-hidden="true">

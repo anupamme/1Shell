@@ -28,6 +28,7 @@ data/native-cli-config/
 data/skill-import-staging/
 data/geoip/
 data/claude-code-skills/
+data/map-tiles/
 
 # Runtime/imported Skills. Keep source templates tracked.
 data/skills/*

@@ -46,6 +46,7 @@ const { createAuthRouter } = require('./src/routes/auth.routes');
 const { createHealthRouter } = require('./src/routes/health.routes');
 const { createHostRouter } = require('./src/routes/host.routes');
 const { createGeoRouter } = require('./src/routes/geo.routes');
+const { createMapTilesRouter } = require('./src/routes/map-tiles.routes');
 const { createGeoIpService } = require('./src/services/geoip.service');
 const { createProbeRouter } = require('./src/routes/probe.routes');
 const { createProbeAgentAdminRouter, createProbeAgentPublicRouter } = require('./src/routes/probe-agent.routes');
@@ -304,6 +305,7 @@ app.use('/api', createHostRouter({
 }));
 const geoIpService = createGeoIpService();
 app.use('/api', createGeoRouter({ hostService, geoIpService, probeService }));
+app.use('/api', createMapTilesRouter({ dataDir }));
 app.use('/api', createProbeRouter({ probeService }));
 app.use('/api', createProbeAgentAdminRouter({ probeAgentService, probeAgentInstallerService, probeAggregatorService }));
 app.use('/api', createProbeRelayAdminRouter({ probeRelayService, probeRelayInstallerService }));

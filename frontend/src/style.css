@@ -2687,31 +2687,6 @@
   mix-blend-mode: screen;
 }
 
-/* Petals – light mode */
-.bg-petal {
-  position: absolute;
-  top: -20px;
-  background: radial-gradient(
-    ellipse at 40% 30%,
-    hsl(var(--bg-hue, 210), 90%, 92%) 0%,
-    hsl(var(--bg-hue, 210), 85%, 78%) 55%,
-    hsl(var(--bg-hue, 210), 75%, 63%) 100%
-  );
-  border-radius: 50% 0 50% 0;
-  opacity: 0;
-  animation: bg-petal-fall linear infinite;
-}
-
-@keyframes bg-petal-fall {
-  0%   { transform: translateY(0) rotate(0deg) translateX(0); opacity: 0; }
-  8%   { opacity: 0.6; }
-  88%  { opacity: 0.35; }
-  100% {
-    transform: translateY(110vh) rotate(var(--bg-rotate, 270deg)) translateX(var(--bg-drift, 40px));
-    opacity: 0;
-  }
-}
-
 /* Meteors – dark mode */
 .bg-meteor {
   position: absolute;
