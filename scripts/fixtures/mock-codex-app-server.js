@@ -139,6 +139,7 @@ async function handleTurnStart(msg) {
   if (resumed) marks.push('[resumed]');
   if (text.includes('[会话交接]')) marks.push('[handoff-seen]');
   if (text.includes('[目标 VPS]')) marks.push('[targets-seen]');
+  if (text.includes('.1shell-attachments')) marks.push('[attachments-seen]');
   const greeting = `${marks.join(' ')}${marks.length ? ' ' : ''}Hello codex.`;
   notify('item/started', { threadId, turnId, item: { type: 'agentMessage', id: 'msg-1', text: '', phase: 'final_answer' } });
   notify('item/agentMessage/delta', { threadId, turnId, itemId: 'msg-1', delta: greeting.slice(0, 6) });

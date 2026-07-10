@@ -36,6 +36,7 @@ import type { HostInfo } from '@/utils/scripts';
 
 // 异步加载：CodeMirror 体积大，只在真正打开文件面板时拉取
 const AgentFilePanel = defineAsyncComponent(() => import('@/components/ide/AgentFilePanel.vue'));
+const AttachmentThumb = defineAsyncComponent(() => import('@/components/ide/AttachmentThumb.vue'));
 // 工具卡 diff（claude Edit/MultiEdit 的 old/new）同样按需加载
 const IdeEditDiff = defineAsyncComponent(() => import('@/components/ide/IdeEditDiff.vue'));
 
@@ -406,7 +407,7 @@ interface ComposerAttachment {
 }
 
 const ATTACHMENT_MAX_COUNT = 8;
-const ATTACHMENT_MAX_BINARY_BYTES = 6 * 1024 * 1024;
+const ATTACHMENT_MAX_BINARY_BYTES = 12 * 1024 * 1024;
 const ATTACHMENT_MAX_TEXT_BYTES = 800 * 1024;
 
 const attachmentInput = ref<HTMLInputElement | null>(null);
@@ -1701,7 +1702,7 @@ async function buildAttachment(file: File): Promise<ComposerAttachment> {
     };
   }
 
-  if (kind === 'image' || kind === 'document') {
+  if (kind === 'image' || kind === 'document' || kind === 'file') {
     if (file.size > ATTACHMENT_MAX_BINARY_BYTES) {
       return { ...base, error: '文件过大，仅发送文件名和大小' };
     }
@@ -1725,6 +1726,12 @@ function normalizedClipboardFile(file: File): File {
   });
 }
 
+// 单条消息 base64 总量护栏：socket.io maxHttpBufferSize 为 16MB，超限的
+// 消息会被整条丢弃，这里提前把超出的附件降级为仅发送文件名
+function attachmentsBinaryTotal(): number {
+  return composerAttachments.value.reduce((sum, item) => sum + (item.base64 ? item.size : 0), 0);
+}
+
 async function addAttachmentFiles(rawFiles: File[], source = '选择'): Promise<void> {
   const files = rawFiles.map(normalizedClipboardFile);
   if (!files.length) return;
@@ -1737,7 +1744,12 @@ async function addAttachmentFiles(rawFiles: File[], source = '选择'): Promise<
 
   for (const file of files.slice(0, remaining)) {
     try {
-      composerAttachments.value.push(await buildAttachment(file));
+      const att = await buildAttachment(file);
+      if (att.base64 && attachmentsBinaryTotal() + att.size > ATTACHMENT_MAX_BINARY_BYTES) {
+        composerAttachments.value.push({ ...att, base64: undefined, error: '附件总大小超限，仅发送文件名和大小' });
+      } else {
+        composerAttachments.value.push(att);
+      }
     } catch (err) {
       composerAttachments.value.push({
         id: makeAttachmentId(),
@@ -1796,19 +1808,6 @@ function formatAttachmentSize(size: number): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function attachmentLabel(item: ComposerAttachment): string {
-  if (item.kind === 'image') return '图片';
-  if (item.kind === 'text') return '文本';
-  if (item.kind === 'document') return '文档';
-  return '文件';
-}
-
-function attachmentSummary(): string {
-  if (!composerAttachments.value.length) return '';
-  const lines = composerAttachments.value.map((item) => `- ${item.name} (${attachmentLabel(item)}, ${formatAttachmentSize(item.size)})${item.error ? `：${item.error}` : ''}`);
-  return `\n\n附件：\n${lines.join('\n')}`;
-}
-
 function attachmentPayload(): Record<string, unknown>[] {
   return composerAttachments.value.map((item) => ({
     name: item.name,
@@ -1842,7 +1841,9 @@ function send(): void {
     follow = true;
     return;
   }
-  ide.inputText.value = `${t || '请分析附件。'}${attachmentSummary()}`;
+  // 附件不再拼文字摘要进消息：路径提示由后端注入给模型/agent，
+  // 对话里的回显走 ide:attachments 事件的缩略图/文件卡
+  ide.inputText.value = t || '请分析附件。';
   follow = true;
   ide.sendMessage();
   composerInput.value = '';
@@ -2220,8 +2221,32 @@ function onSecretRefSubmit(secretRef: string): void {
         <div v-else class="max-w-[1020px] mx-auto px-6 py-7 space-y-5">
           <template v-for="(item, index) in ide.timeline.value" :key="item.id">
             <!-- user -->
-            <div v-if="item.kind === 'user'" class="flex justify-end">
-              <div class="max-w-[76%] px-4 py-2.5 rounded-2xl rounded-br-md bg-slate-900 dark:bg-slate-100 border border-slate-900 dark:border-slate-100 text-sm leading-relaxed text-white dark:text-slate-900 shadow-sm">{{ (item as IdeChatMessage).text }}</div>
+            <div v-if="item.kind === 'user'" class="flex flex-col items-end gap-2">
+              <div v-if="(item as IdeChatMessage).text" class="max-w-[76%] px-4 py-2.5 rounded-2xl rounded-br-md bg-slate-900 dark:bg-slate-100 border border-slate-900 dark:border-slate-100 text-sm leading-relaxed text-white dark:text-slate-900 shadow-sm">{{ (item as IdeChatMessage).text }}</div>
+              <!-- 附件回显：图片=缩略图（点击放大灯箱），其余=文件卡，点击开右栏文件面板 -->
+              <div v-if="(item as IdeChatMessage).attachments?.length" class="max-w-[76%] flex flex-wrap justify-end gap-2">
+                <template v-for="(att, attIndex) in (item as IdeChatMessage).attachments" :key="`${item.id}-att-${attIndex}`">
+                  <AttachmentThumb
+                    v-if="att.kind === 'image' && att.path"
+                    :path="att.path"
+                    :host-id="LOCAL_HOST_ID"
+                    :alt="att.name"
+                  />
+                  <button
+                    v-else
+                    type="button"
+                    class="max-w-[240px] h-8 px-2.5 rounded-lg border flex items-center gap-1.5 text-[11px] transition-colors"
+                    :class="att.error
+                      ? 'border-amber-200 dark:border-amber-400/20 bg-amber-50 dark:bg-amber-400/8 text-amber-700 dark:text-amber-300 cursor-default'
+                      : 'border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#0b0f19] text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-white/[0.16] cursor-pointer'"
+                    :title="att.error ? `${att.name}：${att.error}` : `${att.name}${att.size ? ` · ${formatAttachmentSize(att.size)}` : ''}`"
+                    @click="!att.error && att.path && openToolFile({ path: att.path })"
+                  >
+                    <AppIcon :name="att.error ? 'alert' : 'file'" :size="13" />
+                    <span class="truncate">{{ att.name || '附件' }}</span>
+                  </button>
+                </template>
+              </div>
             </div>
 
             <!-- thinking -->
@@ -2477,7 +2502,6 @@ function onSecretRefSubmit(secretRef: string): void {
           type="file"
           class="hidden"
           multiple
-          accept="image/*,.txt,.md,.markdown,.json,.jsonl,.yaml,.yml,.toml,.ini,.conf,.config,.env,.log,.csv,.tsv,.xml,.html,.css,.scss,.js,.ts,.tsx,.jsx,.vue,.py,.sh,.bash,.ps1,.sql,.pdf"
           @change="onAttachmentChange"
         />
         <div v-if="composerAttachments.length || attachmentError" class="mb-2 flex flex-wrap gap-1.5">

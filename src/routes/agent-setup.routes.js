@@ -32,8 +32,20 @@ const { getAllMcpPresets, getMcpPreset } = require('../agents/mcp-presets');
  * PUT  /api/agent/providers/:cliId/:pid/activate    设为活跃
  * PUT  /api/agent/routes/:cliId                   设置入口路由（Provider + Model）
  */
-function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetStore } = {}) {
+function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetStore, oneshellAiConfig } = {}) {
   const router = Router();
+
+  // skills 槽位的 provider 变更(增/改/删/启用/切路由)后,把活跃配置
+  // 重新生成写入 1shell-ai.json(配置文件生成器产物,运行时权威;
+  // 手工草稿在位时模块内部会跳过,不覆盖用户接管的内容)。
+  function syncOneshellAiFile(cliId) {
+    if (cliId !== 'skills' || !oneshellAiConfig?.syncFromActiveProvider) return;
+    try {
+      oneshellAiConfig.syncFromActiveProvider();
+    } catch {
+      // 同步失败不阻塞 provider 操作本身;下次操作或恢复自动会重写
+    }
+  }
 
   function resolveServerUrl(reqBody, req) {
     if (reqBody?.serverUrl && typeof reqBody.serverUrl === 'string') {
@@ -127,6 +139,14 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
   function requireNativeConfig(req, res) {
     if (!nativeCliConfig) {
       res.status(503).json({ ok: false, error: 'CLI 配置管理器未初始化' });
+      return false;
+    }
+    return true;
+  }
+
+  function requireOneshellAiConfig(res) {
+    if (!oneshellAiConfig) {
+      res.status(503).json({ ok: false, error: '1Shell AI 配置文件管理器未初始化' });
       return false;
     }
     return true;
@@ -428,8 +448,21 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
   }
 
   router.post('/agent/config-preview/:cliId', (req, res) => {
-    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
+    if (cliId === 'skills') {
+      if (!requireOneshellAiConfig(res)) return;
+      const draft = req.body?.provider || {};
+      if (!validateProviderUpstream(cliId, draft.upstreamProtocol || undefined, res)) return;
+      try {
+        const files = oneshellAiConfig.previewFiles({
+          activeProvider: buildConfigPreviewProvider(cliId, req.body || {}),
+        });
+        return res.json({ ok: true, cliId, files });
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    }
+    if (!requireNativeConfig(req, res)) return;
     if (!validateManifestCli(cliId, res)) return;
     const draft = req.body?.provider || {};
     const upstream = draft.upstreamProtocol || undefined;
@@ -446,8 +479,16 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
   });
 
   router.get('/agent/config-files/:cliId', (req, res) => {
-    if (!requireNativeConfig(req, res)) return;
     const { cliId } = req.params;
+    if (cliId === 'skills') {
+      if (!requireOneshellAiConfig(res)) return;
+      try {
+        return res.json({ ok: true, cliId, files: oneshellAiConfig.listFiles() });
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    }
+    if (!requireNativeConfig(req, res)) return;
     if (!validateManifestCli(cliId, res)) return;
     try {
       const files = nativeCliConfig.listConfigFiles(cliId, { cwd: req.query.cwd || process.cwd() });
@@ -458,8 +499,16 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
   });
 
   router.put('/agent/config-files/:cliId/:fileName', (req, res) => {
-    if (!requireNativeConfig(req, res)) return;
     const { cliId, fileName } = req.params;
+    if (cliId === 'skills') {
+      if (!requireOneshellAiConfig(res)) return;
+      try {
+        return res.json({ ok: true, cliId, files: oneshellAiConfig.writeFile(fileName, req.body?.content || '') });
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    }
+    if (!requireNativeConfig(req, res)) return;
     if (!validateManifestCli(cliId, res)) return;
     try {
       const files = nativeCliConfig.writeConfigFile(cliId, fileName, req.body?.content || '');
@@ -470,8 +519,16 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
   });
 
   router.delete('/agent/config-files/:cliId/:fileName/override', (req, res) => {
-    if (!requireNativeConfig(req, res)) return;
     const { cliId, fileName } = req.params;
+    if (cliId === 'skills') {
+      if (!requireOneshellAiConfig(res)) return;
+      try {
+        return res.json({ ok: true, cliId, files: oneshellAiConfig.clearOverride(fileName) });
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message });
+      }
+    }
+    if (!requireNativeConfig(req, res)) return;
     if (!validateManifestCli(cliId, res)) return;
     try {
       const files = nativeCliConfig.clearConfigFileOverride(cliId, fileName, { cwd: req.body?.cwd || process.cwd() });
@@ -531,6 +588,7 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     if (!validateProviderUpstream(req.params.cliId, upstream, res)) return;
     try {
       const id = proxyConfigStore.addProvider(req.params.cliId, body);
+      syncOneshellAiFile(req.params.cliId);
       return res.json({ ok: true, id });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -572,6 +630,7 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     try {
       const ok = proxyConfigStore.updateProvider(req.params.cliId, req.params.pid, req.body || {});
       if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+      syncOneshellAiFile(req.params.cliId);
       return res.json({ ok: true });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -583,6 +642,7 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     try {
       const ok = proxyConfigStore.deleteProvider(req.params.cliId, req.params.pid);
       if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+      syncOneshellAiFile(req.params.cliId);
       return res.json({ ok: true });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -595,6 +655,7 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
       const modelId = req.body?.modelId || req.body?.activeModelId || null;
       const ok = proxyConfigStore.setActive(req.params.cliId, req.params.pid, modelId);
       if (!ok) return res.status(404).json({ ok: false, error: 'Provider 不存在' });
+      syncOneshellAiFile(req.params.cliId);
       return res.json({ ok: true });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -612,6 +673,7 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     try {
       const route = proxyConfigStore.setRoute(req.params.cliId, req.body || {});
       if (!route) return res.status(404).json({ ok: false, error: 'Route 指向的 Provider 不存在' });
+      syncOneshellAiFile(req.params.cliId);
       return res.json({ ok: true, activeRoute: route });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });

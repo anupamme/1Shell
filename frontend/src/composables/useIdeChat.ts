@@ -12,12 +12,23 @@ export type IdeApprovalMode = 'manual' | 'delegated' | 'full_access';
 export type IdeToolStatus = 'preparing' | 'running' | 'done' | 'error';
 export type IdeToolLogStream = 'stdout' | 'stderr';
 
+// 用户消息随附的附件（后端落盘后的元数据；error 条目表示未能保存）
+export interface IdeMessageAttachment {
+  path?: string;
+  name: string;
+  mime?: string;
+  kind?: string;
+  size?: number;
+  error?: string;
+}
+
 export interface IdeChatMessage {
   id: string;
   kind: Extract<IdeTimelineKind, 'user' | 'assistant'>;
   role: IdeChatRole;
   text: string;
   status?: IdeChatStatus;
+  attachments?: IdeMessageAttachment[];
 }
 
 export interface IdeToolLogEntry {
@@ -835,6 +846,40 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         if (!matchesCurrentRun(msg)) return;
         currentTextHadDelta = false;
         setStatus(msg.phase === 'compact' ? '正在压缩...' : '思考中...');
+      }],
+      ['ide:attachments', (raw: unknown) => {
+        // 附件落盘回执：后端把 base64 写成真实文件后回传路径元数据，挂到
+        // 最近一条用户消息上 —— 前端据此渲染缩略图/文件卡（图床式回显）
+        const msg = raw as StreamMessage & { attachments?: unknown; skipped?: unknown };
+        if (!matchesCurrentRun(msg)) return;
+        const stored = Array.isArray(msg.attachments) ? msg.attachments : [];
+        const skipped = Array.isArray(msg.skipped) ? msg.skipped : [];
+        const attachments: IdeMessageAttachment[] = [];
+        for (const raw of stored) {
+          const att = raw as { path?: unknown; name?: unknown; mime?: unknown; kind?: unknown; size?: unknown };
+          const path = String(att?.path || '').trim();
+          if (!path) continue;
+          attachments.push({
+            path,
+            name: String(att?.name || ''),
+            mime: String(att?.mime || ''),
+            kind: String(att?.kind || ''),
+            size: Number(att?.size) || 0,
+          });
+        }
+        for (const raw of skipped) {
+          const item = raw as { name?: unknown; reason?: unknown };
+          attachments.push({ name: String(item?.name || '未命名附件'), error: String(item?.reason || '未能保存') });
+        }
+        if (!attachments.length) return;
+        for (let i = timeline.value.length - 1; i >= 0; i--) {
+          const item = timeline.value[i];
+          if (item.kind === 'user') {
+            (item as IdeChatMessage).attachments = attachments;
+            touchTimeline();
+            return;
+          }
+        }
       }],
       ['ide:text-delta', (raw: unknown) => {
         const msg = raw as StreamMessage & { delta?: string; text?: string };

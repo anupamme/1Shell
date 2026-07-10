@@ -188,6 +188,16 @@ const activePreset = computed<ProviderPreset | null>(() => {
   return presetsAll.value.find(p => p.id === fPresetId.value) || null;
 });
 
+// 主模型快选:preset 的模型列表 + 当前已填值(编辑旧配置时也能看到高亮)
+const modelSuggestions = computed<string[]>(() => {
+  const out: string[] = [];
+  for (const m of activePreset.value?.models || []) {
+    const clean = String(m || '').trim();
+    if (clean && !out.includes(clean)) out.push(clean);
+  }
+  return out;
+});
+
 // 当前 model 是否被识别为 reasoning model(用于 reasoning select 的提示)
 const modelLooksReasoning = computed<boolean>(() => {
   const m = resolvePrimaryModelFromForm().toLowerCase();
@@ -216,6 +226,9 @@ function pickPreset(preset: ProviderPreset): void {
   fPrimaryModel.value = first;
   fActiveModelId.value = first ? makeModelProfileId(first) : null;
   fReasoningEffort.value = normalizeEffortForCli(preset.reasoningEffort || 'auto');
+  fRequestParams.value = isSkillsSlot.value
+    ? legacyEffortToParamsJson((preset.reasoningEffort || 'auto') as ReasoningEffort, fUpstream.value)
+    : '';
   if (isClaudeCode.value) {
     fClaudeModels.value = {
       sonnet: createClaudeRoleForm(preset.claudeModels?.sonnet || { model: first }),
@@ -268,22 +281,23 @@ function serializeModelForms() {
   const model = resolvePrimaryModelFromForm();
   if (!model) return [];
   const id = fActiveModelId.value || makeModelProfileId(model);
-  return [
-    {
-      id,
-      apiModel: model,
-      displayName: model,
-      enabled: true,
-      reasoningEffort: normalizeEffortForCli(fReasoningEffort.value || 'auto'),
-    },
-  ];
+  const profile: Record<string, unknown> = {
+    id,
+    apiModel: model,
+    displayName: model,
+    enabled: true,
+    // skills 槽位语义档位退役:thinking 等参数由 requestParams 原样自填
+    reasoningEffort: isSkillsSlot.value ? 'auto' : normalizeEffortForCli(fReasoningEffort.value || 'auto'),
+  };
+  if (isSkillsSlot.value) profile.requestParams = parseRequestParams();
+  return [profile];
 }
 
 const activeConfigFile = computed<AgentConfigFileInfo | null>(() => (
   configFiles.value.find((file) => file.name === activeConfigFileName.value) || configFiles.value[0] || null
 ));
 
-const showConfigEditor = computed(() => SHOW_CONFIG_FILE_DRAFTS && Boolean(props.cliId && props.cliId !== SKILLS_SLOT_ID));
+const showConfigEditor = computed(() => SHOW_CONFIG_FILE_DRAFTS && Boolean(props.cliId));
 
 function syncConfigDraft(file: AgentConfigFileInfo | null): void {
   activeConfigFileName.value = file?.name || '';
@@ -348,7 +362,7 @@ async function saveConfigFile(options: { silent?: boolean } = {}): Promise<boole
     configFiles.value = resp.files || [];
     const saved = configFiles.value.find((file) => file.name === activeConfigFileName.value) || activeConfigFile.value;
     syncConfigDraft(saved);
-    if (!options.silent) notify.success('配置草稿已保存');
+    if (!options.silent) notify.success(isSkillsSlot.value ? '配置文件已保存并立即生效' : '配置草稿已保存');
     return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -384,6 +398,14 @@ async function resetConfigFileOverride(): Promise<void> {
 }
 
 const isSkillsSlot = computed(() => props.cliId === SKILLS_SLOT_ID);
+// skills 槽位复用同一配置文件生成器 UI,但语义不同:1shell-ai.json 是运行时权威,
+// 保存草稿=手工接管并立即生效(原生 CLI 槽位则要回列表点「启用」才写入主机)。
+const configEditorTitle = computed(() => (isSkillsSlot.value ? '1Shell AI 配置文件' : '原生配置文件生成器'));
+const configEditorHint = computed(() => (
+  isSkillsSlot.value
+    ? '1Shell AI 每次请求都读取此文件。保存表单或切换启用引擎时自动按表单重新生成；「保存草稿」会手工接管并立即生效，之后表单不再覆盖，点「恢复自动」可回到跟随表单。'
+    : '根据左侧表单实时生成 CLI 会读取的配置；保存草稿不会写入主机原生路径，点击列表里的“启用”后才生效。'
+));
 const isClaudeCode = computed(() => props.cliId === 'claude-code');
 const isCodex = computed(() => props.cliId === 'codex');
 const isNativeCli = computed(() => Boolean(props.cliId && props.cliId !== SKILLS_SLOT_ID));
@@ -434,6 +456,69 @@ function normalizeUpstreamForCli(value?: UpstreamProtocol): UpstreamProtocol {
   return value && allowed.includes(value) ? value : allowed[0];
 }
 
+// ── 1Shell AI 模型请求参数(配置文件式自填)──────────────────────────────
+//   skills 槽位不再用语义化 reasoning 档位翻译;用户按上游 API 文档自填 JSON,
+//   保存后由代理原样浅合并进请求体顶层(同名字段覆盖,messages/stream 除外)。
+const fRequestParams = ref('');
+
+const REQUEST_PARAMS_EXAMPLES: Record<UpstreamProtocol, Array<{ label: string; json: Record<string, unknown> }>> = {
+  anthropic: [
+    { label: 'Claude 4.6+ (adaptive+effort)', json: { thinking: { type: 'adaptive' }, output_config: { effort: 'high' } } },
+    { label: 'Claude 旧版 (budget_tokens)', json: { thinking: { type: 'enabled', budget_tokens: 16000 } } },
+  ],
+  openai: [
+    { label: 'OpenAI 系 (reasoning_effort)', json: { reasoning_effort: 'high' } },
+    { label: 'Qwen 系 (enable_thinking)', json: { enable_thinking: true } },
+  ],
+};
+
+const requestParamsExamples = computed(() => (
+  isSkillsSlot.value ? (REQUEST_PARAMS_EXAMPLES[fUpstream.value] || []) : []
+));
+
+const requestParamsError = computed<string | null>(() => {
+  const text = fRequestParams.value.trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '必须是 JSON 对象(键值对)';
+    return null;
+  } catch (err) {
+    return `JSON 解析失败: ${err instanceof Error ? err.message : String(err)}`;
+  }
+});
+
+function parseRequestParams(): Record<string, unknown> | null {
+  const text = fRequestParams.value.trim();
+  if (!text) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`模型请求参数不是合法 JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('模型请求参数必须是 JSON 对象(键值对)');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function fillRequestParamsExample(json: Record<string, unknown>): void {
+  fRequestParams.value = JSON.stringify(json, null, 2);
+}
+
+// 旧的语义化档位 → 等效原始参数(打开旧配置时预填,保存后档位归 auto,行为保持不变)
+// 数值与 src/agents/reasoning.js 的映射表一致
+function legacyEffortToParamsJson(effort: ReasoningEffort, upstream: UpstreamProtocol): string {
+  if (!effort || effort === 'auto') return '';
+  if (upstream === 'anthropic') {
+    const budget = effort === 'low' ? 4000 : effort === 'medium' ? 16000 : 64000;
+    return JSON.stringify({ thinking: { type: 'enabled', budget_tokens: budget } }, null, 2);
+  }
+  const value = effort === 'max' || effort === 'xhigh' ? 'xhigh' : effort;
+  return JSON.stringify({ reasoning_effort: value }, null, 2);
+}
+
 const saveBtnText = computed(() => {
   if (saving.value) return '保存中...';
   if (isSkillsSlot.value) return editingPid.value ? '保存修改' : '添加引擎';
@@ -461,6 +546,7 @@ function resetFormToAdd(): void {
   fClaudeModels.value = createEmptyClaudeModels();
   fActiveModelId.value = null;
   fReasoningEffort.value = 'auto';
+  fRequestParams.value = '';
   fPresetId.value = '';
   presetsCollapsed.value = false;
   statusText.value = '';
@@ -481,6 +567,14 @@ function startEdit(p: ProviderInfo): void {
   const fallback = p.model || activeModel?.apiModel || '';
   fPrimaryModel.value = fallback;
   fReasoningEffort.value = normalizeEffortForCli((activeModel?.reasoningEffort || p.reasoningEffort || 'auto') as ReasoningEffort);
+  if (isSkillsSlot.value) {
+    const storedParams = activeModel?.requestParams ?? p.requestParams ?? null;
+    fRequestParams.value = storedParams && Object.keys(storedParams).length
+      ? JSON.stringify(storedParams, null, 2)
+      : legacyEffortToParamsJson(fReasoningEffort.value, fUpstream.value);
+  } else {
+    fRequestParams.value = '';
+  }
   fClaudeModels.value = {
     sonnet: createClaudeRoleForm(p.claudeModels?.sonnet || { model: fallback }),
     opus: createClaudeRoleForm(p.claudeModels?.opus || { model: fallback }),
@@ -591,12 +685,15 @@ function buildProviderPayload(): Record<string, unknown> {
     apiBase: fApiBase.value.trim(),
     apiKey: fApiKey.value.trim() || undefined,
     model: primaryModel || undefined,
-    reasoningEffort: normalizeEffortForCli(fReasoningEffort.value || 'auto'),
+    reasoningEffort: isSkillsSlot.value ? 'auto' : normalizeEffortForCli(fReasoningEffort.value || 'auto'),
     models: modelProfiles,
     activeModelId,
     presetId: fPresetId.value || '',
     enabled: (editingPid.value ? providers.value.find(p => p.id === editingPid.value) : null)?.enabled,
   };
+  if (isSkillsSlot.value) {
+    body.requestParams = parseRequestParams();
+  }
   if (isClaudeCode.value) {
     body.claudeModels = serializeClaudeModels();
     body.includeCoAuthoredBy = false;
@@ -766,6 +863,7 @@ watch([
   fClaudeModels,
   fPrimaryModel,
   fReasoningEffort,
+  fRequestParams,
   fPresetId,
 ], () => {
   scheduleConfigPreview({ fromForm: true });
@@ -878,6 +976,32 @@ const presetHint = computed(() => (
           <input v-model="fApiKey" type="password" :placeholder="fApiKeyPlaceholder" class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400" />
         </div>
 
+        <!-- 主模型（Claude Code 走下方角色映射，其余入口——含 1Shell AI 引擎——在这里选） -->
+        <div v-if="!isClaudeCode" class="flex flex-col gap-1.5">
+          <label class="text-[10px] font-semibold text-slate-400 uppercase">模型</label>
+          <input
+            v-model="fPrimaryModel"
+            type="text"
+            placeholder="例：claude-sonnet-5 / gpt-5 / deepseek-chat"
+            class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
+          />
+          <div v-if="modelSuggestions.length" class="flex flex-wrap gap-1.5">
+            <button
+              v-for="m in modelSuggestions"
+              :key="m"
+              type="button"
+              class="h-7 px-2.5 rounded-md text-[11px] font-mono border transition-colors"
+              :class="fPrimaryModel === m
+                ? 'bg-cyan-500 border-cyan-500 text-white'
+                : 'bg-white dark:bg-[#0b1324] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-cyan-400 hover:text-cyan-600 dark:hover:text-cyan-400'"
+              @click="fPrimaryModel = m"
+            >
+              {{ m }}
+            </button>
+          </div>
+          <div v-if="isSkillsSlot" class="text-[10px] text-slate-400">主控台 AI / IDE AgentRun / Skill 执行都会使用此模型。</div>
+        </div>
+
         <!-- Claude Code role mapping -->
         <div v-if="isClaudeCode" class="flex flex-col gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] p-3">
           <div class="flex items-center justify-between">
@@ -902,8 +1026,38 @@ const presetHint = computed(() => (
           </div>
         </div>
 
-        <!-- Reasoning 档位 -->
-        <div class="flex flex-col gap-1.5">
+        <!-- 1Shell AI 模型请求参数(配置文件式:原始 JSON 自填,原样合并进请求体) -->
+        <div v-if="isSkillsSlot" class="flex flex-col gap-1.5">
+          <div class="flex items-center justify-between">
+            <label class="text-[10px] font-semibold text-slate-400 uppercase">模型请求参数(JSON)</label>
+            <span v-if="requestParamsError" class="text-[9px] text-red-500">{{ requestParamsError }}</span>
+          </div>
+          <div v-if="requestParamsExamples.length" class="flex flex-wrap gap-1.5">
+            <button
+              v-for="ex in requestParamsExamples"
+              :key="ex.label"
+              type="button"
+              class="h-7 px-2.5 rounded-md text-[10px] border bg-white dark:bg-[#0b1324] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-cyan-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
+              @click="fillRequestParamsExample(ex.json)"
+            >
+              {{ ex.label }}
+            </button>
+          </div>
+          <textarea
+            v-model="fRequestParams"
+            rows="5"
+            spellcheck="false"
+            placeholder='留空 = 不加任何参数。例:{ "thinking": { "type": "enabled", "budget_tokens": 16000 } } 或 { "reasoning_effort": "xhigh" }'
+            class="w-full resize-y rounded-lg border bg-slate-50 dark:bg-[#0b1324] px-3 py-2 font-mono text-[11px] leading-5 text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400"
+            :class="requestParamsError ? 'border-red-300 dark:border-red-500/50' : 'border-slate-200 dark:border-slate-700'"
+          ></textarea>
+          <div class="text-[10px] text-slate-400">
+            按你所用上游 API 文档自填(thinking / reasoning_effort / enable_thinking / temperature…),1Shell 不做翻译,原样合并进每次请求体顶层,同名字段覆盖内置值;messages / stream 由 1Shell 管理,不可覆盖。实际生效内容见下方 1Shell AI 配置文件。
+          </div>
+        </div>
+
+        <!-- Reasoning 档位(CLI 槽位保留;1Shell AI 槽位已改为上方参数自填) -->
+        <div v-if="!isSkillsSlot" class="flex flex-col gap-1.5">
           <div class="flex items-center justify-between">
             <label class="text-[10px] font-semibold text-slate-400 uppercase">Reasoning 档位</label>
             <span
@@ -950,9 +1104,9 @@ const presetHint = computed(() => (
         <div v-if="showConfigEditor" class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-[#0b1324] overflow-hidden">
           <div class="px-3 py-2.5 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>
-              <div class="text-[10px] font-semibold text-slate-400 uppercase">原生配置文件生成器</div>
+              <div class="text-[10px] font-semibold text-slate-400 uppercase">{{ configEditorTitle }}</div>
               <div class="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
-                根据左侧表单实时生成 CLI 会读取的配置；保存草稿不会写入主机原生路径，点击列表里的“启用”后才生效。
+                {{ configEditorHint }}
               </div>
             </div>
             <div class="flex items-center gap-1.5">

@@ -24,6 +24,7 @@ const { createAcpClient } = require('./acp-client');
 const { createClaudeStreamAgent } = require('./claude-stream-adapter');
 const { createCodexAppServerAgent } = require('./codex-adapter');
 const { normalizeLocations } = require('./tool-locations');
+const { materializeAttachments, buildAttachmentHint } = require('./attachment-store');
 const { redactCredentialPatterns, redactPotentialSecrets } = require('../../../lib/secret-redaction');
 
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -813,10 +814,26 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
     ensureTurn(session);
     touchIdle(session);
 
+    // 附件落盘：base64/text → cwd/.1shell-attachments/ 下的真实文件，agent 用
+    // 自己的读取工具查看（CLI 协议不吃内联 base64）。落盘元数据（路径/名称/
+    // 类型）挂在用户消息记录上并推给前端 —— 前端经 /api/files/download 回显
+    // 缩略图（图床式：同一份文件，前端 HTTP 看、agent 读盘）。
+    const { stored: storedAttachments, skipped: skippedAttachments } = materializeAttachments({
+      attachments,
+      cwd: session.cwd,
+      logger,
+    });
+    const attachmentHint = buildAttachmentHint(storedAttachments, skippedAttachments);
+
     if (!session.firstUserMessage) session.firstUserMessage = String(message).slice(0, 200);
-    session.messages.push({ role: 'user', content: [{ type: 'text', text: String(message) }] });
+    const userEntry = { role: 'user', content: [{ type: 'text', text: String(message) }] };
+    if (storedAttachments.length) userEntry.attachments = storedAttachments;
+    session.messages.push(userEntry);
 
     emitToSession(session, 'ide:thinking', { sessionId, runId });
+    if (storedAttachments.length || skippedAttachments.length) {
+      emitToSession(session, 'ide:attachments', { sessionId, runId, attachments: storedAttachments, skipped: skippedAttachments });
+    }
 
     // 目标 VPS 提示：目标集变化时注入一次（切换 agent 后也重新注入）
     let targetHint = '';
@@ -828,8 +845,8 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
       session.lastTargetsKey = '';
     }
 
-    // 交接/目标提示只进 CLI prompt，不进会话展示记录
-    const decorated = [switchHint, targetHint, String(message)].filter(Boolean).join('\n\n');
+    // 交接/目标/附件提示只进 CLI prompt，不进会话展示记录
+    const decorated = [switchHint, targetHint, attachmentHint, String(message)].filter(Boolean).join('\n\n');
 
     try {
       await ensureClient(session, spec);
@@ -837,12 +854,12 @@ function createProtocolAgentService({ catalog, ideSessionRepository, dataDir = '
         const { stopReason } = await session.client.prompt({
           acpSessionId: session.nativeSessionId,
           text: decorated,
-          attachments,
+          attachments: storedAttachments,
         });
         finalizeTurn(session, { kind: stopReason === 'cancelled' ? 'cancelled' : 'done' });
       } else {
         // claude-stream / codex-app-server：回合定稿事件（done/error）在 handleAgentEvent 中处理
-        await session.client.prompt({ text: decorated, attachments });
+        await session.client.prompt({ text: decorated, attachments: storedAttachments });
       }
     } catch (err) {
       if (session.turn && session.turn.runId === runId) {

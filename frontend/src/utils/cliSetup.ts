@@ -72,6 +72,7 @@ export interface ProviderModelInfo {
   reasoningEffort?: ReasoningEffort;
   contextTokenLimit?: number | null;
   maxOutputTokens?: number | null;
+  requestParams?: Record<string, unknown> | null;
 }
 
 export interface ClaudeRoleModelInfo {
@@ -95,6 +96,7 @@ export interface ProviderInfo {
   reasoningEffort?: ReasoningEffort;
   contextTokenLimit?: number | null;
   maxOutputTokens?: number | null;
+  requestParams?: Record<string, unknown> | null;
   activeModelId?: string | null;
   routeModelId?: string | null;
   activeRoute?: ProviderRouteInfo | null;

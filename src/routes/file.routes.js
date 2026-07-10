@@ -5,6 +5,27 @@ const multer = require('multer');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
+// 下载接口按扩展名回真实 Content-Type：前端图片预览走 fetch→blob→<img>，
+// blob 类型若是 octet-stream 浏览器会拒绝解码（裂图）。仅映射预览需要的类型，
+// 其余保持 octet-stream 不影响"下载"语义
+const DOWNLOAD_MIME_BY_EXT = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+  avif: 'image/avif',
+  pdf: 'application/pdf',
+};
+
+function downloadContentType(filename) {
+  const ext = String(filename || '').split('.').pop().toLowerCase();
+  return DOWNLOAD_MIME_BY_EXT[ext] || 'application/octet-stream';
+}
+
 function createFileRouter({ fileService }) {
   const router = express.Router();
 
@@ -51,7 +72,7 @@ function createFileRouter({ fileService }) {
       }
       const { stream, size, filename, source } = await fileService.downloadFile(hostId, filePath);
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Type', downloadContentType(filename));
       if (source) res.setHeader('X-1Shell-File-Download-Source', source);
       if (size) res.setHeader('Content-Length', size);
       let completed = false;

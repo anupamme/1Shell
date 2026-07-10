@@ -27,6 +27,7 @@ const TYPE_TO_LEGACY_EVENT: Record<string, string> = {
   error: 'ide:error',
   cancelled: 'ide:cancelled',
   approval_request: 'ide:approve-request',
+  attachments: 'ide:attachments',
   ask_user: 'ide:ask-user',
   secret_request: 'ide:secret-request',
   authoring_session: 'ide:authoring-session',

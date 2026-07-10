@@ -13,6 +13,7 @@ const LEGACY_EVENT_TYPES = {
   'ide:error': 'error',
   'ide:cancelled': 'cancelled',
   'ide:approve-request': 'approval_request',
+  'ide:attachments': 'attachments',
   'ide:ask-user': 'ask_user',
   'ide:secret-request': 'secret_request',
   'ide:authoring-session': 'authoring_session',

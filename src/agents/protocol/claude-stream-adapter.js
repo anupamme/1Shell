@@ -249,13 +249,11 @@ function createClaudeStreamAgent({
 
   // ── 对外 API ────────────────────────────────────────────────────
 
-  function prompt({ text, attachments = [] }) {
+  function prompt({ text }) {
     if (exited || !child) return Promise.reject(new Error('claude 进程不可用'));
     if (currentTurn) return Promise.reject(new Error('上一轮尚未结束'));
+    // 附件已由 service 层落盘并把路径拼进 text，这里不再单独处理
     const blocks = [{ type: 'text', text: String(text || '') }];
-    for (const att of attachments) {
-      if (att?.path) blocks[0].text += `\n\n[附件] ${att.path}`;
-    }
     return new Promise((resolve, reject) => {
       currentTurn = { resolve, reject };
       const ok = writeNdjson(child.stdin, {

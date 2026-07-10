@@ -10,6 +10,7 @@ import AppIcon from '@/components/AppIcon.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useNotifyStore } from '@/stores/notify';
 import { isDarkTheme, languageExtensionForFile, watchDarkTheme } from '@/utils/codemirrorLang';
+import { ensureImageBlob } from '@/utils/imageBlob';
 import { renderMarkdown } from '@/utils/markdown';
 
 const props = withDefaults(defineProps<{
@@ -118,7 +119,7 @@ async function loadFile(): Promise<void> {
       const params = new URLSearchParams({ hostId: props.hostId, path: props.path });
       const resp = await fetch(`/api/files/download?${params}`);
       if (!resp.ok) throw new Error('加载失败');
-      const blob = await resp.blob();
+      const blob = ensureImageBlob(await resp.blob(), props.path);
       if (seq !== loadSeq) return;
       lastBlobUrl = URL.createObjectURL(blob);
       imageUrl.value = lastBlobUrl;

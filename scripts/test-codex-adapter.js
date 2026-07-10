@@ -445,6 +445,39 @@ async function testProtocolAgentService() {
     assert.ok(emitted4.some((e) => e.event === 'ide:error'), '协议层应显式拒绝 agentId=oneshell 的消息');
     assert.ok(!service3.hasSession(sessionId), '拒收不应把 oneshell 会话拉进协议层 live map');
 
+    // ── 附件链路：落盘 + 消息记录元数据 + ide:attachments 事件 ─────────
+    const attSessionId = 'agent-codex-att-test';
+    const emittedAtt = [];
+    const socketAtt = createFakeSocket(emittedAtt, 'sock-codex-att');
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    await service3.handleMessage({
+      socket: socketAtt,
+      sessionId: attSessionId,
+      message: 'look at this image',
+      agentId: 'mock-codex',
+      cwd: tmpDir,
+      attachments: [
+        { name: 'shot.png', mime: 'image/png', kind: 'image', base64: pngBytes.toString('base64') },
+        { name: 'broken.bin', mime: 'application/octet-stream' }, // 无内容 → skipped
+      ],
+    });
+    const attEvent = emittedAtt.find((e) => e.event === 'ide:attachments');
+    assert.ok(attEvent, '应发出 ide:attachments 事件');
+    assert.strictEqual(attEvent.payload.attachments.length, 1, '事件应携带落盘成功的附件');
+    assert.strictEqual(attEvent.payload.skipped.length, 1, '事件应携带未能保存的附件');
+    const storedAtt = attEvent.payload.attachments[0];
+    assert.ok(storedAtt.path.startsWith(path.join(tmpDir, '.1shell-attachments')), `附件应落盘在 cwd/.1shell-attachments 内: ${storedAtt.path}`);
+    assert.ok(fs.existsSync(storedAtt.path), '落盘文件应真实存在');
+    assert.deepStrictEqual(fs.readFileSync(storedAtt.path), pngBytes, '落盘字节应保真');
+    assert.ok(emittedAtt.some((e) => e.event === 'ide:event' && e.payload.type === 'attachments'), '统一事件流应有 attachments 事件');
+    const attRecord = repo.getSession(attSessionId);
+    const attUserMsg = attRecord.messages.find((m) => m.role === 'user');
+    assert.ok(Array.isArray(attUserMsg.attachments) && attUserMsg.attachments.length === 1, '用户消息记录应挂附件元数据（重载回显用）');
+    assert.strictEqual(attUserMsg.attachments[0].path, storedAtt.path, '记录中的路径应与事件一致');
+    assert.strictEqual(attUserMsg.attachments[0].kind, 'image');
+    const attText = emittedAtt.filter((e) => e.event === 'ide:text').map((e) => e.payload.text).join('');
+    assert.ok(attText.includes('[attachments-seen]'), `CLI prompt 应含附件落盘路径提示，实际: ${attText.slice(0, 200)}`);
+
     service3.shutdown();
   } finally {
     for (let attempt = 0; ; attempt++) {

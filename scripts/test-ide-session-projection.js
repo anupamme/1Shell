@@ -82,6 +82,57 @@ try {
   const serviceHits = ideService.findSessionsByFile('/tmp/other.txt').map((s) => s.id);
   assert.deepStrictEqual(serviceHits, ['agent-projection-2'], 'ideService.findSessionsByFile must delegate to the repository');
 
+  // 附件元数据投影：user 消息的 attachments 透出到时间线；服务注入的附件
+  // 摘要块 / 精确文本块不进气泡（前端以缩略图/文件卡呈现附件）
+  repo.upsertSession({
+    id: 'agent-projection-att',
+    title: 'attachments',
+    entry: 'core',
+    hostId: '',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '看看这张图' },
+          { type: 'text', text: '\n\n用户随消息发送了以下附件：\n- shot.png (图片, image/png, 1.0 KB)' },
+          { type: 'text', text: '\n\n<attachment name="notes.txt" mime="text/plain" exactHandle="att_0_abc" bytes=5 sha256="x">\nhello\n</attachment>' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGk=' } },
+        ],
+        attachments: [
+          { path: '/data/agent-attachments/s1/x-1-shot.png', name: 'shot.png', mime: 'image/png', kind: 'image', size: 1024 },
+        ],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: '好的' }] },
+    ],
+  });
+  const attDetail = ideService.getSessionDetail('agent-projection-att');
+  const attUser = attDetail.timeline[0];
+  assert.strictEqual(attUser.kind, 'user');
+  assert.strictEqual(attUser.text, '看看这张图', '服务注入的附件摘要/精确文本块不应进用户气泡');
+  assert.deepStrictEqual(attUser.attachments, [
+    { path: '/data/agent-attachments/s1/x-1-shot.png', name: 'shot.png', mime: 'image/png', kind: 'image', size: 1024 },
+  ], '附件元数据应投影到时间线 user 项');
+
+  // 纯附件消息（无正文）也要出现在时间线上
+  repo.upsertSession({
+    id: 'agent-projection-att-only',
+    title: 'attachments only',
+    entry: 'core',
+    hostId: '',
+    messages: [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: '\n\n用户随消息发送了以下附件：\n- a.png' }],
+        attachments: [{ path: '/tmp/a.png', name: 'a.png', mime: 'image/png', kind: 'image', size: 10 }],
+      },
+    ],
+  });
+  const attOnlyDetail = ideService.getSessionDetail('agent-projection-att-only');
+  assert.strictEqual(attOnlyDetail.timeline.length, 1, '纯附件消息应保留时间线项');
+  assert.strictEqual(attOnlyDetail.timeline[0].kind, 'user');
+  assert.strictEqual(attOnlyDetail.timeline[0].text, '', '纯附件消息气泡文本为空');
+  assert.strictEqual(attOnlyDetail.timeline[0].attachments.length, 1);
+
   console.log('ide-session-projection checks passed');
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });

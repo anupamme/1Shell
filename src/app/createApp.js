@@ -19,7 +19,8 @@ function createApp(rootDir) {
         styleSrc: ["'self'", "'unsafe-inline'", 'cdn.jsdelivr.net', 'cdn.tailwindcss.com', 'unpkg.com'],
         fontSrc: ["'self'", 'cdn.jsdelivr.net', 'cdn.tailwindcss.com', 'unpkg.com'],
         connectSrc: ["'self'", 'ws:', 'wss:'],
-        imgSrc: ["'self'", 'data:'],
+        // blob: 供附件缩略图 / 文件面板图片预览（fetch→blob URL 渲染）
+        imgSrc: ["'self'", 'data:', 'blob:'],
         upgradeInsecureRequests: null,
       },
     },

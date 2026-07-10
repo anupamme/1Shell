@@ -148,6 +148,15 @@ function testProjection() {
   assert.strictEqual(cleanProjected[0], clean[0], '纯字符串消息应原引用返回');
   assert.strictEqual(cleanProjected[1], clean[1], '合法 assistant 消息应原引用返回');
   assert.strictEqual(cleanProjected[2], clean[2], '合法 tool_result 消息应原引用返回');
+
+  // 消息级附加字段（附件落盘元数据）不属于模型 API 形状，请求边界剥离
+  const withMeta = [
+    { role: 'user', content: [{ type: 'text', text: 'see image' }], attachments: [{ path: '/x/shot.png', name: 'shot.png' }] },
+  ];
+  const metaSnapshot = JSON.stringify(withMeta);
+  const metaProjected = projectMessagesForModelApi(withMeta);
+  assert.deepStrictEqual(Object.keys(metaProjected[0]).sort(), ['content', 'role'], '消息级 attachments 字段应被剥离');
+  assert.strictEqual(JSON.stringify(withMeta), metaSnapshot, '剥离必须只读，不得改动源消息');
 }
 
 // ── 3. ide.service releaseLiveSession（非 live 快速路径）────────────

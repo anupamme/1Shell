@@ -437,14 +437,12 @@ function createCodexAppServerAgent({
 
   // ── 对外 API ────────────────────────────────────────────────────
 
-  async function prompt({ text, attachments = [] }) {
+  async function prompt({ text }) {
     if (exited || !child) throw new Error('codex 进程不可用');
     if (currentTurn) throw new Error('上一轮尚未结束');
     await ensureReady();
-    let content = String(text || '');
-    for (const att of attachments) {
-      if (att?.path) content += `\n\n[附件] ${att.path}`;
-    }
+    // 附件已由 service 层落盘并把路径拼进 text，这里不再单独处理
+    const content = String(text || '');
     // 逐回合覆盖：审批/沙箱/思考程度/fast 档随会话设置即时生效，无需重启进程
     const settings = currentSettings();
     const plan = approvalPlan(settings.approvalMode);

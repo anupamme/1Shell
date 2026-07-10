@@ -97,6 +97,7 @@ const { createFileService } = require('./src/services/file.service');
 const { createIpFilterService } = require('./src/services/ip-filter.service');
 const { createIpFilterRouter } = require('./src/routes/ip-filter.routes');
 const { createProxyRouter, createProxyConfigStore } = require('./src/routes/proxy.routes');
+const { createOneshellAiConfig } = require('./src/agents/oneshell-ai-config');
 const { createSkillRegistry } = require('./src/skills/registry');
 const { createSkillImportStager } = require('./src/skills/skill-import-stager');
 const { createLibraryService } = require('./src/skills/library.service');
@@ -136,6 +137,7 @@ const scriptRepository = createScriptRepository(db);
 const secretService = createSecretService({ db });
 const updaterService = createUpdaterService({ rootDir: ROOT_DIR, dataDir, logger: log });
 const proxyConfigStore = createProxyConfigStore(dataDir);
+const oneshellAiConfig = createOneshellAiConfig({ dataDir, proxyConfigStore, logger: log });
 const skillRegistry = createSkillRegistry(path.join(dataDir, 'skills'), { kind: 'skill' });
 const skillImportStager = createSkillImportStager({ dataDir, logger: log });
 const aiService = createAIService({ skillsProxyUrl: `http://127.0.0.1:${PORT}/api/proxy/skills/v1/messages`, proxyConfigStore, skillRegistry });
@@ -227,6 +229,7 @@ const ideService = createIdeService({
   agentRuntime,
   secretService,
   ideSessionRepository,
+  dataDir,
 });
 
 // ─── 协议 agent（Claude Code / Gemini CLI / …）── Agent 板块的第三方接入 ──
@@ -282,7 +285,7 @@ app.use('/mcp', createMcpRouter({ mcpService, remoteMcpService }));
 
 // Skill Runner 内部协议端点：不走 Web session，但仅允许 localhost 或 PROXY_TOKEN 调用。
 // Claude Code / Codex / OpenCode 从 4.7 开始走各自原生配置，不再走这里的 Agent proxy。
-app.use('/api/proxy', createProxyRouter({ proxyConfigStore, proxyToken: PROXY_TOKEN }));
+app.use('/api/proxy', createProxyRouter({ proxyConfigStore, proxyToken: PROXY_TOKEN, oneshellAiConfig }));
 
 app.use('/api', createProbeAgentPublicRouter({ probeAgentService }));
 app.use('/api', createProbeRelayPublicRouter({ probeRelayService }));
@@ -313,7 +316,7 @@ app.use('/api', createProbeTrafficRouter({ trafficService: probeTrafficService, 
 app.use('/api', createProbeAlertRouter({ alertService: probeAlertService }));
 app.use('/api', createProbeDiagRouter({ diagService: probeDiagService }));
 app.use('/api', createPanelWorkloadsRouter({ panelWorkloadsService }));
-app.use('/api', createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetStore }));
+app.use('/api', createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetStore, oneshellAiConfig }));
 app.use('/api', createRemoteMcpRouter({ remoteMcpService, mcpService }));
 app.use('/api', createSecuritySettingsRouter({ securitySettingsService, bridgeService, hostService, auditService }));
 app.use('/api', createFileRouter({ fileService }));

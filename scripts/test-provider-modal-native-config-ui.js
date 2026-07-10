@@ -13,4 +13,9 @@ assert.match(source, /applyRequestedMode\(\s*props\.editProviderId\s*\|\|\s*null
 assert.match(source, /applyRequestedMode\(\s*newId\s*\|\|\s*null\s*\)/, 'editProviderId watcher must respect explicit add mode');
 assert.doesNotMatch(source, /prepareModal[\s\S]{0,500}applyRequestedMode\(\s*getPreferredProviderId\(\s*\)\s*\)/, 'prepareModal must not convert add mode into editing the preferred provider');
 
+// 主模型输入:非 Claude Code 的入口(含 1Shell AI 引擎/Codex)必须有可见的模型输入框,
+// 否则 fPrimaryModel 变成无 UI 绑定的死状态,用户无法选择模型(4.7 曾回归过)。
+assert.match(source, /v-if="!isClaudeCode"[\s\S]{0,600}v-model="fPrimaryModel"/, 'non-claude-code providers must expose a primary model input bound to fPrimaryModel');
+assert.match(source, /modelSuggestions/, 'provider modal should offer preset model quick picks');
+
 console.log('provider modal native config UI guard checks passed');

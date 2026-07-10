@@ -1,10 +1,12 @@
 'use strict';
 
 const crypto = require('crypto');
+const path = require('path');
 const { EventEmitter } = require('events');
 const { StringDecoder } = require('string_decoder');
 const fetch = require('node-fetch');
 const { emitIdeEvent } = require('./ide.events');
+const { materializeAttachments } = require('../agents/protocol/attachment-store');
 const {
   ONESHELL_CORE_SYSTEM_PROMPT,
 } = require('../ai/oneshell-ai-prompt');
@@ -706,6 +708,12 @@ function projectMessagesForModelApi(messages = []) {
     const results = content.filter((block) => block?.type === 'tool_result');
     const others = content.filter((block) => block?.type !== 'tool_result');
     return { ...message, content: [...results, ...others] };
+  }).map((message) => {
+    // 消息级附加字段（attachments 落盘元数据等）只服务会话记录/前端回显，
+    // 不属于模型 API 消息形状，请求边界统一剥离
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return message;
+    if (!Object.keys(message).some((key) => key !== 'role' && key !== 'content')) return message;
+    return { role: message.role, content: message.content };
   });
 }
 
@@ -1018,7 +1026,7 @@ function buildAgentUserContent({ firstContextBlock = '', runContextBlock = '', m
  *   - 工具集更广（list_artifacts / query_format 等）
  *   - 用户是对话主体，AI 响应用户指令而非自驱执行
  */
-function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry, harness, agentRuntime, secretService, ideSessionRepository }) {
+function createIdeService({ ideTools, proxyConfigStore, port, hostService, auditService, logger, localMcpService, mcpRegistry, skillRegistry, harness, agentRuntime, secretService, ideSessionRepository, dataDir = '' }) {
 
   // sessionId → { messages[], system, hostId, abortController }
   const sessions = new Map();
@@ -3637,6 +3645,27 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   // Project the stored model conversation into frontend timeline items so a
   // resumed session shows its tool calls, not just the final text.
+  // 附件相关的服务注入文本块（摘要行 / 精确文本 <attachment> 包裹）只给模型看，
+  // 时间线气泡里跳过 —— 附件在前端以缩略图/文件卡呈现（消息级 attachments 元数据）
+  function isAttachmentServiceTextBlock(blk) {
+    if (blk?.type !== 'text' || typeof blk.text !== 'string') return false;
+    const text = blk.text.trimStart();
+    return text.startsWith('用户随消息发送了以下附件：') || text.startsWith('<attachment ');
+  }
+
+  function normalizeStoredAttachmentsMeta(value) {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((att) => att && typeof att === 'object' && att.path)
+      .map((att) => ({
+        path: String(att.path),
+        name: String(att.name || ''),
+        mime: String(att.mime || ''),
+        kind: String(att.kind || ''),
+        size: Number(att.size) || 0,
+      }));
+  }
+
   function projectMessagesToTimeline(messages) {
     const items = [];
     const toolIndex = new Map();
@@ -3660,11 +3689,17 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
             item.status = blk.is_error ? 'error' : 'done';
           }
         }
-        const text = sessionTextFromContent(content, { preserveWhitespace: true });
+        const displayContent = Array.isArray(content)
+          ? content.filter((blk) => !isAttachmentServiceTextBlock(blk))
+          : content;
+        const text = sessionTextFromContent(displayContent, { preserveWhitespace: true });
+        const attachmentsMeta = normalizeStoredAttachmentsMeta(msg.attachments);
         if (text && isCompactSummaryText(text)) {
           items.push({ id: nextId('system'), kind: 'system', title: '/compact', text: compactSummaryTimelineText(text), tone: 'success' });
-        } else if (text && text.trim()) {
-          items.push({ id: nextId('user'), kind: 'user', role: 'user', text });
+        } else if ((text && text.trim()) || attachmentsMeta.length) {
+          const item = { id: nextId('user'), kind: 'user', role: 'user', text: text && text.trim() ? text : '' };
+          if (attachmentsMeta.length) item.attachments = attachmentsMeta;
+          items.push(item);
         }
       } else if (role === 'assistant') {
         const blocks = Array.isArray(content) ? content : [{ type: 'text', text: String(content || '') }];
@@ -3942,7 +3977,18 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     if (!(session.exactTextAttachments instanceof Map)) session.exactTextAttachments = new Map();
     const userContent = buildAgentUserContent({ firstContextBlock, runContextBlock, message, attachments, exactTextRegistry: session.exactTextAttachments });
 
-    session.messages.push({ role: 'user', content: userContent });
+    // 附件落盘（图床式回显）：base64 仍随消息进模型（1Shell AI 走多模态 block），
+    // 同时写一份到 dataDir/agent-attachments/<sessionId>/，落盘元数据挂在消息
+    // 记录上 —— 前端经 /api/files/download 显示缩略图，刷新后依然可见
+    const { stored: storedAttachments, skipped: skippedAttachments } = materializeAttachments({
+      attachments,
+      dir: dataDir ? path.join(dataDir, 'agent-attachments', String(sessionId || 'session').replace(/[^\w.-]/g, '_')) : '',
+      logger,
+    });
+
+    const userMessageEntry = { role: 'user', content: userContent };
+    if (storedAttachments.length) userMessageEntry.attachments = storedAttachments;
+    session.messages.push(userMessageEntry);
     if (!session.firstUserMessage) session.firstUserMessage = String(message || '').trim();
     session.updatedAt = new Date().toISOString();
     persistSessionSafe(sessionId, session, { modelLabel: '' });
@@ -3966,6 +4012,9 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     const { model, proxyUrl } = providerConfig;
 
     emitToSession(session, socket, 'ide:thinking', { sessionId, runId });
+    if (storedAttachments.length || skippedAttachments.length) {
+      emitToSession(session, socket, 'ide:attachments', { sessionId, runId, attachments: storedAttachments, skipped: skippedAttachments });
+    }
 
     const safeAuditMessage = redactPotentialSecrets(String(message || '')).substring(0, 500);
     auditService?.log?.({ action: 'ide_message', source: 'ide', command: safeAuditMessage, details: JSON.stringify({ sessionId }) });

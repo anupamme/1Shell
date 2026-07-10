@@ -152,6 +152,52 @@ function normalizeProviderApiBase(apiBase) {
   return url.toString().replace(/\/$/, '');
 }
 
+// ─── requestParams(1Shell AI 请求参数,配置文件式自填)──────────────────
+//   skills 槽位不再翻译 reasoning 档位语义;用户按上游 API 文档自填模型行为参数
+//   (thinking / reasoning_effort / temperature / …),存于 models[].requestParams,
+//   请求时原样浅合并进请求体顶层,同 key 覆盖内置注入。
+//   messages / stream 属于调用方与代理机制,禁止通过 requestParams 覆盖。
+const REQUEST_PARAMS_FORBIDDEN_KEYS = new Set(['messages', 'stream']);
+const REQUEST_PARAMS_MAX_JSON_LENGTH = 16 * 1024;
+
+function normalizeRequestParams(value) {
+  let source = value;
+  if (typeof source === 'string') {
+    const text = source.trim();
+    if (!text) return null;
+    try {
+      source = JSON.parse(text);
+    } catch (err) {
+      throw new Error(`requestParams 不是合法 JSON: ${err.message}`);
+    }
+  }
+  if (source === undefined || source === null) return null;
+  if (typeof source !== 'object' || Array.isArray(source)) {
+    throw new Error('requestParams 必须是 JSON 对象(键值对)');
+  }
+  const out = {};
+  for (const [key, val] of Object.entries(source)) {
+    if (REQUEST_PARAMS_FORBIDDEN_KEYS.has(key) || val === undefined) continue;
+    out[key] = val;
+  }
+  if (!Object.keys(out).length) return null;
+  const serialized = JSON.stringify(out);
+  if (serialized.length > REQUEST_PARAMS_MAX_JSON_LENGTH) {
+    throw new Error('requestParams 过大(序列化后需 ≤ 16KB)');
+  }
+  return JSON.parse(serialized);
+}
+
+function applyRequestParams(body, provider) {
+  const params = provider?.requestParams;
+  if (!body || typeof body !== 'object' || !params || typeof params !== 'object') return body;
+  for (const [key, value] of Object.entries(params)) {
+    if (REQUEST_PARAMS_FORBIDDEN_KEYS.has(key)) continue;
+    body[key] = value;
+  }
+  return body;
+}
+
 function errResponse(res, code, msg, format) {
   if (format === 'anthropic') {
     return res.status(code).json({ type: 'error', error: { type: 'api_error', message: msg } });
@@ -679,7 +725,7 @@ function streamPassthrough(res, stream, contentType, cleanupRequest) {
 //  Router — 按 clientProtocol × upstreamProtocol 分发
 // ═══════════════════════════════════════════════════════════════════════
 
-function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
+function createProxyRouter({ proxyConfigStore, proxyToken = '', oneshellAiConfig = null }) {
   const router = Router();
 
   router.use(requireProxyAccess(proxyToken));
@@ -761,7 +807,10 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
   //   Skill SDK 模式下的内部回环调用。读 'skills' 槽位的 provider，
   //   未配置时回退到 'claude-code' 的 provider，实现"零配置开箱可用"。
   async function handleSkillsClient(req, res) {
-    const active = proxyConfigStore.getActiveProvider('skills')
+    // 配置解析顺序:1shell-ai.json(配置文件生成器产物,运行时权威)
+    //   → skills 槽位活跃 provider → claude-code 槽位回退(零配置开箱可用)
+    const active = (oneshellAiConfig?.readRuntimeConfig?.() || null)
+                || proxyConfigStore.getActiveProvider('skills')
                 || proxyConfigStore.getActiveProvider('claude-code');
     if (!active || !active.apiBase || !active.apiKey) {
       return errResponse(res, 503, '1Shell Skill Runner 未配置 Provider，请在"接入"页给 Claude Code 或 Skills 添加 Provider', 'anthropic');
@@ -782,6 +831,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       if (active.model) body.model = active.model;
       maybeInjectReasoning(body, active, targetModel, 'anthropic');
       applyMaxOutputTokens(body, active, 'anthropic');
+      applyRequestParams(body, active);
       try {
         // 若请求体包含 mcp_servers，自动附带 mcp-client beta header
         const extra = {};
@@ -818,6 +868,7 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '' }) {
       }
       maybeInjectReasoning(openaiBody, active, targetModel, 'openai');
       applyMaxOutputTokens(openaiBody, active, 'openai-chat');
+      applyRequestParams(openaiBody, active);
       try {
         const upResp = await callOpenAIUpstream(active.apiBase, active.apiKey, openaiBody, requestAbort.signal);
         if (!upResp.ok) {
@@ -1153,6 +1204,10 @@ function createProxyConfigStore(dataDir) {
     );
     if (contextTokenLimit !== undefined && contextTokenLimit !== null) profile.contextTokenLimit = contextTokenLimit;
     if (maxOutputTokens !== undefined && maxOutputTokens !== null) profile.maxOutputTokens = maxOutputTokens;
+    const requestParams = normalizeRequestParams(
+      hasOwn(source, 'requestParams') ? source.requestParams : fallback.requestParams,
+    );
+    if (requestParams) profile.requestParams = requestParams;
     return profile;
   }
 
@@ -1167,6 +1222,7 @@ function createProxyConfigStore(dataDir) {
         reasoningEffort: provider.reasoningEffort,
         contextTokenLimit: provider.contextTokenLimit,
         maxOutputTokens: provider.maxOutputTokens,
+        requestParams: provider.requestParams,
       })];
     }
     const activeModelId = models.some((model) => model.id === provider.activeModelId)
@@ -1194,6 +1250,8 @@ function createProxyConfigStore(dataDir) {
       else delete projected.contextTokenLimit;
       if (hasOwn(activeModel, 'maxOutputTokens')) projected.maxOutputTokens = activeModel.maxOutputTokens;
       else delete projected.maxOutputTokens;
+      if (hasOwn(activeModel, 'requestParams')) projected.requestParams = activeModel.requestParams;
+      else delete projected.requestParams;
     }
     return projected;
   }
@@ -1260,6 +1318,8 @@ function createProxyConfigStore(dataDir) {
     else delete provider.contextTokenLimit;
     if (hasOwn(projected, 'maxOutputTokens')) provider.maxOutputTokens = projected.maxOutputTokens;
     else delete provider.maxOutputTokens;
+    if (hasOwn(projected, 'requestParams')) provider.requestParams = projected.requestParams;
+    else delete provider.requestParams;
   }
 
   function updateActiveModelFromLegacyFields(provider, partial) {
@@ -1289,6 +1349,11 @@ function createProxyConfigStore(dataDir) {
     if (hasOwn(partial, 'maxOutputTokens')) {
       setOptionalPositiveInteger(activeModel, 'maxOutputTokens', partial.maxOutputTokens);
     }
+    if (hasOwn(partial, 'requestParams')) {
+      const requestParams = normalizeRequestParams(partial.requestParams);
+      if (requestParams) activeModel.requestParams = requestParams;
+      else delete activeModel.requestParams;
+    }
   }
 
   function maskModelProfile(model) {
@@ -1300,6 +1365,7 @@ function createProxyConfigStore(dataDir) {
       reasoningEffort: model.reasoningEffort || 'auto',
       contextTokenLimit: model.contextTokenLimit || null,
       maxOutputTokens: model.maxOutputTokens || null,
+      requestParams: model.requestParams || null,
     };
   }
 
@@ -1315,6 +1381,7 @@ function createProxyConfigStore(dataDir) {
       reasoningEffort: projected.reasoningEffort || 'auto',
       contextTokenLimit: projected.contextTokenLimit || null,
       maxOutputTokens: projected.maxOutputTokens || null,
+      requestParams: projected.requestParams || null,
       presetId: projected.presetId || '',
       enabled: projected.enabled !== false,
       activeModelId: projected.activeModelId || null,
@@ -1471,6 +1538,8 @@ function createProxyConfigStore(dataDir) {
       provider.reasoningEffort = normalizeReasoningEffort(data.reasoningEffort);
       setOptionalPositiveInteger(provider, 'contextTokenLimit', data.contextTokenLimit);
       setOptionalPositiveInteger(provider, 'maxOutputTokens', data.maxOutputTokens);
+      const requestParams = normalizeRequestParams(data.requestParams);
+      if (requestParams) provider.requestParams = requestParams;
     }
     persistActiveModelProjection(provider);
     cli.providers.push(provider);
@@ -1526,6 +1595,7 @@ function createProxyConfigStore(dataDir) {
       || typeof partial.reasoningEffort === 'string'
       || hasOwn(partial, 'contextTokenLimit')
       || hasOwn(partial, 'maxOutputTokens')
+      || hasOwn(partial, 'requestParams')
     ) {
       updateActiveModelFromLegacyFields(p, partial);
     }
@@ -1619,5 +1689,7 @@ module.exports = {
   __private: {
     streamAnthropicToOpenAI,
     streamOpenAIToAnthropic,
+    normalizeRequestParams,
+    applyRequestParams,
   },
 };
