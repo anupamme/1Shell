@@ -663,6 +663,15 @@ const MODEL_API_TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 const MODEL_API_TOOL_USE_KEYS = new Set(['type', 'id', 'name', 'input']);
 const MODEL_API_TOOL_RESULT_KEYS = new Set(['type', 'tool_use_id', 'content', 'is_error']);
 
+// sessionId 会进附件落盘目录名(dataDir/agent-attachments/<seg>)。sessionId 由
+// 客户端 socket 载荷直接给出,不能信任:斜杠等分隔符已被 \w 白名单挡掉,但纯点
+// 段('.'/'..')会穿透 [^\w.-] → path.join 出一级目录逃逸。凡清洗后剩下的全是点
+// 的段一律兜底成安全名。
+function safeSessionDirName(sessionId) {
+  const cleaned = String(sessionId || 'session').replace(/[^\w.-]/g, '_');
+  return /[^.]/.test(cleaned) ? cleaned : 'session';
+}
+
 function projectMessagesForModelApi(messages = []) {
   const stringifyForPreview = (value) => {
     if (typeof value === 'string') return value;
@@ -3982,7 +3991,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     // 记录上 —— 前端经 /api/files/download 显示缩略图，刷新后依然可见
     const { stored: storedAttachments, skipped: skippedAttachments } = materializeAttachments({
       attachments,
-      dir: dataDir ? path.join(dataDir, 'agent-attachments', String(sessionId || 'session').replace(/[^\w.-]/g, '_')) : '',
+      dir: dataDir ? path.join(dataDir, 'agent-attachments', safeSessionDirName(sessionId)) : '',
       logger,
     });
 

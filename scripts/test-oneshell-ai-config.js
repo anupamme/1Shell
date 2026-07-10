@@ -42,6 +42,7 @@ const silentLogger = { warn() {} };
     logger: silentLogger,
   });
   const filePath = path.join(dir, FILE_NAME);
+  const metaPath = path.join(dir, '1shell-ai.meta.json');
 
   // 1a. 无文件:列表展示生成内容但不落盘,运行时回退 null
   let files = cfg.listFiles();
@@ -162,6 +163,34 @@ const silentLogger = { warn() {} };
   // clearOverride 无活跃 provider → 删文件
   cfg.clearOverride(FILE_NAME);
   assert.strictEqual(fs.existsSync(filePath), false);
+
+  // 1k. 崩溃自愈:config 已落盘但 meta 丢失(写 meta 前崩溃)。磁盘内容 == 当前
+  //     活跃 provider 的自动内容 → 判自动(不锁死停更),并回填 meta
+  active = { name: 'A', upstreamProtocol: 'openai', apiBase: 'https://a.example', apiKey: 'sk-a', model: 'model-a' };
+  fs.writeFileSync(filePath, cfg.buildContent(active));
+  fs.rmSync(metaPath, { force: true });
+  assert.strictEqual(cfg.isManualOverride(), false, 'meta 丢失但内容=自动内容应判自动(崩溃自愈)');
+  assert.ok(fs.existsSync(metaPath), 'isManualOverride 应回填 meta');
+  active = { ...active, apiKey: 'sk-a3' };
+  assert.deepStrictEqual(cfg.syncFromActiveProvider(), { synced: true }, '自愈后应能继续自动同步');
+  assert.strictEqual(cfg.readRuntimeConfig().apiKey, 'sk-a3');
+
+  // 1l. meta 丢失且内容≠自动内容 → 真手工草稿
+  fs.writeFileSync(filePath, `${JSON.stringify({ apiBase: 'https://hand.example', apiKey: 'k', model: 'm' }, null, 2)}\n`);
+  fs.rmSync(metaPath, { force: true });
+  assert.strictEqual(cfg.isManualOverride(), true, 'meta 丢失且内容≠自动应判手工');
+
+  // 1m. activeModelId 失效且 models[0] 被禁用 → 取第一个 enabled(与 store 对齐)
+  cfg.clearOverride(FILE_NAME);
+  const staleActive = JSON.parse(cfg.buildContent({
+    upstreamProtocol: 'openai', apiBase: 'https://m.example', apiKey: 'k',
+    activeModelId: 'gone',
+    models: [
+      { id: 'm0', apiModel: 'disabled-model', enabled: false },
+      { id: 'm1', apiModel: 'enabled-model', enabled: true },
+    ],
+  }));
+  assert.strictEqual(staleActive.model, 'enabled-model', 'stale activeModelId 应回退第一个 enabled 而非 models[0]');
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -392,6 +421,14 @@ async function runProxyRuntimeE2E() {
   fs.writeFileSync(filePath, '{broken');
   await callSkills();
   assert.strictEqual(captured.body.model, 'model-store', '损坏文件应回退 store 活跃 provider');
+  assert.strictEqual(captured.auth, 'Bearer sk-store');
+
+  // 3d. 文件在位但缺 apiKey(手工草稿漏填)→ 不算已配置,回退 store 而非 503
+  fs.writeFileSync(filePath, `${JSON.stringify({
+    upstreamProtocol: 'openai', apiBase: upstreamBase, model: 'model-file',
+  }, null, 2)}\n`);
+  await callSkills();
+  assert.strictEqual(captured.body.model, 'model-store', '缺 apiKey 的文件应回退 store,不遮蔽有效 provider');
   assert.strictEqual(captured.auth, 'Bearer sk-store');
 
   await new Promise((resolve) => server.close(resolve));

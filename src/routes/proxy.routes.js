@@ -809,7 +809,10 @@ function createProxyRouter({ proxyConfigStore, proxyToken = '', oneshellAiConfig
   async function handleSkillsClient(req, res) {
     // 配置解析顺序:1shell-ai.json(配置文件生成器产物,运行时权威)
     //   → skills 槽位活跃 provider → claude-code 槽位回退(零配置开箱可用)
-    const active = (oneshellAiConfig?.readRuntimeConfig?.() || null)
+    // 文件缺字段(手工草稿漏填 apiBase/apiKey)不算"已配置",继续回退 provider,
+    // 否则半成品文件会永久遮蔽本来可用的 provider 导致全部 503。
+    const runtimeConfig = oneshellAiConfig?.readRuntimeConfig?.() || null;
+    const active = (runtimeConfig && runtimeConfig.apiBase && runtimeConfig.apiKey ? runtimeConfig : null)
                 || proxyConfigStore.getActiveProvider('skills')
                 || proxyConfigStore.getActiveProvider('claude-code');
     if (!active || !active.apiBase || !active.apiKey) {

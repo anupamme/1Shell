@@ -47,6 +47,9 @@ function legacyEffortToRequestParams(provider) {
 
 function resolveRequestParams(provider) {
   const params = provider?.requestParams;
+  // 显式 requestParams 优先并完全取代 legacy 语义档位(UI 设置 requestParams 时
+  // 会把 reasoningEffort 归 auto,二者并存是 UI 阻止的非法态);仅当没有显式参数
+  // 时,才把旧的 reasoningEffort 迁移成等效原始参数,保持存量配置行为不变。
   if (params && typeof params === 'object' && !Array.isArray(params) && Object.keys(params).length) {
     return params;
   }
@@ -69,10 +72,16 @@ function createOneshellAiConfig({ dataDir, proxyConfigStore, logger = console } 
     }
   }
 
+  function writeFileAtomic(target, text) {
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, target); // rename 是原子的:读者只会看到旧全量或新全量,绝无截断
+  }
+
   function writeAuto(content) {
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(filePath, content);
-    fs.writeFileSync(metaPath, JSON.stringify({ autoHash: hashText(content), updatedAt: new Date().toISOString() }, null, 2));
+    writeFileAtomic(filePath, content);
+    writeFileAtomic(metaPath, JSON.stringify({ autoHash: hashText(content), updatedAt: new Date().toISOString() }, null, 2));
     runtimeCache = { mtimeMs: -1, size: -1, config: null };
   }
 
@@ -93,7 +102,12 @@ function createOneshellAiConfig({ dataDir, proxyConfigStore, logger = console } 
       ? source.models.filter((model) => model && typeof model === 'object')
       : [];
     if (!models.length) return source;
-    const active = models.find((model) => model.id && model.id === source.activeModelId) || models[0];
+    // store 的 normalizeProviderModels 在 activeModelId 失效时取"第一个 enabled"
+    // 模型,而非无脑 models[0];此处对齐,否则 models[0] 被禁用时文件生成器与
+    // 运行时 store 选中不同模型。
+    const active = models.find((model) => model.id && model.id === source.activeModelId)
+      || models.find((model) => model.enabled !== false)
+      || models[0];
     const projected = { ...source };
     projected.model = String(active.apiModel ?? active.model ?? '').trim();
     projected.reasoningEffort = active.reasoningEffort || 'auto';
@@ -136,8 +150,16 @@ function createOneshellAiConfig({ dataDir, proxyConfigStore, logger = console } 
     const disk = readDisk();
     if (disk == null) return false;
     const meta = readMeta();
-    if (!meta?.autoHash) return true; // 有文件但没 meta:视为手工(外部创建)
-    return hashText(disk) !== meta.autoHash;
+    if (meta?.autoHash) return hashText(disk) !== meta.autoHash;
+    // meta 缺失(外部创建,或 config 写入后、meta 写入前崩溃)。无脑判手工会把
+    // 崩溃残留的自动文件永久锁死停更;先与当前活跃 provider 的自动内容对账——
+    // 内容相符即自动生成的残留,回填 meta 自愈;不符才是真手工草稿。
+    const provider = getActiveSkillsProvider();
+    if (provider && disk === buildContent(provider)) {
+      try { writeFileAtomic(metaPath, JSON.stringify({ autoHash: hashText(disk), updatedAt: new Date().toISOString() }, null, 2)); } catch { /* 忽略:下次再补 */ }
+      return false;
+    }
+    return true;
   }
 
   function fileEntry(content, { preview = false } = {}) {

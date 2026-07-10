@@ -39,7 +39,7 @@ const routes: RouteRecordRaw[] = [
   // 终端页已并入 Agent 页（4.7.2）：?host= 语义保留（选中主机 + 展开终端分栏）
   { path: '/terminal',  redirect: (to) => ({ path: '/agent', query: to.query }) },
   { path: '/console',   redirect: (to) => ({ path: '/agent', query: to.query }) },
-  { path: '/ide',       redirect: '/agent' },
+  { path: '/ide',       redirect: (to) => ({ path: '/agent', query: to.query }) },
   { path: '/hosts',     redirect: '/panel/hosts' },
   { path: '/runtime',   redirect: '/panel/runtime' },
   { path: '/workloads', redirect: '/panel/workloads' },
