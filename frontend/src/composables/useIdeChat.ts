@@ -617,6 +617,8 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
 
   function convertCurrentAssistantToThinking(): string {
     deltaBuffer.flushNow();
+    // 只封存气泡，不清 currentTextHadDelta：
+    // 流结束后的 ide:text 仍靠该标记识别「已画过」，避免 append 出第二条同文案
     if (!currentAssistant) return '';
     const assistant = currentAssistant;
     currentAssistant = null;
@@ -628,6 +630,18 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
     assistant.status = 'done';
     touchTimeline();
     return workNote;
+  }
+
+  function patchLastSealedAssistantText(text: string): boolean {
+    for (let i = timeline.value.length - 1; i >= 0; i -= 1) {
+      const item = timeline.value[i];
+      if (item.kind === 'assistant' && 'text' in item) {
+        (item as IdeChatMessage).text = text;
+        touchTimeline();
+        return true;
+      }
+    }
+    return false;
   }
 
   function findTool(toolUseId: string): IdeToolTimelineItem | null {
@@ -895,15 +909,29 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
       ['ide:text-replace', (raw: unknown) => {
         const msg = raw as StreamMessage & { text?: string };
         if (!matchesCurrentRun(msg) || typeof msg.text !== 'string') return;
-        currentTextHadDelta = true;
         setStatus('生成中...');
+        // 仅改写仍打开的气泡，或已封存的最后一条；禁止无中生有再开一条
+        if (currentAssistant) {
+          currentTextHadDelta = true;
+          replaceAssistantText(msg.text);
+          return;
+        }
+        if (patchLastSealedAssistantText(msg.text)) {
+          // 已展示过的同一段，后续 ide:text 不得再 append
+          currentTextHadDelta = true;
+          return;
+        }
+        currentTextHadDelta = true;
         replaceAssistantText(msg.text);
       }],
       ['ide:text', (raw: unknown) => {
         const msg = raw as StreamMessage & { text?: string };
         if (!matchesCurrentRun(msg) || typeof msg.text !== 'string') return;
         if (currentTextHadDelta) {
-          replaceAssistantText(msg.text);
+          // 流式阶段已画过：只定稿仍打开的气泡，不在工具卡后再代说一遍
+          if (currentAssistant) {
+            replaceAssistantText(msg.text);
+          }
           currentTextHadDelta = false;
           return;
         }

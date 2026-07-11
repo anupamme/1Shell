@@ -2796,8 +2796,18 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       const exactExpansion = expandExactTextReferences(fullText, session);
       const visibleText = exactExpansion.text;
       if (visibleText.trim().length > 0) {
+        // 已通过 text-delta 流过的原文不要再 ide:text 重说一遍——
+        // 前端 tool-start 会封存气泡，二次定稿会在工具卡后冒出重复助手文案。
+        // 仅在未流式推送、或 exact 引用展开需要改写时再发。
         if (!data._emittedTextDelta) {
           emitToSession(session, socket, 'ide:text-delta', { sessionId, runId, delta: visibleText });
+          emitToSession(session, socket, 'ide:text', {
+            sessionId,
+            runId,
+            text: visibleText,
+            exactExpanded: exactExpansion.expanded,
+            exactRefs: exactExpansion.refs,
+          });
         } else if (exactExpansion.expanded) {
           emitToSession(session, socket, 'ide:text-replace', {
             sessionId,
@@ -2806,8 +2816,14 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
             exactExpanded: true,
             exactRefs: exactExpansion.refs,
           });
+          emitToSession(session, socket, 'ide:text', {
+            sessionId,
+            runId,
+            text: visibleText,
+            exactExpanded: true,
+            exactRefs: exactExpansion.refs,
+          });
         }
-        emitToSession(session, socket, 'ide:text', { sessionId, runId, text: visibleText, exactExpanded: exactExpansion.expanded, exactRefs: exactExpansion.refs });
         recordTraceEvent('reasoning', toolCalls.length > 0 ? 'tool_decision' : 'reasoning_summary', {
           source: 'ide',
           runId,
