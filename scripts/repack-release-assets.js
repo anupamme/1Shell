@@ -19,6 +19,8 @@ const VERSION = String(pkg.version || '0.0.0');
 const FRONTEND_DIST_DIR = path.join(ROOT, 'frontend', 'dist');
 const FRONTEND_INDEX = path.join(FRONTEND_DIST_DIR, 'index.html');
 const FRONTEND_BUILD_MARKER = path.join(FRONTEND_DIST_DIR, '.1shell-build.json');
+// Optional: ONESHELL_REPACK_ONLY=windows|linux to build a single platform asset.
+const REPACK_ONLY = String(process.env.ONESHELL_REPACK_ONLY || '').trim().toLowerCase();
 
 const ASSETS = [
   {
@@ -33,7 +35,11 @@ const ASSETS = [
     outputName: `1shell-${VERSION}-windows-x64.zip`,
     packageName: `1shell-${VERSION}-windows-x64`,
   },
-];
+].filter((asset) => !REPACK_ONLY || asset.platform === REPACK_ONLY);
+
+if (REPACK_ONLY && ASSETS.length === 0) {
+  throw new Error(`ONESHELL_REPACK_ONLY=${REPACK_ONLY} matched no assets (use windows or linux)`);
+}
 
 const FILES = [
   '.dockerignore',
