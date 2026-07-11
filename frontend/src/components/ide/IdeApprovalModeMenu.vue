@@ -275,44 +275,44 @@ onBeforeUnmount(() => {
   color: #64748b;
 }
 
-:global(.dark) .ide-approval-trigger {
+.dark .ide-approval-trigger {
   color: #fb923c;
   border-color: rgba(71, 85, 105, 0.82);
   background: rgba(15, 23, 42, 0.72);
 }
 
-:global(.dark) .ide-approval-trigger:hover:not(:disabled),
-:global(.dark) .ide-approval-trigger:focus-visible {
+.dark .ide-approval-trigger:hover:not(:disabled),
+.dark .ide-approval-trigger:focus-visible {
   border-color: rgba(251, 146, 60, 0.46);
   background: rgba(30, 41, 59, 0.96);
 }
 
-:global(.dark) .ide-approval-popover {
+.dark .ide-approval-popover {
   color: #f8fafc;
   border-color: rgba(71, 85, 105, 0.7);
   background: rgba(30, 30, 30, 0.98);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
 }
 
-:global(.dark) .ide-approval-popover-heading {
+.dark .ide-approval-popover-heading {
   color: #a3a3a3;
 }
 
-:global(.dark) .ide-approval-option {
+.dark .ide-approval-option {
   color: #f8fafc;
 }
 
-:global(.dark) .ide-approval-option:hover,
-:global(.dark) .ide-approval-option--active {
+.dark .ide-approval-option:hover,
+.dark .ide-approval-option--active {
   background: rgba(63, 63, 70, 0.72);
 }
 
-:global(.dark) .ide-approval-option-icon,
-:global(.dark) .ide-approval-option-check {
+.dark .ide-approval-option-icon,
+.dark .ide-approval-option-check {
   color: #d4d4d8;
 }
 
-:global(.dark) .ide-approval-option-copy span {
+.dark .ide-approval-option-copy span {
   color: #a3a3a3;
 }
 

@@ -189,46 +189,46 @@ function modelMeta(option: AgentModelOption): string {
   font-size: 11px;
 }
 
-:global(.dark) .ide-model-slash-menu {
+.dark .ide-model-slash-menu {
   border-color: rgba(71, 85, 105, 0.82);
   background: rgba(15, 23, 42, 0.98);
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.36);
 }
 
-:global(.dark) .ide-model-slash-back {
+.dark .ide-model-slash-back {
   color: #94a3b8;
   border-bottom-color: rgba(71, 85, 105, 0.5);
 }
 
-:global(.dark) .ide-model-slash-back:hover {
+.dark .ide-model-slash-back:hover {
   color: #7dd3fc;
   background: rgba(255, 255, 255, 0.04);
 }
 
-:global(.dark) .ide-model-slash-option {
+.dark .ide-model-slash-option {
   color: #cbd5e1;
 }
 
-:global(.dark) .ide-model-slash-option:hover,
-:global(.dark) .ide-model-slash-option--active {
+.dark .ide-model-slash-option:hover,
+.dark .ide-model-slash-option--active {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
 }
 
-:global(.dark) .ide-model-slash-dot {
+.dark .ide-model-slash-dot {
   background: #475569;
 }
 
-:global(.dark) .ide-model-slash-dot--on {
+.dark .ide-model-slash-dot--on {
   background: #34d399;
 }
 
-:global(.dark) .ide-model-slash-copy span,
-:global(.dark) .ide-model-slash-empty {
+.dark .ide-model-slash-copy span,
+.dark .ide-model-slash-empty {
   color: #94a3b8;
 }
 
-:global(.dark) .ide-model-slash-divider {
+.dark .ide-model-slash-divider {
   background: rgba(71, 85, 105, 0.52);
 }
 </style>

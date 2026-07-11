@@ -252,17 +252,17 @@ watch(
   color: #dc2626;
 }
 
-:global(.dark) .secret-ref-picker {
+.dark .secret-ref-picker {
   border-color: rgba(96, 165, 250, 0.28);
   background: rgba(30, 64, 175, 0.18);
 }
 
-:global(.dark) .secret-ref-picker-hint {
+.dark .secret-ref-picker-hint {
   color: #94a3b8;
 }
 
-:global(.dark) .secret-ref-picker-select,
-:global(.dark) .secret-ref-picker-input {
+.dark .secret-ref-picker-select,
+.dark .secret-ref-picker-input {
   border-color: rgba(71, 85, 105, 0.9);
   background: #0f172a;
   color: #e2e8f0;

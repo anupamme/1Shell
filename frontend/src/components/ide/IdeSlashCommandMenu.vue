@@ -157,34 +157,34 @@ const emit = defineEmits<{
   font-size: 11px;
 }
 
-:global(.dark) .ide-slash-menu {
+.dark .ide-slash-menu {
   border-color: rgba(71, 85, 105, 0.82);
   background: rgba(15, 23, 42, 0.98);
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.36);
 }
 
-:global(.dark) .ide-slash-menu-title,
-:global(.dark) .ide-slash-command-desc {
+.dark .ide-slash-menu-title,
+.dark .ide-slash-command-desc {
   color: #94a3b8;
 }
 
-:global(.dark) .ide-slash-command {
+.dark .ide-slash-command {
   color: #cbd5e1;
 }
 
-:global(.dark) .ide-slash-command:hover,
-:global(.dark) .ide-slash-command--active {
+.dark .ide-slash-command:hover,
+.dark .ide-slash-command--active {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
 }
 
-:global(.dark) .ide-slash-command-icon {
+.dark .ide-slash-command-icon {
   color: #94a3b8;
   background: rgba(255, 255, 255, 0.05);
 }
 
-:global(.dark) .ide-slash-command:hover .ide-slash-command-icon,
-:global(.dark) .ide-slash-command--active .ide-slash-command-icon {
+.dark .ide-slash-command:hover .ide-slash-command-icon,
+.dark .ide-slash-command--active .ide-slash-command-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.15);
 }

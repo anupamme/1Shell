@@ -3081,12 +3081,12 @@ function onSecretRefSubmit(secretRef: string): void {
   outline: none;
 }
 
-:global(.dark) .agent-view-rail-toggle {
+.dark .agent-view-rail-toggle {
   color: #94a3b8;
 }
 
-:global(.dark) .agent-view-rail-toggle:hover,
-:global(.dark) .agent-view-rail-toggle:focus-visible {
+.dark .agent-view-rail-toggle:hover,
+.dark .agent-view-rail-toggle:focus-visible {
   color: #e2e8f0;
   background: rgba(255, 255, 255, 0.06);
 }
@@ -3105,7 +3105,7 @@ function onSecretRefSubmit(secretRef: string): void {
   overflow: hidden;
 }
 
-:global(.dark) .agent-view-panel {
+.dark .agent-view-panel {
   border-color: rgba(30, 41, 59, 0.95);
   background: rgba(11, 19, 36, 0.88);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
@@ -3187,7 +3187,7 @@ function onSecretRefSubmit(secretRef: string): void {
   font-size: 12.5px;
   line-height: 1.6;
 }
-:global(.dark) .agent-md :deep(pre) {
+.dark .agent-md :deep(pre) {
   background: transparent;
   color: #e2e8f0;
 }

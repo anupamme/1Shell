@@ -128,38 +128,38 @@ function hostName(host: StructuredHost): string {
   padding: 7px 8px;
 }
 
-:global(.dark) .host-list-result__summary {
+.dark .host-list-result__summary {
   color: #cbd5e1;
 }
 
-:global(.dark) .host-list-result__summary strong {
+.dark .host-list-result__summary strong {
   color: #e2e8f0;
 }
 
-:global(.dark) .host-list-result__summary span {
+.dark .host-list-result__summary span {
   color: #94a3b8;
 }
 
-:global(.dark) .host-list-result__table-wrap {
+.dark .host-list-result__table-wrap {
   border-color: rgba(51, 65, 85, 0.86);
   background: rgba(2, 6, 23, 0.3);
 }
 
-:global(.dark) .host-list-result th {
+.dark .host-list-result th {
   color: #94a3b8;
   background: rgba(15, 23, 42, 0.9);
 }
 
-:global(.dark) .host-list-result th,
-:global(.dark) .host-list-result td {
+.dark .host-list-result th,
+.dark .host-list-result td {
   border-bottom-color: rgba(51, 65, 85, 0.76);
 }
 
-:global(.dark) .host-list-result td {
+.dark .host-list-result td {
   color: #cbd5e1;
 }
 
-:global(.dark) .host-list-result code {
+.dark .host-list-result code {
   color: #e2e8f0;
 }
 </style>

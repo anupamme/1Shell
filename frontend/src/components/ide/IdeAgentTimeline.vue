@@ -422,7 +422,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   color: #334155;
 }
 
-:global(.dark) .ide-agent-system-card {
+.dark .ide-agent-system-card {
   border-color: rgba(71, 85, 105, 0.72);
   background: rgba(15, 23, 42, 0.64);
   color: #cbd5e1;
@@ -452,19 +452,19 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   border-color: #fde68a;
 }
 
-:global(.dark) .ide-agent-system-icon {
+.dark .ide-agent-system-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.22);
 }
 
-:global(.dark) .ide-agent-system--success .ide-agent-system-icon {
+.dark .ide-agent-system--success .ide-agent-system-icon {
   color: #86efac;
   background: rgba(22, 101, 52, 0.24);
   border-color: rgba(74, 222, 128, 0.28);
 }
 
-:global(.dark) .ide-agent-system--warning .ide-agent-system-icon {
+.dark .ide-agent-system--warning .ide-agent-system-icon {
   color: #fcd34d;
   background: rgba(120, 53, 15, 0.28);
   border-color: rgba(251, 191, 36, 0.3);
@@ -494,7 +494,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   line-height: 1.35;
 }
 
-:global(.dark) .ide-agent-system-copy span {
+.dark .ide-agent-system-copy span {
   color: #94a3b8;
 }
 
@@ -506,7 +506,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   color: #64748b;
 }
 
-:global(.dark) .ide-agent-message-meta {
+.dark .ide-agent-message-meta {
   color: #94a3b8;
 }
 
@@ -534,14 +534,14 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   border-color: #0f172a;
 }
 
-:global(.dark) .ide-agent-bubble {
+.dark .ide-agent-bubble {
   background: rgba(15, 23, 42, 0.86);
   color: #e2e8f0;
   border-color: rgba(51, 65, 85, 0.85);
   box-shadow: none;
 }
 
-:global(.dark) .ide-agent-message--user .ide-agent-bubble {
+.dark .ide-agent-message--user .ide-agent-bubble {
   background: #e2e8f0;
   color: #0f172a;
   border-color: #e2e8f0;
@@ -590,7 +590,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   background: rgba(248, 250, 252, 0.74);
 }
 
-:global(.dark) .ide-agent-thinking-card {
+.dark .ide-agent-thinking-card {
   background: rgba(15, 23, 42, 0.62);
   border-color: rgba(71, 85, 105, 0.72);
 }
@@ -629,7 +629,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   padding: 7px 9px;
 }
 
-:global(.dark) .ide-agent-thinking-summary {
+.dark .ide-agent-thinking-summary {
   color: #94a3b8;
 }
 
@@ -651,7 +651,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   font-weight: 700;
 }
 
-:global(.dark) .ide-agent-thinking-title span:last-child {
+.dark .ide-agent-thinking-title span:last-child {
   color: #7dd3fc;
   border-color: rgba(56, 189, 248, 0.22);
   background: rgba(14, 165, 233, 0.12);
@@ -673,7 +673,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   border: 1px solid #bae6fd;
 }
 
-:global(.dark) .ide-agent-thinking-icon {
+.dark .ide-agent-thinking-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.22);
@@ -706,7 +706,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   font-size: 11.5px;
 }
 
-:global(.dark) .ide-agent-thinking-markdown {
+.dark .ide-agent-thinking-markdown {
   border-top-color: rgba(51, 65, 85, 0.72);
   color: #cbd5e1;
 }
@@ -717,7 +717,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
 }
 
-:global(.dark) .ide-agent-tool-card {
+.dark .ide-agent-tool-card {
   background: rgba(15, 23, 42, 0.82);
   border-color: rgba(71, 85, 105, 0.84);
   box-shadow: none;
@@ -768,19 +768,19 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   border-color: #fecaca;
 }
 
-:global(.dark) .ide-agent-tool-icon {
+.dark .ide-agent-tool-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.25);
 }
 
-:global(.dark) .ide-agent-tool--done .ide-agent-tool-icon {
+.dark .ide-agent-tool--done .ide-agent-tool-icon {
   color: #6ee7b7;
   background: rgba(16, 185, 129, 0.14);
   border-color: rgba(52, 211, 153, 0.24);
 }
 
-:global(.dark) .ide-agent-tool--error .ide-agent-tool-icon {
+.dark .ide-agent-tool--error .ide-agent-tool-icon {
   color: #fecaca;
   background: rgba(127, 29, 29, 0.24);
   border-color: rgba(248, 113, 113, 0.3);
@@ -843,19 +843,19 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   background: rgba(254, 226, 226, 0.8);
 }
 
-:global(.dark) .ide-agent-tool-status {
+.dark .ide-agent-tool-status {
   color: #7dd3fc;
   border-color: rgba(56, 189, 248, 0.2);
   background: rgba(14, 165, 233, 0.12);
 }
 
-:global(.dark) .ide-agent-tool--done .ide-agent-tool-status {
+.dark .ide-agent-tool--done .ide-agent-tool-status {
   color: #6ee7b7;
   border-color: rgba(52, 211, 153, 0.22);
   background: rgba(16, 185, 129, 0.14);
 }
 
-:global(.dark) .ide-agent-tool--error .ide-agent-tool-status {
+.dark .ide-agent-tool--error .ide-agent-tool-status {
   color: #fecaca;
   border-color: rgba(248, 113, 113, 0.26);
   background: rgba(127, 29, 29, 0.24);
@@ -888,7 +888,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   opacity: 0.45;
 }
 
-:global(.dark) .ide-agent-tool-subtitle {
+.dark .ide-agent-tool-subtitle {
   color: #94a3b8;
 }
 
@@ -908,7 +908,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   padding-top: 10px;
 }
 
-:global(.dark) .ide-agent-tool-section {
+.dark .ide-agent-tool-section {
   border-top-color: rgba(51, 65, 85, 0.82);
 }
 
@@ -925,8 +925,8 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   cursor: pointer;
 }
 
-:global(.dark) .ide-agent-tool-section summary,
-:global(.dark) .ide-agent-tool-section-title {
+.dark .ide-agent-tool-section summary,
+.dark .ide-agent-tool-section-title {
   color: #cbd5e1;
 }
 
@@ -943,7 +943,7 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   word-break: break-word;
 }
 
-:global(.dark) .ide-agent-tool-section--note p {
+.dark .ide-agent-tool-section--note p {
   border-color: rgba(56, 189, 248, 0.2);
   background: rgba(14, 165, 233, 0.1);
   color: #dbeafe;
@@ -974,8 +974,8 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   font-size: 11px;
 }
 
-:global(.dark) .ide-agent-tool-section pre,
-:global(.dark) .ide-agent-log pre {
+.dark .ide-agent-tool-section pre,
+.dark .ide-agent-log pre {
   border-color: rgba(71, 85, 105, 0.86);
   background: rgba(2, 6, 23, 0.66);
   color: #e2e8f0;
@@ -1007,12 +1007,12 @@ function toolAriaLabel(tool: IdeToolTimelineItem): string {
   background: rgba(220, 38, 38, 0.1);
 }
 
-:global(.dark) .ide-agent-log-stream {
+.dark .ide-agent-log-stream {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.14);
 }
 
-:global(.dark) .ide-agent-log--stderr .ide-agent-log-stream {
+.dark .ide-agent-log--stderr .ide-agent-log-stream {
   color: #fecaca;
   background: rgba(220, 38, 38, 0.18);
 }

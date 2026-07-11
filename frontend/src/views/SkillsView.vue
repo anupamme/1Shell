@@ -504,7 +504,7 @@ onMounted(() => {
   color: rgb(51 65 85);
 }
 
-:global(.dark) .matrix-header {
+.dark .matrix-header {
   border-color: rgb(30 41 59);
   background: rgb(15 23 42);
   color: rgb(226 232 240);
@@ -522,7 +522,7 @@ onMounted(() => {
   background: rgb(239 246 255);
 }
 
-:global(.dark) .header-logo {
+.dark .header-logo {
   border-color: rgb(14 165 233 / 0.26);
   color: rgb(125 211 252);
   background: rgb(14 165 233 / 0.12);
@@ -540,7 +540,7 @@ onMounted(() => {
   background: rgb(255 255 255 / 0.92);
 }
 
-:global(.dark) .matrix-toolbar {
+.dark .matrix-toolbar {
   border-color: rgb(30 41 59);
   background: rgb(15 23 42);
 }
@@ -554,7 +554,7 @@ onMounted(() => {
   background: rgb(248 250 252);
 }
 
-:global(.dark) .segmented {
+.dark .segmented {
   border-color: rgb(30 41 59);
   background: rgb(2 6 23 / 0.45);
 }
@@ -580,11 +580,11 @@ onMounted(() => {
   color: rgb(15 23 42);
 }
 
-:global(.dark) .segment {
+.dark .segment {
   border-color: rgb(30 41 59);
 }
 
-:global(.dark) .segment.active {
+.dark .segment.active {
   background: rgb(30 41 59);
   color: rgb(248 250 252);
 }
@@ -598,7 +598,7 @@ onMounted(() => {
   background: rgb(241 245 249);
 }
 
-:global(.dark) .segment b {
+.dark .segment b {
   color: rgb(203 213 225);
   background: rgb(15 23 42);
 }
@@ -616,7 +616,7 @@ onMounted(() => {
   color: rgb(148 163 184);
 }
 
-:global(.dark) .search-box {
+.dark .search-box {
   border-color: rgb(30 41 59);
   background: rgb(2 6 23 / 0.5);
 }
@@ -630,7 +630,7 @@ onMounted(() => {
   color: rgb(30 41 59);
 }
 
-:global(.dark) .search-box input {
+.dark .search-box input {
   color: rgb(226 232 240);
 }
 
@@ -643,7 +643,7 @@ onMounted(() => {
   background: rgb(255 255 255 / 0.94);
 }
 
-:global(.dark) .matrix-panel {
+.dark .matrix-panel {
   border-color: rgb(30 41 59);
   background: rgb(15 23 42);
 }
@@ -668,11 +668,11 @@ onMounted(() => {
   background: rgb(248 250 252 / 0.72);
 }
 
-:global(.dark) .matrix-row {
+.dark .matrix-row {
   border-color: rgb(30 41 59);
 }
 
-:global(.dark) .matrix-row:not(.matrix-head):hover {
+.dark .matrix-row:not(.matrix-head):hover {
   background: rgb(30 41 59 / 0.35);
 }
 
@@ -684,7 +684,7 @@ onMounted(() => {
   background: rgb(248 250 252);
 }
 
-:global(.dark) .matrix-head {
+.dark .matrix-head {
   background: rgb(2 6 23);
 }
 
@@ -724,7 +724,7 @@ onMounted(() => {
   color: rgb(15 23 42);
 }
 
-:global(.dark) .capability-name {
+.dark .capability-name {
   color: rgb(248 250 252);
 }
 
@@ -736,7 +736,7 @@ onMounted(() => {
   color: rgb(100 116 139);
 }
 
-:global(.dark) .capability-facts {
+.dark .capability-facts {
   color: rgb(148 163 184);
 }
 
@@ -784,7 +784,7 @@ onMounted(() => {
   background: rgb(238 242 255);
 }
 
-:global(.dark) .source-chip {
+.dark .source-chip {
   color: rgb(203 213 225);
   border-color: rgb(30 41 59);
   background: rgb(30 41 59);
@@ -890,37 +890,37 @@ onMounted(() => {
   background: rgb(248 250 252);
 }
 
-:global(.dark) .agent-head,
-:global(.dark) .agent-toggle {
+.dark .agent-head,
+.dark .agent-toggle {
   border-color: rgb(30 41 59);
   background: rgb(15 23 42);
 }
 
-:global(.dark) .agent-codex .agent-logo,
-:global(.dark) .agent-opencode .agent-logo {
+.dark .agent-codex .agent-logo,
+.dark .agent-opencode .agent-logo {
   filter: invert(1);
 }
 
-:global(.dark) .agent-head.agent-oneshell,
-:global(.dark) .agent-oneshell.on {
+.dark .agent-head.agent-oneshell,
+.dark .agent-oneshell.on {
   border-color: rgb(14 165 233 / 0.3);
   background: rgb(14 165 233 / 0.14);
 }
 
-:global(.dark) .agent-head.agent-claude,
-:global(.dark) .agent-claude.on {
+.dark .agent-head.agent-claude,
+.dark .agent-claude.on {
   border-color: rgb(249 115 22 / 0.3);
   background: rgb(249 115 22 / 0.14);
 }
 
-:global(.dark) .agent-head.agent-codex,
-:global(.dark) .agent-codex.on {
+.dark .agent-head.agent-codex,
+.dark .agent-codex.on {
   border-color: rgb(34 197 94 / 0.3);
   background: rgb(34 197 94 / 0.14);
 }
 
-:global(.dark) .agent-head.agent-opencode,
-:global(.dark) .agent-opencode.on {
+.dark .agent-head.agent-opencode,
+.dark .agent-opencode.on {
   border-color: rgb(99 102 241 / 0.34);
   background: rgb(99 102 241 / 0.16);
 }
@@ -957,7 +957,7 @@ onMounted(() => {
   background: rgb(248 250 252);
 }
 
-:global(.dark) .matrix-action.secondary {
+.dark .matrix-action.secondary {
   color: rgb(226 232 240);
   border-color: rgb(30 41 59);
   background: rgb(2 6 23 / 0.5);
@@ -978,7 +978,7 @@ onMounted(() => {
   color: rgb(15 23 42);
 }
 
-:global(.dark) .row-action:hover {
+.dark .row-action:hover {
   background: rgb(30 41 59);
   color: rgb(248 250 252);
 }

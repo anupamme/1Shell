@@ -216,38 +216,38 @@ function latency(value: number | null): string {
   padding: 7px 8px;
 }
 
-:global(.dark) .probe-list-result__summary {
+.dark .probe-list-result__summary {
   color: #cbd5e1;
 }
 
-:global(.dark) .probe-list-result__summary strong {
+.dark .probe-list-result__summary strong {
   color: #e2e8f0;
 }
 
-:global(.dark) .probe-list-result__summary span {
+.dark .probe-list-result__summary span {
   color: #94a3b8;
 }
 
-:global(.dark) .probe-list-result__table-wrap {
+.dark .probe-list-result__table-wrap {
   border-color: rgba(51, 65, 85, 0.86);
   background: rgba(2, 6, 23, 0.3);
 }
 
-:global(.dark) .probe-list-result th {
+.dark .probe-list-result th {
   color: #94a3b8;
   background: rgba(15, 23, 42, 0.9);
 }
 
-:global(.dark) .probe-list-result th,
-:global(.dark) .probe-list-result td {
+.dark .probe-list-result th,
+.dark .probe-list-result td {
   border-bottom-color: rgba(51, 65, 85, 0.76);
 }
 
-:global(.dark) .probe-list-result td {
+.dark .probe-list-result td {
   color: #cbd5e1;
 }
 
-:global(.dark) .probe-list-result code {
+.dark .probe-list-result code {
   color: #94a3b8;
 }
 </style>

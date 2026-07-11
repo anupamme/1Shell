@@ -596,7 +596,7 @@ onMounted(() => {
   backdrop-filter: blur(18px);
 }
 
-:global(.dark) .ai-fab-panel {
+.dark .ai-fab-panel {
   background: rgba(15, 23, 42, 0.94);
   color: #e2e8f0;
   border-color: rgba(71, 85, 105, 0.78);
@@ -613,7 +613,7 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.72);
 }
 
-:global(.dark) .ai-fab-header {
+.dark .ai-fab-header {
   background: rgba(15, 23, 42, 0.72);
   border-bottom-color: rgba(51, 65, 85, 0.72);
 }
@@ -630,7 +630,7 @@ onMounted(() => {
   border: 1px solid #bae6fd;
 }
 
-:global(.dark) .ai-fab-header-icon {
+.dark .ai-fab-header-icon {
   color: #7dd3fc;
   background: rgba(14, 165, 233, 0.12);
   border-color: rgba(56, 189, 248, 0.24);
@@ -644,7 +644,7 @@ onMounted(() => {
   color: #0f172a;
 }
 
-:global(.dark) .ai-fab-title {
+.dark .ai-fab-title {
   color: #e2e8f0;
 }
 
@@ -694,13 +694,13 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-:global(.dark) .ai-fab-mini-btn {
+.dark .ai-fab-mini-btn {
   background: rgba(15, 23, 42, 0.72);
   border-color: rgba(71, 85, 105, 0.8);
   color: #cbd5e1;
 }
 
-:global(.dark) .ai-fab-mini-btn:hover:not(:disabled) {
+.dark .ai-fab-mini-btn:hover:not(:disabled) {
   color: #7dd3fc;
   border-color: rgba(56, 189, 248, 0.34);
   background: rgba(30, 41, 59, 0.84);
@@ -745,11 +745,11 @@ onMounted(() => {
   line-height: 1.5;
 }
 
-:global(.dark) .ai-fab-placeholder {
+.dark .ai-fab-placeholder {
   color: #94a3b8;
 }
 
-:global(.dark) .ai-fab-placeholder strong {
+.dark .ai-fab-placeholder strong {
   color: #e2e8f0;
 }
 
@@ -762,7 +762,7 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.78);
 }
 
-:global(.dark) .ai-fab-input-area {
+.dark .ai-fab-input-area {
   background: rgba(15, 23, 42, 0.78);
   border-top-color: rgba(51, 65, 85, 0.72);
 }
@@ -792,7 +792,7 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-:global(.dark) .ai-fab-input {
+.dark .ai-fab-input {
   background: rgba(2, 6, 23, 0.72);
   border-color: rgba(71, 85, 105, 0.9);
   color: #e2e8f0;
@@ -821,7 +821,7 @@ onMounted(() => {
   font-size: 12px;
 }
 
-:global(.dark) .ai-fab-status {
+.dark .ai-fab-status {
   color: #94a3b8;
 }
 
@@ -855,13 +855,13 @@ onMounted(() => {
   border-color: rgba(185, 28, 28, 0.54);
 }
 
-:global(.dark) .ai-fab-stop-btn {
+.dark .ai-fab-stop-btn {
   color: #fecaca;
   background: rgba(127, 29, 29, 0.24);
   border-color: rgba(248, 113, 113, 0.35);
 }
 
-:global(.dark) .ai-fab-stop-btn:hover {
+.dark .ai-fab-stop-btn:hover {
   background: rgba(127, 29, 29, 0.38);
 }
 

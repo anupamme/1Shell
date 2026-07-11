@@ -322,7 +322,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
 }
 
-:global(.dark) .ide-approval-card {
+.dark .ide-approval-card {
   border-color: rgba(71, 85, 105, 0.9);
   background: #111827;
   color: #e5e7eb;
@@ -390,7 +390,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   font-weight: 700;
 }
 
-:global(.dark) .ide-approval-kicker {
+.dark .ide-approval-kicker {
   color: #94a3b8;
 }
 
@@ -414,7 +414,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   word-break: break-word;
 }
 
-:global(.dark) .ide-approval-copy p {
+.dark .ide-approval-copy p {
   color: #cbd5e1;
 }
 
@@ -457,19 +457,19 @@ function onCustomKeydown(event: KeyboardEvent): void {
   background: rgba(254, 226, 226, 0.84);
 }
 
-:global(.dark) .ide-approval-chip {
+.dark .ide-approval-chip {
   border-color: rgba(71, 85, 105, 0.9);
   color: #cbd5e1;
   background: rgba(15, 23, 42, 0.76);
 }
 
-:global(.dark) .ide-approval-chip--warning {
+.dark .ide-approval-chip--warning {
   border-color: rgba(245, 158, 11, 0.36);
   color: #fbbf24;
   background: rgba(120, 53, 15, 0.24);
 }
 
-:global(.dark) .ide-approval-chip--danger {
+.dark .ide-approval-chip--danger {
   border-color: rgba(248, 113, 113, 0.36);
   color: #fca5a5;
   background: rgba(127, 29, 29, 0.28);
@@ -499,7 +499,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   font-weight: 800;
 }
 
-:global(.dark) .ide-approval-command-head {
+.dark .ide-approval-command-head {
   color: #94a3b8;
 }
 
@@ -544,25 +544,25 @@ function onCustomKeydown(event: KeyboardEvent): void {
   word-break: break-word;
 }
 
-:global(.dark) .ide-approval-note {
+.dark .ide-approval-note {
   border-color: rgba(71, 85, 105, 0.82);
   background: rgba(15, 23, 42, 0.58);
 }
 
-:global(.dark) .ide-approval-note--ai {
+.dark .ide-approval-note--ai {
   border-color: rgba(56, 189, 248, 0.22);
   background: rgba(14, 165, 233, 0.1);
 }
 
-:global(.dark) .ide-approval-note-title {
+.dark .ide-approval-note-title {
   color: #cbd5e1;
 }
 
-:global(.dark) .ide-approval-note--ai .ide-approval-note-title {
+.dark .ide-approval-note--ai .ide-approval-note-title {
   color: #7dd3fc;
 }
 
-:global(.dark) .ide-approval-note p {
+.dark .ide-approval-note p {
   color: #dbeafe;
 }
 
@@ -596,7 +596,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   word-break: break-word;
 }
 
-:global(.dark) .ide-approval-detail {
+.dark .ide-approval-detail {
   color: #94a3b8;
 }
 
@@ -609,7 +609,7 @@ function onCustomKeydown(event: KeyboardEvent): void {
   padding: 10px 14px 14px;
 }
 
-:global(.dark) .ide-approval-actions {
+.dark .ide-approval-actions {
   border-top-color: rgba(71, 85, 105, 0.75);
   background: linear-gradient(180deg, rgba(17, 24, 39, 0.94), #111827);
 }
@@ -743,40 +743,40 @@ function onCustomKeydown(event: KeyboardEvent): void {
   opacity: 0.45;
 }
 
-:global(.dark) .ide-approval-decision,
-:global(.dark) .ide-approval-custom-decision {
+.dark .ide-approval-decision,
+.dark .ide-approval-custom-decision {
   border-color: rgba(71, 85, 105, 0.9);
   background: rgba(15, 23, 42, 0.74);
   color: #e5e7eb;
 }
 
-:global(.dark) .ide-approval-decision:hover {
+.dark .ide-approval-decision:hover {
   border-color: rgba(96, 165, 250, 0.42);
   background: rgba(30, 41, 59, 0.88);
 }
 
-:global(.dark) .ide-approval-decision small {
+.dark .ide-approval-decision small {
   color: #94a3b8;
 }
 
-:global(.dark) .ide-approval-index {
+.dark .ide-approval-index {
   background: #334155;
   color: #f8fafc;
 }
 
-:global(.dark) .ide-approval-input {
+.dark .ide-approval-input {
   border-color: rgba(71, 85, 105, 0.9);
   background: rgba(2, 6, 23, 0.82);
   color: #e5e7eb;
 }
 
-:global(.dark) .ide-approval-send {
+.dark .ide-approval-send {
   border-color: rgba(96, 165, 250, 0.38);
   background: rgba(15, 23, 42, 0.9);
   color: #93c5fd;
 }
 
-:global(.dark) .ide-approval-send:hover:not(:disabled) {
+.dark .ide-approval-send:hover:not(:disabled) {
   background: rgba(30, 64, 175, 0.22);
 }
 

@@ -1231,7 +1231,7 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
   font-weight: 700;
   color: #334155;
 }
-:global(html.dark) .settings-section-title {
+html.dark .settings-section-title {
   color: #e2e8f0;
 }
 
@@ -1254,14 +1254,14 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
   border-color: rgba(59, 130, 246, 0.25);
   color: #2563eb;
 }
-:global(html.dark) .settings-nav-item {
+html.dark .settings-nav-item {
   color: #94a3b8;
 }
-:global(html.dark) .settings-nav-item:hover {
+html.dark .settings-nav-item:hover {
   background: rgba(56, 189, 248, 0.08);
   color: #7dd3fc;
 }
-:global(html.dark) .settings-nav-item--active {
+html.dark .settings-nav-item--active {
   background: rgba(56, 189, 248, 0.12);
   border-color: rgba(56, 189, 248, 0.3);
   color: #7dd3fc;
@@ -1280,10 +1280,10 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
 .settings-nav-item--active .settings-nav-icon {
   background: rgba(59, 130, 246, 0.14);
 }
-:global(html.dark) .settings-nav-icon {
+html.dark .settings-nav-icon {
   background: rgba(148, 163, 184, 0.08);
 }
-:global(html.dark) .settings-nav-item--active .settings-nav-icon {
+html.dark .settings-nav-item--active .settings-nav-icon {
   background: rgba(56, 189, 248, 0.15);
 }
 </style>
