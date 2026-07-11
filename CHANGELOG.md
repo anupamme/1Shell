@@ -7,7 +7,15 @@
 - Agent 附件上传：图片/文档/通用文件先落盘到工作目录再交由 agent 自带的读取工具查看（协议 agent 走 `cwd/.1shell-attachments/`，1Shell AI 走 `data/agent-attachments/`），对话中以缩略图/文件卡回显，点击图片全屏灯箱放大；单文件上限提至 12MB，附件总量护栏 12MB。
 - 1Shell AI 配置文件生成器（`1shell-ai.json`）：接入配置回归"配置文件"语义，表单/启用自动生成、保存草稿即手工接管立即生效、恢复自动按活跃 provider 重写；运行时按 文件 → skills 槽位 → claude-code 回退解析。
 - skills 请求参数自填：1Shell AI 放弃语义化 reasoning 档位翻译，改由用户按上游 API 文档自填原始 JSON 参数（thinking / reasoning_effort / temperature 等），代理请求时原样合并进请求体。
+- 修复：1Shell AI 流式文案在工具卡后重复显示——已 stream 的原文不再二次定稿 `ide:text`，前端仅定稿仍打开的气泡，不在工具卡后再代说一遍。
 - 修复：ProviderModal 非 Claude Code 入口恢复主模型输入框；配置文件缺 apiKey 时回退有效 provider 而非报错；附件落盘目录名防穿越；配置文件原子写与崩溃自愈；`/ide` 旧路径重定向保留查询参数。
+- 其他：暗色模式 scoped 选择器去掉多余 `:global`；release 支持 `ONESHELL_REPACK_ONLY=windows|linux` 分平台打包。
+
+### Verification
+
+- `npm --prefix frontend run build`
+- Windows repack on local + Linux repack on build VPS
+- secret/path scan before release
 
 ## 4.7.3 - 2026-07-10
 
