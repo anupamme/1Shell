@@ -27,7 +27,6 @@ const {
   createIdeAgentGoalProfile,
   evaluateIdeAgentProfileToolUse,
   filterToolsForAgent,
-  isTaskRepairAuthorized,
   normalizeIdeApprovalMode,
   normalizeIdeAgentToolInput,
   shouldRequestAgentApproval,
@@ -726,53 +725,13 @@ function projectMessagesForModelApi(messages = []) {
   });
 }
 
-const TASK_AUTHORING_SYSTEM_PROMPT = [
-  '',
-  '当前处于 /task 任务创作模式。',
-  '你的目标不是把这件事真正做完，而是【推演】：要让 1Shell AI 以后自动完成这个目标，需要用户提供哪些输入。',
-  '用只读工具实地探索来把推演做扎实（list_hosts、列目录、读文件、查探针/端口、只读诊断命令等），不要凭空编输入项。',
-  '不要执行真正的变更操作（安装、写文件、删除、重启、部署等）；创作模式下这类变更/高危工具会被拒绝，这是正常的，继续用只读方式推演即可。',
-  '探索清楚后，用 create_ai_task 保存任务：name + description + inputs（关键）+ 可选的 steps 提示。',
-  'inputs 是会随主机或环境变化、需要用户填写的值，例如目标主机、域名、端口、仓库地址、服务名、密钥引用等；保持简单，不要设计 DSL、调度器、审批层或第二套 Agent。',
-  '需要密钥、token、密码时优先建议 request_secret/Secret 引用；如果用户明确选择直接提供明文，可以用于本次操作，但工具输入、审计和输出摘要必须脱敏。',
-  '不必追求一次就完美：任务以后执行失败时，可以让那次执行的 1Shell AI 直接用 update_ai_task 修正任务。',
-  'preview_ai_task 可先检查结构；create_ai_task / update_ai_task 是保存任务的唯一入口，不要把任务 JSON 直接贴给用户来代替保存。',
-].join('\n');
-
-function normalizePromptEntry(entry, context = null, message = '') {
-  const value = String(entry || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
-  if (value === 'core') return 'core';
-  if (value === 'task') return 'task';
-  if (value === 'task_run') return 'task_run';
-  const ctx = context && typeof context === 'object' && !Array.isArray(context) ? context : {};
-  if (ctx.taskRun || ctx.task_run || ctx.taskExecution || ctx.task_execution) return 'task_run';
-  if (ctx.taskAuthoring || ctx.task_authoring) return 'task';
-  const text = String(message || '').trim();
-  if (/^进入\s*\/task\s*任务创作模式|\/task\s+任务创作|task authoring/i.test(text)) return 'task';
+// 4.7.5：AI 任务板块整体退役（创作模式、任务执行、失败修复授权全部删除）。
+// entry 只剩 'core' 一种语义，保留归一化函数以兼容旧客户端载荷。
+function normalizePromptEntry(_entry, _context = null, _message = '') {
   return 'core';
 }
 
-function normalizeTaskRepairScope(context = null, entry = 'core') {
-  const normalizedEntry = normalizePromptEntry(entry, context);
-  const ctx = context && typeof context === 'object' && !Array.isArray(context) ? context : {};
-  const repair = {
-    authorized: ctx.taskRepairAuthorized === true
-      || ctx.task_repair_authorized === true
-      || ctx.taskRepair === true
-      || ctx.task_repair === true,
-    taskId: String(ctx.taskRepairTaskId || ctx.task_repair_task_id || ctx.taskId || ctx.task_id || '').trim(),
-    runId: String(ctx.taskRepairRunId || ctx.task_repair_run_id || ctx.taskRunId || ctx.task_run_id || '').trim(),
-  };
-  if (normalizedEntry !== 'task_run' || !isTaskRepairAuthorized(repair) || !repair.taskId) {
-    return { authorized: false, taskId: '', runId: '' };
-  }
-  return repair;
-}
-
-function promptForEntry(entry) {
-  if (normalizePromptEntry(entry) === 'task') {
-    return `${ONESHELL_CORE_SYSTEM_PROMPT}\n${TASK_AUTHORING_SYSTEM_PROMPT}`;
-  }
+function promptForEntry(_entry) {
   return ONESHELL_CORE_SYSTEM_PROMPT;
 }
 
@@ -1540,8 +1499,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     try {
       const source = 'ide';
       const normalizedEntry = normalizePromptEntry(entry);
-      const normalizedApprovalMode = normalizeIdeApprovalMode(approvalMode || session?.approvalMode, { entry: normalizedEntry });
-      const policy = createIdeAgentPolicy({ tools, entry: normalizedEntry, approvalMode: normalizedApprovalMode, remotePolicy: session?.toolPolicy, goalProfile, taskRepair: session?.taskRepair });
+      const normalizedApprovalMode = normalizeIdeApprovalMode(approvalMode || session?.approvalMode);
+      const policy = createIdeAgentPolicy({ tools, entry: normalizedEntry, approvalMode: normalizedApprovalMode, remotePolicy: session?.toolPolicy, goalProfile });
       const state = agentRuntime.startRun({
         source,
         goal: String(message || '').trim(),
@@ -1562,8 +1521,6 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
           sessionId,
           entry: normalizedEntry,
           approvalMode: normalizedApprovalMode,
-          taskRepairAuthorized: isTaskRepairAuthorized(session?.taskRepair),
-          taskRepairTaskId: session?.taskRepair?.taskId || '',
           claudeCodeEnabled: !!claudeCodeEnabled,
           legacySafeMode: legacyFlags.safeMode,
           legacyUnlimitedTurns: legacyFlags.unlimitedTurns,
@@ -2253,7 +2210,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
   }
 
   function createIdeRuntimeDispatchOptions({ socket, sessionId, runId, session, mcpToolMap, emitLifecycle = true, recordPhase = true, recordEffects = true } = {}) {
-    const approvalMode = normalizeIdeApprovalMode(session?.approvalMode, { entry: session?.entry });
+    const approvalMode = normalizeIdeApprovalMode(session?.approvalMode);
     const allowInteractiveApproval = approvalMode === 'manual';
     const preApproved = approvalMode === 'full_access';
     const requestHarnessApproval = async (toolName, input, summary, riskReason, approvalContext = {}) => {
@@ -2871,16 +2828,12 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return ![result?.text, result?.report, result?.content].some((value) => String(value || '').trim().length > 0);
   }
 
-  function createEmptyModelResponseObservation({ entry, attempt }) {
-    const inTaskMode = normalizePromptEntry(entry) === 'task';
-    const guidance = inTaskMode
-      ? 'You are still in /task authoring mode. This mode is read-only task deduction: ask for missing required inputs, run only read-only inspection tools if useful, preview/save the task structure with create_ai_task/update_ai_task when inputs and steps are clear, or explain the blocker in visible assistant text. Do not perform installs, writes, restarts, deployments, or require practice/verify_outcome evidence before saving.'
-      : 'Continue by producing visible assistant text, calling the next appropriate tool, asking a required user question, or explaining the blocker.';
+  function createEmptyModelResponseObservation({ attempt }) {
     const content = [
       'RUNTIME_EMPTY_MODEL_RESPONSE',
       `attempt=${attempt}`,
       'The previous provider response contained no assistant text and no tool calls, so 1Shell did not treat it as completion.',
-      guidance,
+      'Continue by producing visible assistant text, calling the next appropriate tool, asking a required user question, or explaining the blocker.',
     ].join('\n');
     return {
       id: `runtime-empty-model-response-${Date.now()}-${attempt}`,
@@ -2992,18 +2945,6 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       if (seenToolNames.has(t.name)) continue;
       seenToolNames.add(t.name);
       allTools.push(t);
-    }
-    const taskRepairAuthorized = isTaskRepairAuthorized(session?.taskRepair);
-    const repairToolNames = new Set(['preview_ai_task', 'update_ai_task', 'get_ai_task']);
-    // task 创作模式暴露完整任务工具；task_run 只有在用户确认失败改进后，
-    // 才临时暴露修订当前任务所需的最小工具集。
-    if ((session?.entry === 'task' || taskRepairAuthorized) && Array.isArray(ideTools.TASK_AUTHORING_TOOL_SCHEMAS)) {
-      for (const t of ideTools.TASK_AUTHORING_TOOL_SCHEMAS) {
-        if (session?.entry !== 'task' && !repairToolNames.has(t.name)) continue;
-        if (seenToolNames.has(t.name)) continue;
-        seenToolNames.add(t.name);
-        allTools.push(t);
-      }
     }
     if (session?.claudeCodeEnabled && ideTools.CLAUDE_CODE_TOOL) {
       const t = ideTools.CLAUDE_CODE_TOOL;
@@ -3138,7 +3079,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   function applyPromptEntry(session, entry, approvalMode = null) {
     const nextEntry = normalizePromptEntry(entry);
-    const nextApprovalMode = normalizeIdeApprovalMode(approvalMode || session.approvalMode, { entry: nextEntry });
+    const nextApprovalMode = normalizeIdeApprovalMode(approvalMode || session.approvalMode);
     if (session.entry !== nextEntry) {
       session.entry = nextEntry;
       session.system = promptForEntry(nextEntry);
@@ -3180,7 +3121,6 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       const session = sessions.get(sessionId);
       session.updatedAt = new Date().toISOString();
       applyPromptEntry(session, entry, approvalMode);
-      session.taskRepair = normalizeTaskRepairScope(context, session.entry);
       if (hasOwnObjectProperty(context, 'toolPolicy')) session.toolPolicy = context.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null;
       if (hasOwnObjectProperty(context, 'workspaceHostIds') || Array.isArray(context?.hosts)) session.workspaceHostIds = workspaceHostIdsFromContext(context);
       const contextHostId = hostIdFromContext(context);
@@ -3216,7 +3156,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     }
 
     const promptEntry = normalizePromptEntry(entry);
-    const promptApprovalMode = normalizeIdeApprovalMode(approvalMode, { entry: promptEntry });
+    const promptApprovalMode = normalizeIdeApprovalMode(approvalMode);
     const session = {
       messages: restoreSessionMessages(sessionId),
       entry: promptEntry,
@@ -3241,7 +3181,6 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       legacyUnlimitedTurns: null,
       claudeCodeEnabled: false,
       toolPolicy: hasOwnObjectProperty(context, 'toolPolicy') && context.toolPolicy ? normalizeToolPolicy(context.toolPolicy) : null,
-      taskRepair: normalizeTaskRepairScope(context, promptEntry),
       agentPolicy: null,
       agentGoalProfile: null,
       activeSkillContext: null,
@@ -3902,6 +3841,36 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return ideSessionRepository?.deleteSession ? ideSessionRepository.deleteSession(id) : false;
   }
 
+  // 主机删除联动（4.7.5）：清掉绑定在已删除主机上的会话。
+  // isValidHostId 返回 false 的绑定视为已删除主机；剔空的 oneshell 会话连
+  // 内存副本一起删（协议 agent 会话跑在本机，repository 层只解绑不删）。
+  function pruneSessionsForHosts(isValidHostId) {
+    if (typeof ideSessionRepository?.pruneHostBindings !== 'function') return { deletedIds: [], updated: 0 };
+    const result = ideSessionRepository.pruneHostBindings(isValidHostId);
+    for (const id of result.deletedIds) {
+      deleteSession(id); // 取消运行中的回合并丢弃内存副本，防止下次落盘复活
+    }
+    // 活会话内存里的绑定同步剔除，避免下次 persist 把已删主机写回去
+    for (const [, session] of sessions) {
+      const ids = cleanWorkspaceHostIds(session?.workspaceHostIds);
+      if (!ids.length) continue;
+      const remaining = ids.filter((id) => isValidHostId(id));
+      if (remaining.length === ids.length) continue;
+      session.workspaceHostIds = remaining;
+      if (session.hostId && !isValidHostId(session.hostId)) {
+        session.hostId = remaining.length ? hostIdForWorkspace(remaining) : '';
+      }
+    }
+    return result;
+  }
+
+  // DELETE /api/hosts/:id 用：删除单台主机时级联清理其对话
+  function removeSessionsForHost(hostId) {
+    const target = String(hostId || '').trim();
+    if (!target || target === 'local') return { deletedIds: [], updated: 0 };
+    return pruneSessionsForHosts((id) => id !== target);
+  }
+
   // 文件反查会话（IDE 壳）：哪些会话触碰过该文件
   function findSessionsByFile(filePath) {
     return ideSessionRepository?.findSessionsByFile ? ideSessionRepository.findSessionsByFile(filePath) : [];
@@ -3991,7 +3960,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       legacyFlags: ignoredLegacyFlags,
     });
     recordActiveSkills(runId, sessionId, session, activeSkillContext);
-    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry: session.entry, approvalMode: session.approvalMode, remotePolicy: session.toolPolicy, goalProfile: agentGoalProfile, taskRepair: session.taskRepair });
+    const agentPolicy = agentState?.spec?.policy || session.agentPolicy || createIdeAgentPolicy({ tools: allTools, entry: session.entry, approvalMode: session.approvalMode, remotePolicy: session.toolPolicy, goalProfile: agentGoalProfile });
     const agentTools = filterToolsForAgent(allTools, agentPolicy);
 
     sanitizeProviderMessageHistory(session.messages);
@@ -4074,7 +4043,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
               data: { round: round + 1, retry: emptyModelResponseRetries, entry: session.entry },
             });
             if (emptyModelResponseRetries <= EMPTY_MODEL_RESPONSE_RETRY_LIMIT) {
-              observations = [createEmptyModelResponseObservation({ entry: session.entry, attempt: emptyModelResponseRetries })];
+              observations = [createEmptyModelResponseObservation({ attempt: emptyModelResponseRetries })];
               continue;
             }
             throw new Error('Cannot continue IDE agent run: provider returned empty assistant responses repeatedly.');
@@ -4357,7 +4326,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     return { ok: true, running: !!session.currentRunId && !session.cancelled, runId: session.currentRunId };
   }
 
-  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord, findSessionsByFile, releaseLiveSession };
+  return { handleMessage, ask, cancelSession, cancelSessionsForSocket, detachSessionsForSocket, deleteSession, hasSession, setSafeMode, getSafeMode, setUnlimitedTurns, setClaudeCodeEnabled, recordAuthoringUserReply, reattachSession, listRewindPoints, listSessions, getSessionDetail, renameSessionRecord, copySessionRecord, removeSessionRecord, removeSessionsForHost, pruneSessionsForHosts, findSessionsByFile, releaseLiveSession };
 }
 
 module.exports = {

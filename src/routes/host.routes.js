@@ -4,7 +4,7 @@ const express = require('express');
 const { LOCAL_HOST_ID } = require('../config/env');
 const { validateHostPayload, validateManualLocation } = require('../utils/validators');
 
-function createHostRouter({ hostRepository, hostService, auditService, isUsingFallbackSecret, probeService, probeAgentService, probeRelayService, probeTrafficService, probeAggregatorService, alertService }) {
+function createHostRouter({ hostRepository, hostService, auditService, isUsingFallbackSecret, probeService, probeAgentService, probeRelayService, probeTrafficService, probeAggregatorService, alertService, ideService }) {
   const router = express.Router();
 
   function buildProbeMap() {
@@ -226,9 +226,14 @@ function createHostRouter({ hostRepository, hostService, auditService, isUsingFa
     hostRepository.writeStoredHosts(nextHosts);
     hostRepository.deleteHostPreference(hostId);
     cleanupProbeState(hostId);
+    // 级联清理绑定在该主机上的 Agent 对话（4.7.5：避免左栏留下"主机已删除"残留组）
+    let purgedSessions = 0;
+    try {
+      purgedSessions = ideService?.removeSessionsForHost?.(hostId)?.deletedIds?.length || 0;
+    } catch { /* 会话清理失败不阻塞主机删除 */ }
     const deleted = hosts.find((item) => item.id === hostId);
-    auditService?.log({ action: 'host_delete', source: 'web_ui', hostId, hostName: deleted?.name, clientIp: req.ip });
-    return res.json({ ok: true });
+    auditService?.log({ action: 'host_delete', source: 'web_ui', hostId, hostName: deleted?.name, details: JSON.stringify({ purgedSessions }), clientIp: req.ip });
+    return res.json({ ok: true, purgedSessions });
   });
 
   return router;

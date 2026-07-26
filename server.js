@@ -26,6 +26,7 @@ const {
   BRIDGE_TOKEN,
   DATA_DIR,
   HOSTS_FILE,
+  LOCAL_HOST_ID,
   PORT,
   PROXY_TOKEN,
   ROOT_DIR,
@@ -37,7 +38,6 @@ const { createApp } = require('./src/app/createApp');
 const { createServer } = require('./src/app/createServer');
 const { errorHandler } = require('./src/middleware/error.middleware');
 const { createHostRepository } = require('./src/repositories/host.repository');
-const { createAiTaskRepository } = require('./src/repositories/ai-task.repository');
 const { createIdeSessionRepository } = require('./src/repositories/ide-session.repository');
 const { createScriptRepository } = require('./src/repositories/script.repository');
 const { createAiRouter } = require('./src/routes/ai.routes');
@@ -55,7 +55,6 @@ const { createProbeTrafficRouter } = require('./src/routes/probe-traffic.routes'
 const { createProbeAlertRouter } = require('./src/routes/probe-alert.routes');
 const { createProbeDiagRouter } = require('./src/routes/probe-diag.routes');
 const { createPanelWorkloadsRouter } = require('./src/routes/panel-workloads.routes');
-const { createAiTaskRouter } = require('./src/routes/ai-task.routes');
 const { createIdeSessionRouter } = require('./src/routes/ide-session.routes');
 const { createScriptRouter } = require('./src/routes/script.routes');
 const { createNativeCliConfig } = require('./src/agents/native-cli-config');
@@ -66,7 +65,6 @@ const { createAuditService } = require('./src/services/audit.service');
 const { createBridgeService } = require('./src/services/bridge.service');
 const { createCommandGuard } = require('./src/ai/command-safety');
 const { createHarness } = require('./src/harness');
-const { createAiTaskService } = require('./src/services/ai-task.service');
 const { createScriptService } = require('./src/services/script.service');
 const { createSshPool } = require('./src/services/ssh-pool.service');
 const { createSshShellPool } = require('./src/services/ssh-shell-pool.service');
@@ -131,7 +129,6 @@ const db = createDatabase(path.join(dataDir, '1shell.db'), { logger: log });
 const app = createApp(ROOT_DIR);
 const { io, server } = createServer(app);
 const hostRepository = createHostRepository(HOSTS_FILE, db);
-const aiTaskRepository = createAiTaskRepository(db);
 const ideSessionRepository = createIdeSessionRepository(db, { dataDir });
 const scriptRepository = createScriptRepository(db);
 const secretService = createSecretService({ db });
@@ -169,7 +166,6 @@ const probeAgentInstallerService = createProbeAgentInstallerService({ rootDir: R
 const probeRelayInstallerService = createProbeRelayInstallerService({ rootDir: ROOT_DIR, hostService, bridgeService, probeRelayService });
 const fileService = createFileService({ hostService, probeAgentService });
 const ipFilterService = createIpFilterService({ db });
-const aiTaskService = createAiTaskService({ aiTaskRepository });
 const scriptService = createScriptService({ scriptRepository, hostService, bridgeService, auditService });
 const libraryService = createLibraryService({ skillRegistry });
 const mcpRegistry = createMcpRegistry({ dataDir });
@@ -199,7 +195,6 @@ const ideTools = createIdeTools({
   localMcpService,
   localMcpDeployer,
   scriptService,
-  aiTaskService,
   fileService,
   probeService,
   probeAgentService,
@@ -231,6 +226,18 @@ const ideService = createIdeService({
   ideSessionRepository,
   dataDir,
 });
+
+// 启动清扫：绑定在已删除主机上的历史会话残留（4.7.5 起删除主机会级联清理，
+// 这里补一次性清理老数据留下的"主机已删除"孤儿分组）
+try {
+  const validHostIds = new Set([LOCAL_HOST_ID, ...hostRepository.readStoredHosts().map((h) => h?.id).filter(Boolean)]);
+  const pruned = ideService.pruneSessionsForHosts((id) => validHostIds.has(id));
+  if (pruned.deletedIds.length || pruned.updated) {
+    log.info('已清理已删除主机的会话残留', { deleted: pruned.deletedIds.length, detached: pruned.updated });
+  }
+} catch (error) {
+  log.warn?.(`[ide] 孤儿会话清扫失败: ${error.message}`);
+}
 
 // ─── 协议 agent（Claude Code / Gemini CLI / …）── Agent 板块的第三方接入 ──
 const protocolAgentCatalog = createProtocolAgentCatalog({
@@ -305,6 +312,7 @@ app.use('/api', createHostRouter({
   probeTrafficService,
   probeAggregatorService,
   alertService: probeAlertService,
+  ideService,
 }));
 const geoIpService = createGeoIpService();
 app.use('/api', createGeoRouter({ hostService, geoIpService, probeService }));
@@ -321,7 +329,6 @@ app.use('/api', createRemoteMcpRouter({ remoteMcpService, mcpService }));
 app.use('/api', createSecuritySettingsRouter({ securitySettingsService, bridgeService, hostService, auditService }));
 app.use('/api', createFileRouter({ fileService }));
 app.use('/api', createIpFilterRouter({ ipFilterService }));
-app.use('/api', createAiTaskRouter({ aiTaskService }));
 app.use('/api', createIdeSessionRouter({ ideService }));
 app.use('/api', createProtocolAgentRouter({ protocolAgentService }));
 app.use('/api', createScriptRouter({ scriptService, aiService }));

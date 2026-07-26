@@ -53,6 +53,7 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
     `),
     rename: db.prepare("UPDATE ide_sessions SET title = @title, updated_at = updated_at WHERE id = @id"),
     delete: db.prepare('DELETE FROM ide_sessions WHERE id = ?'),
+    detachHosts: db.prepare('UPDATE ide_sessions SET host_id = @host_id, workspace_hosts_json = @workspace_hosts_json, updated_at = updated_at WHERE id = @id'),
   };
 
   // INSERT sets the (auto-derived) title; UPDATE preserves it so a user rename
@@ -158,7 +159,35 @@ function createIdeSessionRepository(db, { dataDir } = {}) {
       .map(rowToMeta);
   }
 
-  return { listSessions, getSession, upsertSession, renameSession, deleteSession, findSessionsByFile };
+  // 主机删除联动（4.7.5）：把无效主机从每条会话的绑定里剔除。
+  // - oneshell 会话绑定被剔空 → 整条删除（对话随主机一起消失）
+  // - 协议 agent 会话跑在本机，只解绑不删除
+  // - 多主机工作区剔除后仍有绑定 → 只改绑定列，消息原样保留（不能走 upsert，会清空 messages_json）
+  function pruneHostBindings(isValidHostId) {
+    const deletedIds = [];
+    let updated = 0;
+    for (const row of stmts.selectMetaList.all()) {
+      const ids = normalizeWorkspaceHostIds(safeParseArray(row.workspace_hosts_json), row.host_id || '');
+      if (!ids.length) continue;
+      const remaining = ids.filter((id) => isValidHostId(id));
+      if (remaining.length === ids.length) continue;
+      const isProtocol = Boolean(row.agent_id && row.agent_id !== 'oneshell');
+      if (!remaining.length && !isProtocol) {
+        stmts.delete.run(row.id);
+        deletedIds.push(row.id);
+        continue;
+      }
+      stmts.detachHosts.run({
+        id: row.id,
+        host_id: remaining.includes(row.host_id) ? row.host_id : (remaining[0] || null),
+        workspace_hosts_json: JSON.stringify(remaining),
+      });
+      updated += 1;
+    }
+    return { deletedIds, updated };
+  }
+
+  return { listSessions, getSession, upsertSession, renameSession, deleteSession, findSessionsByFile, pruneHostBindings };
 }
 
 function safeParseArray(value) {
@@ -310,7 +339,35 @@ function createFileIdeSessionRepository(dataDir) {
       .map(fileRowToMeta);
   }
 
-  return { listSessions, getSession, upsertSession, renameSession, deleteSession, findSessionsByFile };
+  // 与 SQLite 版 pruneHostBindings 语义一致（见上方注释）
+  function pruneHostBindings(isValidHostId) {
+    const rows = load();
+    const deletedIds = [];
+    let updated = 0;
+    const kept = [];
+    for (const row of rows) {
+      const ids = normalizeWorkspaceHostIds(row.workspaceHostIds, row.hostId || '');
+      if (!ids.length) { kept.push(row); continue; }
+      const remaining = ids.filter((id) => isValidHostId(id));
+      if (remaining.length === ids.length) { kept.push(row); continue; }
+      const isProtocol = Boolean(row.agentId && row.agentId !== 'oneshell');
+      if (!remaining.length && !isProtocol) {
+        deletedIds.push(row.id);
+        continue;
+      }
+      row.workspaceHostIds = remaining;
+      row.hostId = remaining.includes(row.hostId) ? row.hostId : (remaining[0] || '');
+      kept.push(row);
+      updated += 1;
+    }
+    if (deletedIds.length || updated) {
+      cache = kept;
+      save(cache);
+    }
+    return { deletedIds, updated };
+  }
+
+  return { listSessions, getSession, upsertSession, renameSession, deleteSession, findSessionsByFile, pruneHostBindings };
 }
 
 function normalizeFileRow(value) {

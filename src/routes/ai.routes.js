@@ -1,10 +1,8 @@
 'use strict';
 
 const express = require('express');
-const log = require('../../lib/logger');
 const {
   validateCompletionRequestBody,
-  validateTerminalInlineCompletionBody,
   validateAnalyzeSelectionBody,
 } = require('../utils/validators');
 const { createRateLimiter } = require('../middleware/rate-limiter.middleware');
@@ -14,37 +12,11 @@ function createAiRouter(aiService) {
 
   // AI 接口限流：每 IP 每分钟最多 30 次请求
   const aiLimiter = createRateLimiter({ windowMs: 60000, maxRequests: 30 });
-  // 内联补全更频繁，单独放宽
-  const inlineLimiter = createRateLimiter({ windowMs: 60000, maxRequests: 60 });
 
   router.post('/complete', aiLimiter, async (req, res, next) => {
     try {
       const completion = await aiService.requestCompletion(validateCompletionRequestBody(req.body));
       res.json({ completion });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  router.post('/ai/terminal/complete-inline', inlineLimiter, async (req, res, next) => {
-    try {
-      const body = validateTerminalInlineCompletionBody(req.body);
-      log.info('终端补全请求', {
-        method: req.method,
-        url: req.originalUrl,
-        hostId: body.hostId,
-        currentInputLength: String(body.currentInput || '').length,
-        recentCommandsCount: Array.isArray(body.recentCommands) ? body.recentCommands.length : 0,
-      });
-      const result = await aiService.requestTerminalInlineCompletion(body);
-      log.info('终端补全响应', {
-        hostId: body.hostId,
-        currentInputLength: String(body.currentInput || '').length,
-        completionLength: String(result.completion || '').length,
-        confidence: result.confidence,
-        hasRequestId: Boolean(result.requestId),
-      });
-      res.json(result);
     } catch (error) {
       next(error);
     }

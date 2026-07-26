@@ -1,31 +1,21 @@
 <script setup lang="ts">
 // TerminalArea.vue — MainConsole 终端区
 // 严格 1:1 对照老 [public/index.html](public/index.html) row 326-426 + [public/layout.js](public/layout.js) renderTabs。
-// 结构（自上而下）：terminal-tabs → 状态栏 → SuggestionBox → CmdInlinePanel → terminal-main（含 terminal-hint / terminal-container / Ghost / fab）
+// 结构（自上而下）：terminal-tabs → CmdInlinePanel → terminal-main（含 terminal-hint / terminal-container / fab）
+// 4.7.5：顶栏探针条（CPU/内存/负载/硬盘）与 AI 行内补全（补全条/ghost 浮层）退役
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 
 import AnalyzeFab from '@/components/main/AnalyzeFab.vue';
 import AnalyzePanel from '@/components/main/AnalyzePanel.vue';
 import CmdInlinePanel from '@/components/main/CmdInlinePanel.vue';
-import GhostOverlay from '@/components/main/GhostOverlay.vue';
 import ScriptInjectPanel from '@/components/main/ScriptInjectPanel.vue';
-import SuggestionBox from '@/components/main/SuggestionBox.vue';
 import { useCommandSuggestion } from '@/composables/useCommandSuggestion';
 import { useScriptInject } from '@/composables/useScriptInject';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
-import { useTerminalAi } from '@/composables/useTerminalAi';
 import { useTerminalAnalyze } from '@/composables/useTerminalAnalyze';
 import { useHostsStore } from '@/stores/hosts';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 import type { SessionInfo } from '@/utils/terminal';
-
-const props = defineProps<{
-  hostName: string;
-  cpu: string;
-  memory: string;
-  load: string;
-  disk: string;
-}>();
 
 const emit = defineEmits<{
   'host-change': [hostId: string];
@@ -35,14 +25,12 @@ const emit = defineEmits<{
 
 const hosts = useHostsStore();
 const sessionTerminal = useSessionTerminal();
-const terminalAi = useTerminalAi();
 const commandSuggestion = useCommandSuggestion();
 const scriptInject = useScriptInject();
 const terminalAnalyze = useTerminalAnalyze();
 
 const terminalEl = ref<HTMLElement | null>(null);
 const isFullscreen = ref(false);
-const showSuggestionBox = ref(true);
 
 const sessionsList = computed(() => [...sessionTerminal.sessions.value.values()].filter((s) => s.status !== 'closed'));
 
@@ -86,11 +74,6 @@ function toggleFullscreen(): void {
   setTimeout(() => sessionTerminal.focusTerminal(), 60);
 }
 
-function closeSuggestion(): void {
-  showSuggestionBox.value = false;
-  setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
-}
-
 function refitTerminalSoon(): void {
   [40, 140, 360].forEach((delay) => {
     window.setTimeout(() => sessionTerminal.focusTerminal(), delay);
@@ -106,7 +89,6 @@ watch(
 onMounted(() => {
   sessionTerminal.resumeUserInput(0);
   if (terminalEl.value) sessionTerminal.mount(terminalEl.value);
-  terminalAi.initialize();
   commandSuggestion.initialize();
   scriptInject.initialize();
   terminalAnalyze.initialize();
@@ -131,7 +113,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="terminal-area" :class="{ fullscreen: isFullscreen }">
-    <!-- 单行工具条：左=会话 tabs+连接状态 / 中=主机简况 / 右=操作 -->
+    <!-- 单行工具条：左=会话 tabs+连接状态 / 右=操作 -->
     <div id="terminal-tabs" class="terminal-tabs">
       <div class="terminal-tabs-left">
         <div class="terminal-tab-strip">
@@ -159,17 +141,6 @@ onBeforeUnmount(() => {
           <span class="terminal-status-mini-text">{{ sessionTerminal.statusText.value }}</span>
         </div>
       </div>
-      <div class="terminal-probe-strip" aria-label="主机简况">
-        <span class="terminal-probe-host">{{ props.hostName }}</span>
-        <span class="terminal-probe-sep"></span>
-        <span>CPU <b>{{ props.cpu }}</b></span>
-        <span class="terminal-probe-sep"></span>
-        <span>内存 <b>{{ props.memory }}</b></span>
-        <span class="terminal-probe-extra terminal-probe-sep"></span>
-        <span class="terminal-probe-extra">负载 <b>{{ props.load }}</b></span>
-        <span class="terminal-probe-extra terminal-probe-sep"></span>
-        <span class="terminal-probe-extra">硬盘 <b>{{ props.disk }}</b></span>
-      </div>
       <div class="terminal-actions">
         <button
           id="inject-script-btn"
@@ -192,13 +163,6 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 补全建议占位条（老 #terminal-inline-suggestion-box，shrink-0 普通块） -->
-    <SuggestionBox
-      :text="terminalAi.suggestionText.value"
-      :visible="showSuggestionBox && terminalAi.ghostVisible.value"
-      @close="closeSuggestion"
-    />
-
     <!-- AI 命令面板（老 #cmd-inline-panel，hidden 时不占空间） -->
     <CmdInlinePanel />
 
@@ -213,12 +177,7 @@ onBeforeUnmount(() => {
         :class="{ hidden: !sessionTerminal.terminalHint.value }"
       >{{ sessionTerminal.terminalHint.value }}</div>
       <div id="terminal-container" ref="terminalEl" class="terminal-container"></div>
-      <GhostOverlay
-        :visible="terminalAi.ghostVisible.value"
-        :text="terminalAi.ghostText.value"
-        :hint="terminalAi.ghostHint.value"
-      />
-      <!-- 选区分析 FAB（terminal-main 内,与 GhostOverlay 同级 absolute） -->
+      <!-- 选区分析 FAB（terminal-main 内 absolute） -->
       <AnalyzeFab />
     </div>
 

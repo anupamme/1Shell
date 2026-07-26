@@ -12,7 +12,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { to: '/config/ai',       label: 'AI',   icon: 'spark',   title: 'AI 配置' },
   { to: '/config/skills',   label: '扩展', icon: 'package', title: '扩展' },
-  { to: '/config/features', label: '程序', icon: 'wrench',  title: '任务与程序' },
+  { to: '/config/features', label: '程序', icon: 'wrench',  title: '脚本与程序' },
   { to: '/config/mcp',      label: 'MCP',  icon: 'plug',    title: 'MCP Hub' },
 ];
 </script>

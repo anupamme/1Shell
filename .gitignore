@@ -44,6 +44,7 @@ agent/.gocache/
 agent/dist/
 frontend/dist/
 release/
+runtime/
 test-results/
 artifacts/
 *.log

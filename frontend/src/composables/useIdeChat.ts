@@ -134,7 +134,6 @@ export interface IdeChatOptions {
   approvalMode?: IdeApprovalMode | (() => IdeApprovalMode);
   context?: () => Record<string, unknown>;
   messagePayload?: () => Record<string, unknown>;
-  onTaskSaved?: (payload: IdeTaskSavedMessage) => void;
   onRunComplete?: () => void;
 }
 
@@ -143,13 +142,6 @@ export interface IdeLoadableSession {
   timeline: IdeTimelineItem[];
   running?: boolean;
   runId?: string;
-}
-
-export interface IdeTaskSavedMessage extends StreamMessage {
-  action?: 'created' | 'updated' | string;
-  taskId?: string;
-  task?: unknown;
-  authoringEvidence?: unknown;
 }
 
 export interface IdeRewindPoint {
@@ -958,11 +950,6 @@ export function useIdeChat(options: IdeChatOptions = {}): IdeChatApi {
         if (!matchesCurrentRun(msg)) return;
         finishTool(msg);
         setStatus(msg.is_error ? '工具返回错误' : '思考中...');
-      }],
-      ['ide:task-saved', (raw: unknown) => {
-        const msg = raw as IdeTaskSavedMessage;
-        if (!matchesCurrentRun(msg)) return;
-        options.onTaskSaved?.(msg);
       }],
       ['ide:rewind', (raw: unknown) => {
         const msg = raw as StreamMessage & { timeline?: IdeTimelineItem[] };

@@ -103,7 +103,7 @@ const twofaCode = ref('');
 const twofaDisableCode = ref('');
 const twofaRecoveryCodes = ref<string[]>([]);
 
-type DesktopBooleanKey = 'startAtLogin' | 'backgroundOnClose';
+type DesktopBooleanKey = 'startAtLogin' | 'backgroundOnClose' | 'skipLocalLogin';
 
 const desktopAvailable = ref(false);
 const desktopLoading = ref(false);
@@ -932,6 +932,20 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
                 <span>
                   <span class="block text-sm font-semibold text-slate-700 dark:text-slate-200">关闭窗口后后台运行</span>
                   <span class="mt-1 block text-xs text-slate-500 dark:text-slate-400">关闭主窗口时隐藏到托盘，本地 MCP/API 服务继续保留。</span>
+                </span>
+              </label>
+
+              <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324] cursor-pointer">
+                <input
+                  type="checkbox"
+                  class="mt-1"
+                  :checked="desktopSettings.skipLocalLogin"
+                  :disabled="desktopSaving"
+                  @change="onDesktopToggle('skipLocalLogin', $event)"
+                />
+                <span>
+                  <span class="block text-sm font-semibold text-slate-700 dark:text-slate-200">本机免登录</span>
+                  <span class="mt-1 block text-xs text-slate-500 dark:text-slate-400">桌面窗口打开时自动建立本机会话，跳过登录页。仅对本机窗口生效——浏览器或局域网访问仍需正常登录，下次启动窗口时生效。</span>
                 </span>
               </label>
 

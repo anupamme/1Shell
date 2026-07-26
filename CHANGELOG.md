@@ -1,5 +1,24 @@
 # Changelog
 
+## 未发布（4.7.5 开发中）
+
+桌面版回归 + 终端区减负 + 会话列表随主机删除联动清理 + AI 任务板块退役。
+
+- 桌面版本机免登录：Electron 启动时生成一次性凭据注入自带后端，窗口打开前主进程静默换取本机会话，桌面窗口不再出现登录页；会话过期后登录页自动重签自愈。仅对本机桌面窗口生效——浏览器/局域网访问照常要求登录，凭据只存在于主进程与后端进程环境，渲染层不可见，非环回请求一律拒绝（不信任代理头）。设置 → 桌面版新增「本机免登录」开关（默认开启，与既有「开机自启」「关闭窗口后后台运行」并列）。
+- 桌面版外观：隐藏 Windows/Linux 的 File/Edit/View 默认菜单栏（macOS 保留系统菜单以支持编辑快捷键）；新增品牌图标（渐变「1_」终端光标风，512px 源 + 多尺寸 ico），窗口/托盘/任务栏与打包产物（exe/dmg/AppImage）统一生效，浏览器 favicon.ico 一并升级（此前仅 16px 单尺寸）。
+
+- 移除 AI 任务板块（多轮重做后仍然鸡肋，正式下线）：配置页「AI 任务」tab、Agent 页 `/task` 创作模式与「任务模式」徽标、后端 `ai_tasks`/`ai_task_runs`/`ai_task_authoring_evidence` 三张表（migration v18 DROP）、`/api/ai-tasks*` 路由、4 个任务创作工具与 `task_authoring` 能力、task/task_run 会话语义与失败修复授权整体删除。`/config/features` 现直达脚本库；`/scripts` 旧链接照常重定向。1Shell AI 本体（对话、目标、审批、技能、脚本库）不受影响。
+
+- 移除终端工具条中列的主机简况探针（主机名/CPU/内存/负载/硬盘）：多开会话 tab 时探针与 tab 相互挤占遮挡；tabs 现在拿满左侧整行宽度。随之退役 `useTopbarProbe`（8s 轮询 `/api/health/stats` 不再发起），终端模式 composer 的主机徽标改读主机列表。监控页探针不受影响。
+- 移除 AI 行内补全（补全建议条 + ghost 浮层）：补全占位条随打字出现/消失会把终端区上下顶动。前端 `SuggestionBox` / `GhostOverlay` / `useTerminalAi` 与后端 `/api/ai/terminal/complete-inline` 路由、服务、校验器整体退役；选区分析所需的"最近提交命令"上下文保留为轻量输入镜像 `useTerminalCommandHistory`。「AI 命令」面板与选区分析不受影响。
+- 删除主机时级联清理其 Agent 对话：仅绑定该主机的 oneshell 会话连记录一起删除；多主机工作区会话只把该主机剔出绑定（消息原样保留）；协议 agent 会话跑在本机，只解绑不删除。服务端启动时补一次孤儿清扫，历史遗留的「主机已删除」残留分组随之消失；删除确认弹窗明示对话会一并删除。
+
+### Verification
+
+- `npm test`（39 个脚本全绿；新增 `test-ide-session-host-prune` 与 `test-desktop-session-login`，`test-task-authoring-capability` 的通用断言迁入新 `test-ide-approval-policy`；守卫测试固化本次全部删除项）
+- `npm --prefix frontend run build`
+- desktop-session 接口 curl 冒烟（错 token 401 / 对 token 200+cookie / cookie 可访问受保护 API）
+
 ## 4.7.4 - 2026-07-11
 
 4.7.4 打通 Agent 板块附件上传全链路，并新增 1Shell AI 配置文件生成器。

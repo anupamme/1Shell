@@ -28,7 +28,7 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/ConfigView.vue'),
     redirect: '/config/ai',
     children: [
-      { path: 'features',  name: 'config-features',  component: () => import('@/views/FeaturesView.vue') },
+      { path: 'features',  name: 'config-features',  component: () => import('@/views/ScriptsView.vue') },
       { path: 'skills',    name: 'config-skills',    component: () => import('@/views/SkillsView.vue') },
       { path: 'mcp',       name: 'config-mcp',       component: () => import('@/views/McpHubView.vue') },
       { path: 'ai',        name: 'config-ai',        component: () => import('@/views/CliSetupView.vue') },
@@ -47,7 +47,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/probe',     redirect: '/panel/probe' },
   { path: '/audit',     redirect: '/panel/audit' },
   { path: '/features',  redirect: '/config/features' },
-  { path: '/scripts',   redirect: { path: '/config/features', query: { tab: 'programs' } } },
+  { path: '/scripts',   redirect: '/config/features' },
   { path: '/skills',    redirect: '/config/skills' },
   { path: '/mcp-hub',   redirect: '/config/mcp' },
   { path: '/cli-setup', redirect: '/config/ai' },

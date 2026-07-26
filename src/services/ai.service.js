@@ -11,7 +11,6 @@ const {
 const COMPLETION_PROMPTS = Object.freeze({
   chat: '你是智能输入补全引擎。根据前缀预测并补全内容。只返回补全部分，不重复前缀，不加解释，不超过两句话。',
   command: '你是 Linux Shell 专家。根据自然语言描述返回完整可执行命令，只返回命令本身，无解释，无 markdown。危险命令前加 # DANGER: 注释。',
-  terminalInline: '你是终端命令行内联补全引擎。用户正在 shell 中输入命令或参数。只返回当前光标后需要追加的补全文本（不含已有输入），不加解释，不换行，不加 markdown，不返回多条候选。补全应优先考虑常见 CLI 命令名（如 curl、grep、docker 等）或合法参数，而不是普通英文单词。若输入已是完整命令或不适合补全则返回空字符串。',
   generateScript: `你是 Linux 运维脚本专家。用户描述一个运维目标，你生成一个可复用的参数化 Bash 脚本。
 返回纯 JSON（不加 markdown 包裹），格式如下：
 {
@@ -48,7 +47,6 @@ const COMPLETION_PROMPTS = Object.freeze({
 - 只输出纯 JSON，不加任何注释或包裹。`,
 });
 
-const INLINE_COMPLETION_TIMEOUT_MS = 7000;
 const AI_PROVIDER_TIMEOUT_MS = 45000;
 const SKILL_ADAPTATION_PROVIDER_TIMEOUT_MS = 120000;
 
@@ -217,102 +215,6 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     ]);
   }
 
-  async function requestTerminalInlineCompletion(body = {}) {
-    const currentInput = String(body.currentInput || '');
-    const cursorIndex = Number.isInteger(body.cursorIndex) ? body.cursorIndex : currentInput.length;
-    const inputPrefix = currentInput.slice(0, cursorIndex);
-    if (inputPrefix.trim().length < 3) {
-      return {
-        requestId: '',
-        completion: '',
-        confidence: 'low',
-      };
-    }
-
-    const shellType = String(body.shellType || 'bash').trim() || 'bash';
-    const platform = String(body.platform || '').trim();
-    const cwd = String(body.cwd || '').trim();
-    const recentCommands = Array.isArray(body.recentCommands)
-      ? body.recentCommands.filter((item) => typeof item === 'string' && item.trim()).slice(-3).map((item) => item.slice(0, 200))
-      : [];
-    const { base, key, model } = resolveConfig(body);
-
-    const prompt = [
-      `shellType: ${shellType}`,
-      platform ? `platform: ${platform}` : '',
-      cwd ? `cwd: ${cwd}` : '',
-      recentCommands.length ? `recentCommands: ${recentCommands.join(' | ')}` : '',
-      `currentInput: ${inputPrefix}`,
-    ].filter(Boolean).join('\n');
-
-    const request = async () => {
-      const raw = await requestChatCompletionText({
-        base,
-        key,
-        model,
-        messages: [
-          { role: 'system', content: COMPLETION_PROMPTS.terminalInline },
-          { role: 'user', content: prompt },
-        ],
-        maxTokens: 80,
-        temperature: 0.15,
-      });
-      const completion = sanitizeInlineCompletion(raw, inputPrefix);
-      return {
-        requestId: createRequestId(),
-        completion,
-        confidence: completion ? classifyInlineConfidence(completion, inputPrefix) : 'low',
-      };
-    };
-
-    return Promise.race([
-      request(),
-      new Promise((resolve) => {
-        setTimeout(() => resolve({
-          requestId: '',
-          completion: '',
-          confidence: 'low',
-        }), INLINE_COMPLETION_TIMEOUT_MS);
-      }),
-    ]);
-  }
-  function classifyInlineConfidence(completion, inputPrefix) {
-    if (!completion) return 'low';
-
-    const completionText = String(completion);
-    const prefixText = String(inputPrefix || '');
-    if (completionText.length <= 4) return 'high';
-    if (/^[\w./-]+$/u.test(completionText) && prefixText.trim()) return 'high';
-    if (completionText.includes(' --') || completionText.includes(' -')) return 'medium';
-    return 'medium';
-  }
-
-  function sanitizeInlineCompletion(raw, inputPrefix) {
-    if (!raw) return '';
-
-    let text = String(raw)
-      .replace(/\r/g, '')
-      .replace(/^```[\w-]*\s*/u, '')
-      .replace(/\s*```$/u, '')
-      .replace(/^['"“”‘’]+|['"“”‘’]+$/gu, '')
-      .split('\n')[0]
-      .replace(/\s+$/u, '');
-
-    if (!text.trim()) return '';
-    if (text.startsWith(inputPrefix)) {
-      text = text.slice(inputPrefix.length);
-    }
-
-    text = text
-      .replace(/^[:：\-\s]+/u, '')
-      .replace(/[。；;，,]+$/u, '')
-      .replace(/\s{2,}/gu, ' ');
-
-    if (!text.trim() || /[`]/.test(text)) return '';
-    if (/^(补全|建议|command|completion)[:：]/iu.test(text)) return '';
-    return text;
-  }
-
   const VALID_RISK_LEVELS = new Set(['safe', 'caution', 'danger']);
   const VALID_ERROR_TYPES = new Set([
     'permission_denied', 'command_not_found', 'oom', 'network_error', 'syntax_error', 'other',
@@ -404,10 +306,6 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
         }), 10000);
       }),
     ]);
-  }
-
-  function createRequestId() {
-    return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
   async function requestSkillAdaptation(body = {}) {
@@ -507,7 +405,6 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     generateScript,
     requestSkillAdaptation,
     requestCompletion,
-    requestTerminalInlineCompletion,
     analyzeSelection,
   };
 }

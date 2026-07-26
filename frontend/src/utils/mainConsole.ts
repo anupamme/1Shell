@@ -78,23 +78,6 @@ export interface AuthStatus {
   authenticated: boolean;
 }
 
-/* ───── 顶栏探针 ──────────────────────────────────── */
-
-export interface ProbeStats {
-  cpu?: number;       // 百分比 0-100
-  memory?: number;    // 百分比
-  load?: number;      // 1 分钟负载
-  disk?: number;      // 百分比
-}
-
-export interface ProbeUpdatePayload {
-  hostId: string;
-  cpu?: number;
-  memory?: number;
-  load?: number;
-  disk?: number;
-}
-
 /* ───── IP 访问控制 ───────────────────────────────── */
 
 export interface IpFilterRule {

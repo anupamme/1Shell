@@ -500,8 +500,8 @@ function isFocusedItem(item: DirItem): boolean {
               </div>
             </div>
 
-            <!-- 操作排：切换 / 编辑 / 删除 / 新对话 -->
-            <div class="mt-2.5 grid gap-1.5" :class="g.host ? (isLocalHost(g.host) ? 'grid-cols-3' : 'grid-cols-4') : 'grid-cols-1'">
+            <!-- 操作排：切换 / 编辑 / 删除 / 新对话（已删除主机的残留组不提供操作，服务端会清理） -->
+            <div v-if="g.host || g.key === '__global__'" class="mt-2.5 grid gap-1.5" :class="g.host ? (isLocalHost(g.host) ? 'grid-cols-3' : 'grid-cols-4') : 'grid-cols-1'">
               <template v-if="g.host">
                 <button type="button" class="h-7 rounded-md border border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-white/[0.03] text-[11px] font-medium text-slate-500 dark:text-slate-300 hover:border-sky-300 hover:text-sky-600 dark:hover:border-sky-400/40 dark:hover:text-sky-300 transition-colors cursor-pointer" title="连接终端" @click.stop="emit('host-connect', g.host!.id)">切换</button>
                 <button type="button" class="h-7 rounded-md border border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-white/[0.03] text-[11px] font-medium text-slate-500 dark:text-slate-300 hover:border-sky-300 hover:text-sky-600 dark:hover:border-sky-400/40 dark:hover:text-sky-300 transition-colors cursor-pointer" @click.stop="emit('host-edit', g.host!.id)">编辑</button>
@@ -534,7 +534,6 @@ function isFocusedItem(item: DirItem): boolean {
                   @blur="commitRename"
                 />
                 <div v-else class="agent-session-text-guard min-w-0 flex items-center gap-1.5 pr-1 transition-[padding] group-hover:pr-[82px]">
-                  <span v-if="s.entry === 'task'" class="shrink-0 text-amber-500 dark:text-amber-400" title="任务会话"><AppIcon name="save" :size="11" /></span>
                   <span v-if="isProtocolSession(s)" class="shrink-0 text-sky-500 dark:text-sky-400" :title="s.modelLabel || '协议 agent 会话'"><AppIcon name="robot" :size="11" /></span>
                   <span
                     class="min-w-0 flex-1 text-[13px] font-semibold truncate"

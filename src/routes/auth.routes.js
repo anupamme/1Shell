@@ -32,6 +32,22 @@ function createAuthRouter(authService, twoFactorService = null) {
   });
 
   /**
+   * 桌面版本机免登录：Electron 主进程注入的一次性 token 换正式会话。
+   * 仅环回地址可用；未设 ONESHELL_DESKTOP_AUTH_TOKEN（非桌面拉起）时 404。
+   */
+  router.post('/desktop-session', (req, res, next) => {
+    try {
+      const result = authService.desktopLogin(req.body?.token, req);
+      if (result.sessionId) {
+        authService.setAuthCookie(res, result.sessionId, result.csrfToken, req);
+      }
+      res.json({ ok: result.ok, enabled: result.enabled, authenticated: result.authenticated });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
    * 登录第二步：待验证票据 + TOTP 验证码 / 恢复码
    */
   router.post('/login/2fa', (req, res, next) => {

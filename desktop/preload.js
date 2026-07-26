@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('oneshellDesktop', {
   isDesktop: true,
   getSettings: () => ipcRenderer.invoke('desktop:get-settings'),
   updateSettings: (patch) => ipcRenderer.invoke('desktop:update-settings', patch),
+  refreshLocalSession: () => ipcRenderer.invoke('desktop:refresh-local-session'),
   openWindow: () => ipcRenderer.invoke('desktop:open-window'),
   quit: () => ipcRenderer.invoke('desktop:quit'),
   // 自动更新

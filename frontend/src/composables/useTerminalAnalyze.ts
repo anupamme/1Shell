@@ -6,7 +6,7 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue';
 
 import { useApiClient } from '@/composables/useApiClient';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
-import { useTerminalAi } from '@/composables/useTerminalAi';
+import { useTerminalCommandHistory } from '@/composables/useTerminalCommandHistory';
 import { useHostsStore } from '@/stores/hosts';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
 
@@ -79,7 +79,7 @@ export function _resetTerminalAnalyzeSingleton(): void {
 function create(): TerminalAnalyzeApi {
   const { requestJson } = useApiClient();
   const sessionTerminal = useSessionTerminal();
-  const terminalAi = useTerminalAi();
+  const commandHistory = useTerminalCommandHistory();
   const hosts = useHostsStore();
 
   const fabVisible = ref(false);
@@ -235,7 +235,7 @@ function create(): TerminalAnalyzeApi {
     result.value = null;
 
     try {
-      const recentCommands = terminalAi.getRecentCommands();
+      const recentCommands = commandHistory.getRecentCommands();
       const body: Record<string, unknown> = {
         ...getHostPayload(),
         selectedText: text,
@@ -326,6 +326,7 @@ function create(): TerminalAnalyzeApi {
   function initialize(): void {
     if (initialized) return;
     initialized = true;
+    commandHistory.initialize();
 
     sessionTerminal.onLifecycle(({ type }) => {
       if (type === 'socket-connect' || type === 'session-change' || type === 'clear') {

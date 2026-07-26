@@ -61,7 +61,7 @@ const visible = computed(() => !EXCLUDED_ROUTES.has(String(route.name || '')));
 
 const MODULE_MAP: Record<string, ModuleContext> = {
   console: { name: '主控', icon: 'console', hint: '当前在主控页面。可结合主机和终端上下文处理运维目标。' },
-  features: { name: '功能', icon: 'wrench', hint: '当前在功能页面。可管理 AI 任务和纯代码程序。' },
+  features: { name: '程序', icon: 'wrench', hint: '当前在程序页面。可管理纯代码脚本与工具。' },
   skills: { name: '扩展', icon: 'package', hint: '当前在扩展页面。可管理 Skill、远程 MCP 和本地 MCP。' },
   probe: { name: '探针监控', icon: 'radio', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
   audit: { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },
@@ -73,7 +73,7 @@ const MODULE_MAP: Record<string, ModuleContext> = {
   'panel-files': { name: '文件', icon: 'folder', hint: '当前在文件页面。可按 VPS 浏览远程文件。' },
   'panel-probe': { name: '探针监控', icon: 'radio', hint: '当前在探针监控页面。可查看主机探针数据和健康状态。' },
   'panel-audit': { name: '审计日志', icon: 'clipboard', hint: '当前在审计日志页面。可查询操作日志。' },
-  'config-features': { name: '程序配置', icon: 'wrench', hint: '当前在配置 / 程序页面。可管理 AI 任务和纯代码程序。' },
+  'config-features': { name: '程序配置', icon: 'wrench', hint: '当前在配置 / 程序页面。可管理纯代码脚本与工具。' },
   'config-skills': { name: '扩展配置', icon: 'package', hint: '当前在配置 / 扩展页面。可管理 Skill、远程 MCP 和本地 MCP。' },
   'config-mcp': { name: 'MCP 配置', icon: 'plug', hint: '当前在配置 / MCP 页面。可管理 MCP 服务、远程开放与凭证。' },
   'config-ai': { name: 'AI 配置', icon: 'cog', hint: '当前在配置 / AI 页面。可管理 AI 引擎与模型接入。' },

@@ -12,7 +12,6 @@ import AnalyzeContextMenu from '@/components/main/AnalyzeContextMenu.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
-import { useTopbarProbe } from '@/composables/useTopbarProbe';
 import { readStorageState, writeStorageState } from '@/composables/usePageState';
 import { useHostsStore } from '@/stores/hosts';
 import { useIdeChat, type IdeApprovalMode, type IdeTimelineItem, type IdeChatApi, type IdeChatMessage, type IdeThinkingTimelineItem, type IdeToolTimelineItem, type IdeSystemTimelineItem, type IdeRewindPoint, type IdeFileLocation } from '@/composables/useIdeChat';
@@ -245,7 +244,8 @@ const WORKMODE_KEY = '1shell.agent.workmode.v1';
 
 const sessionTerminal = useSessionTerminal();
 const termHostId = sessionTerminal.activeHostId;
-const probe = useTopbarProbe(termHostId);
+// 终端模式 composer 主机徽标（4.7.5 起顶栏探针退役，名字直接取主机列表）
+const termHostName = computed(() => hostsStore.hostMap.get(termHostId.value)?.name || '本机');
 
 const storedWorkMode = readStorageState<{ mode?: WorkMode }>(WORKMODE_KEY, { mode: 'agent' });
 const workMode = ref<WorkMode>(storedWorkMode.mode === 'terminal' ? 'terminal' : 'agent');
@@ -315,7 +315,7 @@ function onHostEdit(hostId: string): void {
 async function onHostDelete(hostId: string): Promise<void> {
   const h = hostsStore.hostMap.get(hostId);
   if (!h) return;
-  const ok = await confirm({ title: '删除主机', message: `确认删除主机"${h.name}"吗？`, okText: '删除' });
+  const ok = await confirm({ title: '删除主机', message: `确认删除主机"${h.name}"吗？绑定在该主机上的对话记录会一并删除。`, okText: '删除' });
   if (!ok) return;
   try {
     await requestJson(`/api/hosts/${encodeURIComponent(hostId)}`, { method: 'DELETE' });
@@ -324,6 +324,7 @@ async function onHostDelete(hostId: string): Promise<void> {
       termHostId.value = LOCAL_HOST_ID;
     }
     await loadHosts();
+    void loadSessions();
     notify.success('主机已删除');
   } catch (err) {
     notify.error((err as Error).message);
@@ -428,11 +429,6 @@ const slashHighlight = ref(0);
 const slashSubView = ref<string | null>(null);
 const slashSubHighlight = ref(0);
 
-// task mode — stored per Agent runtime so multiple host conversations can run
-// at the same time without sharing entry state.
-const taskGoalInput = ref('');
-const taskGoalEl = ref<HTMLTextAreaElement | null>(null);
-
 interface ProtocolSessionSettings {
   approvalMode: 'auto' | 'ask';
   effort: string;
@@ -456,7 +452,6 @@ interface AgentRuntime {
   agentId: Ref<string>;
   cwd: Ref<string>;
   protocolSettings: Ref<ProtocolSessionSettings>;
-  taskMode: Ref<boolean>;
   createdAt: string;
   touchedAt: Ref<string>;
   stopWatchers: Array<() => void>;
@@ -468,7 +463,6 @@ interface CreateAgentRuntimeOptions {
   agentId?: string;
   cwd?: string;
   settings?: Partial<ProtocolSessionSettings> | null;
-  taskMode?: boolean;
   session?: IdeLoadableAgentSession;
 }
 
@@ -507,14 +501,6 @@ function rememberRuntimeSession(runtime: AgentRuntime | null = activeRuntime.val
     storeActiveSessionId(runtime.ide.currentSessionId.value);
   }
 }
-
-const taskMode = computed({
-  get: () => activeRuntime.value?.taskMode.value || false,
-  set: (value: boolean) => {
-    const runtime = activeRuntime.value;
-    if (runtime) runtime.taskMode.value = value;
-  },
-});
 
 const enabledProviders = computed(() => providers.value.filter(p => p.enabled !== false));
 
@@ -686,24 +672,6 @@ function openSlashModel(): void {
   composerInput.value = '';
 }
 
-function openSlashTask(prefill = ''): void {
-  slashSubView.value = 'task';
-  slashHighlight.value = 0;
-  composerInput.value = '';
-  taskGoalInput.value = prefill;
-  void nextTick(() => taskGoalEl.value?.focus());
-}
-
-function consumeTaskAuthoringRoute(): void {
-  if (route.query.taskAuthoring !== '1') return;
-  const initialIntent = typeof route.query.taskIntent === 'string' ? route.query.taskIntent : '';
-  openSlashTask(initialIntent);
-  const nextQuery = { ...route.query };
-  delete nextQuery.taskAuthoring;
-  delete nextQuery.taskIntent;
-  void router.replace({ path: '/agent', query: nextQuery });
-}
-
 function openGoalComposer(prefill = ''): void {
   composerMode.value = 'goal';
   composerInput.value = prefill;
@@ -720,18 +688,6 @@ function closeGoalComposer(): void {
   composerInput.value = '';
 }
 
-function submitTaskGoal(): void {
-  const goal = taskGoalInput.value.trim();
-  if (!goal || isBusy.value) return;
-  taskMode.value = true;
-  slashSubView.value = null;
-  composerInput.value = '';
-  ide.inputText.value = goal;
-  follow = true;
-  ide.sendMessage();
-  taskGoalInput.value = '';
-}
-
 function closeSlashMenu(): void {
   composerInput.value = '';
   slashSubView.value = null;
@@ -739,7 +695,6 @@ function closeSlashMenu(): void {
 
 function selectSlashCmd(cmd: AgentSlashCommand): void {
   if (cmd.cmd === '/model') { openSlashModel(); return; }
-  if (cmd.cmd === '/task') { openSlashTask(); return; }
   if (cmd.cmd === '/goal') { openGoalComposer(); return; }
   if (cmd.cmd === '/host') { composerInput.value = ''; showHostDropdown.value = true; return; }
   if (cmd.cmd === '/mode') { composerInput.value = ''; showModeDropdown.value = true; return; }
@@ -859,7 +814,6 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
   const runtimeAgentId = ref(normalizeAgentId(options.agentId));
   const runtimeCwd = ref(String(options.cwd || '').trim());
   const runtimeProtocolSettings = ref<ProtocolSessionSettings>(normalizeProtocolSettings(options.settings));
-  const runtimeTaskMode = ref(Boolean(options.taskMode));
   const touchedAt = ref(new Date().toISOString());
 
   const ideApi = useIdeChat({
@@ -899,7 +853,7 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
         // 显式声明归属：会话可能刚从协议 agent 切回 1Shell AI，路由层据此
         // 让协议侧交还会话（杀进程 + 翻转记录归属）
         agentId: ONESHELL_AGENT_ID,
-        entry: runtimeTaskMode.value ? 'task' : 'core',
+        entry: 'core',
         approvalMode: approvalMode.value,
         goal: agentGoalObjective(agentGoal.value) || undefined,
         goalStatus: serializeAgentGoal(agentGoal.value)?.status,
@@ -924,7 +878,6 @@ function createAgentRuntime(options: CreateAgentRuntimeOptions = {}): AgentRunti
     agentId: runtimeAgentId,
     cwd: runtimeCwd,
     protocolSettings: runtimeProtocolSettings,
-    taskMode: runtimeTaskMode,
     createdAt: touchedAt.value,
     touchedAt,
     stopWatchers: [],
@@ -1010,7 +963,7 @@ const railSessions = computed<SessionMeta[]>(() => {
     rows.set(id, {
       id,
       title: existing?.title || liveSessionTitle(runtime),
-      entry: runtime.taskMode.value ? 'task' : (existing?.entry || 'core'),
+      entry: existing?.entry || 'core',
       hostId: runtime.hostId.value || existing?.hostId || '',
       workspaceHostIds: normalizeWorkspaceHostIds(runtime.workspaceHostIds.value),
       modelLabel: existing?.modelLabel || (isProtocolAgentId(runtime.agentId.value) ? agentNameFor(runtime.agentId.value) : modelText.value),
@@ -1103,7 +1056,6 @@ async function refreshRuntimeProjection(runtime: AgentRuntime, attempt = 0): Pro
     if (String(runtime.cwd.value || '').trim() === cwdBefore) {
       runtime.cwd.value = String(resp.session.cwd || '').trim();
     }
-    runtime.taskMode.value = resp.session.entry === 'task';
     runtime.ide.loadSession({
       id: resp.session.id,
       timeline: projected,
@@ -1153,7 +1105,6 @@ async function onSelectSession(id: string): Promise<boolean> {
       agentId: resp.session.agentId || '',
       cwd: resp.session.cwd || '',
       settings: resp.session.settings || null,
-      taskMode: resp.session.entry === 'task',
       session: {
         id: resp.session.id,
         timeline: resp.session.timeline || [],
@@ -1184,7 +1135,6 @@ function onNewSession(
     runtime.agentId.value = agentId;
     runtime.cwd.value = cwd;
     runtime.protocolSettings.value = normalizeProtocolSettings(null);
-    runtime.taskMode.value = false;
     selectedHostId.value = normalizedHostId;
     selectedWorkspaceHostIds.value = workspaceIds;
   } else {
@@ -1565,9 +1515,6 @@ watch(() => ide.timeline.value, () => {
   syncRailFromTimeline();
   scrollToBottom();
 }, { deep: true });
-watch(() => [route.query.taskAuthoring, route.query.taskIntent], () => {
-  consumeTaskAuthoringRoute();
-});
 onMounted(() => {
   syncRailLayout();
   window.addEventListener('resize', syncRailLayout);
@@ -1579,7 +1526,6 @@ onMounted(() => {
   void loadProviders();
   void loadProtocolAgents();
   void loadSessions();
-  consumeTaskAuthoringRoute();
 });
 onActivated(() => {
   void loadHosts().then(() => activateQueryHost());
@@ -1942,7 +1888,6 @@ async function clearChat(): Promise<void> {
   if (!ok) return;
   storeActiveSessionId('');
   ide.resetChat();
-  taskMode.value = false;
   fileFocus.value = null;
   lastToolFocusKey = '';
   composerAttachments.value = [];
@@ -2070,10 +2015,6 @@ function onKeydown(e: KeyboardEvent): void {
       if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); slashSubView.value = null; slashHighlight.value = 0; return; }
       return;
     }
-    if (slashSubView.value === 'task') {
-      if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); slashSubView.value = null; slashHighlight.value = 0; return; }
-      return;
-    }
     if (e.key === 'ArrowDown') { e.preventDefault(); slashHighlight.value = Math.min(slashHighlight.value + 1, slashCmds.value.length - 1); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); slashHighlight.value = Math.max(slashHighlight.value - 1, 0); return; }
     if (e.key === 'Enter') { e.preventDefault(); selectSlashCmd(slashCmds.value[slashHighlight.value]); return; }
@@ -2155,7 +2096,6 @@ function onSecretRefSubmit(secretRef: string): void {
         </div>
       </div>
       <div class="ml-auto flex items-center gap-2">
-        <span v-if="taskMode" class="text-[11px] font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-400/10 border border-amber-200 dark:border-amber-400/20 px-2 py-0.5 rounded-full">任务模式</span>
         <span v-if="isBusy" class="text-[11px] text-sky-600 dark:text-sky-400/80 animate-pulse">运行中</span>
         <div v-if="sessionFiles.length" class="relative">
           <button class="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 hover:text-sky-600 dark:hover:text-sky-400 transition-colors cursor-pointer" title="本会话涉及的文件" @click="showFilesDropdown = !showFilesDropdown">
@@ -2354,11 +2294,6 @@ function onSecretRefSubmit(secretRef: string): void {
       <!-- 终端（与时间线同一主区，composer 开关切换；首次进入终端模式才挂载） -->
       <div v-if="terminalStarted" v-show="isTerminalMode" class="flex-1 min-w-0 min-h-0 flex flex-col">
         <TerminalArea
-          :host-name="probe.displayName.value"
-          :cpu="probe.cpuText.value"
-          :memory="probe.memoryText.value"
-          :load="probe.loadText.value"
-          :disk="probe.diskText.value"
           @host-change="onHostConnect"
           @fullscreen-toggle="onTerminalFullscreen"
         />
@@ -2429,44 +2364,6 @@ function onSecretRefSubmit(secretRef: string): void {
             </button>
             <div v-if="!enabledModelOptions.length" class="px-3 py-4 text-xs text-slate-400 dark:text-slate-600 text-center">
               暂无启用的模型接入 · <RouterLink to="/config/ai" class="text-sky-500 hover:underline">前往 AI 配置</RouterLink>
-            </div>
-          </template>
-
-          <!-- ── task sub-view ── -->
-          <template v-if="slashSubView === 'task'">
-            <button class="w-full text-left px-3 py-2 flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500 hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-colors cursor-pointer border-b border-slate-100 dark:border-white/[0.04]" @click="slashSubView = null; slashHighlight = 0">
-              <AppIcon name="arrow-right" :size="12" class="rotate-180" />
-              返回命令列表
-            </button>
-            <div class="px-3 py-3">
-              <div class="flex items-center gap-2 mb-2">
-                <span class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 bg-amber-100 dark:bg-amber-500/15 text-amber-600 dark:text-amber-400">
-                  <AppIcon name="save" :size="14" />
-                </span>
-                <div class="min-w-0">
-                  <div class="text-xs font-semibold text-slate-700 dark:text-slate-200">任务模式</div>
-                  <div class="text-[11px] text-slate-400 dark:text-slate-600">描述目标，AI 只读探索后推演需要哪些输入，并打包成可复用任务</div>
-                </div>
-              </div>
-              <textarea
-                ref="taskGoalEl"
-                v-model="taskGoalInput"
-                class="w-full min-h-[64px] max-h-[160px] px-3 py-2 text-sm text-slate-700 dark:text-slate-200 bg-stone-50 dark:bg-[#0b0f19] border border-slate-200 dark:border-white/[0.08] rounded-lg resize-none focus:outline-none focus:border-amber-400/40 placeholder:text-slate-400 dark:placeholder:text-slate-600 transition-colors"
-                placeholder="例如：在指定主机上部署一个 GitHub 项目并配置 Nginx 反代…"
-                rows="2"
-                @keydown.enter.exact.prevent="submitTaskGoal"
-                @keydown.esc.prevent="slashSubView = null"
-              ></textarea>
-              <div class="flex items-center justify-between mt-2">
-                <span class="text-[10px] text-slate-400 dark:text-slate-600">Enter 开始 · Shift+Enter 换行</span>
-                <button
-                  type="button"
-                  class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors"
-                  :class="taskGoalInput.trim() && !isBusy ? 'bg-amber-500 text-white hover:bg-amber-400 cursor-pointer' : 'bg-slate-100 dark:bg-white/[0.04] text-slate-400 dark:text-slate-600 cursor-not-allowed'"
-                  :disabled="!taskGoalInput.trim() || isBusy"
-                  @click="submitTaskGoal"
-                >开始创作任务</button>
-              </div>
             </div>
           </template>
 
@@ -2778,7 +2675,7 @@ function onSecretRefSubmit(secretRef: string): void {
               </button>
               <span class="h-8 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.03] text-xs font-medium text-slate-600 dark:text-slate-300 flex items-center gap-1.5 min-w-0">
                 <AppIcon name="server" :size="13" class="text-sky-500 shrink-0" />
-                <span class="truncate max-w-[160px]">{{ probe.displayName.value }}</span>
+                <span class="truncate max-w-[160px]">{{ termHostName }}</span>
               </span>
               <div class="ml-auto"></div>
             </template>

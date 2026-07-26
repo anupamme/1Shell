@@ -564,6 +564,19 @@ const migrations = [
       }
     },
   },
+  {
+    version: 18,
+    name: 'drop ai tasks: feature retired in 4.7.5',
+    up(db) {
+      // AI 任务板块（v10/v11 建表）整体退役：/task 创作、功能页执行入口、
+      // task_run 语义全部删除，历史表随之清掉。
+      db.exec(`
+        DROP TABLE IF EXISTS ai_task_authoring_evidence;
+        DROP TABLE IF EXISTS ai_task_runs;
+        DROP TABLE IF EXISTS ai_tasks;
+      `);
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

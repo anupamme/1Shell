@@ -33,6 +33,18 @@ function detectCapsLock(e: KeyboardEvent): void {
 }
 
 onMounted(async () => {
+  // 桌面版免登录自愈：窗口挂后台超过会话 TTL 再唤起会话过期撞到这里，
+  // 先让 Electron 主进程凭本机 token 静默重签，成功则不打扰用户。
+  const bridge = window.oneshellDesktop;
+  if (bridge?.isDesktop && bridge.refreshLocalSession) {
+    try {
+      if (await bridge.refreshLocalSession()) {
+        await finishLogin();
+        if (auth.authenticated) return;
+      }
+    } catch { /* 静默失败回落到正常登录 */ }
+  }
+
   try {
     const last = localStorage.getItem(LAST_USER_KEY);
     if (last) username.value = last;
@@ -61,7 +73,8 @@ async function finishLogin(): Promise<void> {
 
   if (auth.authenticated) {
     try {
-      localStorage.setItem(LAST_USER_KEY, username.value);
+      // 桌面免登录路径 username 为空，不覆盖用户记住的最近用户名
+      if (username.value) localStorage.setItem(LAST_USER_KEY, username.value);
     } catch {
       /* noop */
     }

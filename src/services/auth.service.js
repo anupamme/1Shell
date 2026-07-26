@@ -286,6 +286,40 @@ function createAuthService({ twoFactorService = null } = {}) {
     if (sessionId) authSessions.delete(sessionId);
   }
 
+  function isLoopbackAddress(ip) {
+    return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  }
+
+  // 桌面版本机免登录：Electron 主进程每次启动生成一次性 token 传给它拉起的
+  // 后端，桌面窗口凭 token 换正式会话。只认环回直连 socket 地址（不读任何
+  // 代理头），token 等长比较；2FA 视为本机持有已解锁会话，不再二次询问。
+  function desktopLogin(providedToken, req) {
+    const expected = String(process.env.ONESHELL_DESKTOP_AUTH_TOKEN || '').trim();
+    if (!expected) {
+      const error = new Error('桌面免登录未启用');
+      error.status = 404;
+      throw error;
+    }
+    const remoteIp = req?.socket?.remoteAddress || '';
+    if (!isLoopbackAddress(remoteIp)) {
+      const error = new Error('桌面免登录仅限本机使用');
+      error.status = 403;
+      throw error;
+    }
+    const providedBuf = Buffer.from(String(providedToken || ''));
+    const expectedBuf = Buffer.from(expected);
+    if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+      const error = new Error('桌面免登录凭据无效');
+      error.status = 401;
+      throw error;
+    }
+    if (!getAuthUsername() && !getAuthPassword()) {
+      return { ok: true, enabled: false, authenticated: true, sessionId: '', csrfToken: '' };
+    }
+    const { sessionId, csrfToken } = createAuthSession();
+    return { ok: true, enabled: true, authenticated: true, sessionId, csrfToken };
+  }
+
   function authenticateSocket(socket, next) {
     if (!getAuthUsername() && !getAuthPassword()) return next();
 
@@ -314,6 +348,7 @@ function createAuthService({ twoFactorService = null } = {}) {
     authenticateSocket,
     clearAuthCookie,
     clearExpiredAuthSessions,
+    desktopLogin,
     getClientIp,
     isAuthEnabled,
     isRequestAuthenticated,

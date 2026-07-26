@@ -15,7 +15,7 @@ function commandHasTruncationMarker(command) {
   return text.includes('\u2026') || /\[truncated(?:\s+\d+\s+chars)?\]/i.test(text);
 }
 
-function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, aiTaskService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, nativeCliConfig, harness, agentRuntime, skillRegistry, secretService }) {
+function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry, localMcpService, localMcpDeployer, scriptService, fileService, probeService, probeAgentService, probeAggregatorService, probeTrafficService, probeAlertService, probeDiagService, probeAgentInstallerService, dataDir, nativeCliConfig, harness, agentRuntime, skillRegistry, secretService }) {
   const coreTools = createOneShellCoreTools({
     bridgeService,
     hostService,
@@ -254,100 +254,6 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       },
     },
   ];
-
-  const TASK_AUTHORING_TOOL_SCHEMAS = [
-    {
-      name: 'preview_ai_task',
-      description:
-        '预览并规范化一个 AI 任务模板，但不保存。' +
-        '\n任务模板只能表达输入项和流程步骤，不是 DSL、调度器、权限系统或执行运行时。',
-      input_schema: taskPayloadSchema(),
-    },
-    {
-      name: 'create_ai_task',
-      description:
-        '创建一个新的 1Shell AI 任务模板。' +
-        '\n只保存 name / description / inputs / steps；真正执行仍由纯 1Shell AI 和现有工具链完成。',
-      input_schema: taskPayloadSchema(),
-    },
-    {
-      name: 'update_ai_task',
-      description:
-        '更新一个已有 1Shell AI 任务模板。' +
-        '\n仅在用户明确要修改已有任务，或刚创建后需要修正时使用。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: '要更新的 AI 任务 ID' },
-          ...taskPayloadSchema().properties,
-        },
-        required: ['id'],
-      },
-    },
-    {
-      name: 'get_ai_task',
-      description: '读取一个已有 1Shell AI 任务模板，用于继续编辑或确认保存结果。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: 'AI 任务 ID' },
-        },
-        required: ['id'],
-      },
-    },
-  ];
-
-  function taskPayloadSchema() {
-    return {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: '任务名称' },
-        description: { type: 'string', description: '任务说明，可为空' },
-        inputs: {
-          type: 'array',
-          description: '用户执行任务前需要填写的输入项。保持简单，不要设计 DSL。',
-          items: {
-            type: 'object',
-            properties: {
-              key: { type: 'string', description: '稳定字段名，如 host / service_name / api_token' },
-              label: { type: 'string', description: '展示给用户看的名称' },
-              type: { type: 'string', description: 'text / textarea / number / boolean / select / secret / host，也允许未来自定义类型' },
-              required: { type: 'boolean', description: '是否必填' },
-              default: { type: 'string', description: '默认值，可选' },
-              placeholder: { type: 'string', description: '输入提示，可选' },
-              help: { type: 'string', description: '补充说明，可选' },
-              options: {
-                type: 'array',
-                description: 'type=select 时的选项',
-                items: {
-                  type: 'object',
-                  properties: {
-                    value: { type: 'string' },
-                    label: { type: 'string' },
-                  },
-                  required: ['value'],
-                },
-              },
-            },
-            required: ['key', 'label', 'type'],
-          },
-        },
-        steps: {
-          type: 'array',
-          description: '流程步骤卡片。每一步是给 1Shell AI 的自然语言执行说明。',
-          items: {
-            type: 'object',
-            properties: {
-              title: { type: 'string', description: '步骤标题' },
-              instruction: { type: 'string', description: '步骤说明' },
-            },
-            required: ['title', 'instruction'],
-          },
-        },
-      },
-      required: ['name', 'inputs', 'steps'],
-    };
-  }
 
   function buildToolSchemas() {
     const seen = new Set();
@@ -709,11 +615,6 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     return verificationToolResult({ type: type || 'unknown', ok: false, status: 'unsupported', taskStatus: 'unverified', reason: input.reason, reasons: ['unsupported_verifier_type'], evidence: `unsupported type: ${input.type || ''}` });
   }
 
-  function emitTaskSaved(socket, payload = {}) {
-    if (!socket?.emit) return;
-    emitIdeEvent(socket, 'ide:task-saved', payload);
-  }
-
   async function handle(name, input, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta }) {
     if (CORE_DELEGATED_TOOL_NAMES.has(name)) {
       return coreTools.handle(name, input || {}, { socket, sessionId, runId, safeMode, session, signal, requestApproval, allowApproval, approvalGranted, preApproved, approvalMode, onToolDelta, source: 'ide' });
@@ -733,87 +634,6 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
           Array.isArray(skill.tags) && skill.tags.length ? `Tags: ${skill.tags.join(', ')}` : '',
         ].filter(Boolean).join('\n');
         return ok(`${header}\n\n${body}`.trim() || `技能 ${skillId} 没有正文内容。`);
-      }
-
-      case 'preview_ai_task': {
-        const blocked = requireTaskAuthoringSession(session, name, input);
-        if (blocked) return blocked;
-        if (!aiTaskService?.previewTask) return err('AI 任务服务未初始化');
-        try {
-          const task = aiTaskService.previewTask(input || {});
-          return ok(formatJson({
-            ok: true,
-            status: 'draft',
-            task,
-            message: 'Preview only. Call create_ai_task to save.',
-          }));
-        } catch (e) {
-          return err(e.message);
-        }
-      }
-
-      case 'create_ai_task': {
-        const blocked = requireTaskAuthoringSession(session, name, input);
-        if (blocked) return blocked;
-        if (!aiTaskService?.createTask) return err('AI 任务服务未初始化');
-        try {
-          const createdTask = aiTaskService.createTask(input || {});
-          emitTaskSaved(socket, {
-            sessionId,
-            runId,
-            action: 'created',
-            taskId: createdTask.id,
-            task: createdTask,
-          });
-          return ok(formatJson({
-            ok: true,
-            task: createdTask,
-            message: 'AI 任务已保存。可在 功能 / AI 任务 中继续编辑或执行；执行失败时也可让 AI 直接修改该任务。',
-          }));
-        } catch (e) {
-          return err(e.message);
-        }
-      }
-
-      case 'update_ai_task': {
-        const blocked = requireTaskAuthoringSession(session, name, input);
-        if (blocked) return blocked;
-        if (!aiTaskService?.updateTask) return err('AI 任务服务未初始化');
-        const id = String(input?.id || '').trim();
-        if (!id) return err('id 为必填');
-        try {
-          const existing = aiTaskService.getTask?.(id);
-          if (!existing) return err(`AI 任务不存在: ${id}`);
-          const payload = {
-            name: input?.name ?? existing.name,
-            description: input?.description ?? existing.description,
-            inputs: input?.inputs ?? existing.inputs,
-            steps: input?.steps ?? existing.steps,
-          };
-          const task = aiTaskService.updateTask(id, payload);
-          if (!task) return err(`AI 任务不存在: ${id}`);
-          emitTaskSaved(socket, {
-            sessionId,
-            runId,
-            action: 'updated',
-            taskId: task.id,
-            task,
-          });
-          return ok(formatJson({ ok: true, task, message: 'AI 任务已更新。' }));
-        } catch (e) {
-          return err(e.message);
-        }
-      }
-
-      case 'get_ai_task': {
-        const blocked = requireTaskAuthoringSession(session, name, input);
-        if (blocked) return blocked;
-        if (!aiTaskService?.getTask) return err('AI 任务服务未初始化');
-        const id = String(input?.id || '').trim();
-        if (!id) return err('id 为必填');
-        const task = aiTaskService.getTask(id);
-        if (!task) return err(`AI 任务不存在: ${id}`);
-        return ok(formatJson({ ok: true, task }));
       }
 
       case 'execute_command': {
@@ -1136,27 +956,6 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     return result;
   }
 
-  function requireTaskAuthoringSession(session, toolName = '', input = {}) {
-    if (String(session?.entry || '') === 'task') return null;
-    const repair = session?.taskRepair && typeof session.taskRepair === 'object' ? session.taskRepair : {};
-    const repairAuthorized = String(session?.entry || '') === 'task_run' && repair.authorized === true;
-    if (repairAuthorized) {
-      const name = String(toolName || '').trim();
-      if (name === 'create_ai_task') return err('任务执行修复模式只能修订当前任务，不能创建新任务');
-      if (!['preview_ai_task', 'update_ai_task', 'get_ai_task'].includes(name)) {
-        return err('任务执行修复模式只允许预览、读取或更新当前任务');
-      }
-      const expectedTaskId = String(repair.taskId || '').trim();
-      if (!expectedTaskId) return err('任务执行修复模式缺少当前任务 ID，已拒绝修改任务');
-      const requestedTaskId = String(input?.id || input?.taskId || '').trim();
-      if ((name === 'update_ai_task' || name === 'get_ai_task') && expectedTaskId && requestedTaskId && requestedTaskId !== expectedTaskId) {
-        return err(`任务执行修复模式只能修改当前任务：${expectedTaskId}`);
-      }
-      return null;
-    }
-    return err('AI 任务创作工具只能在 IDE 的 /task 模式中使用');
-  }
-
   function formatJson(value) {
     return JSON.stringify(value, null, 2);
   }
@@ -1232,7 +1031,7 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     }});
   }
 
-  return { TOOL_SCHEMAS: buildToolSchemas(), TASK_AUTHORING_TOOL_SCHEMAS, CLAUDE_CODE_TOOL, handle, approveCommand };
+  return { TOOL_SCHEMAS: buildToolSchemas(), CLAUDE_CODE_TOOL, handle, approveCommand };
 }
 
 module.exports = { createIdeTools };

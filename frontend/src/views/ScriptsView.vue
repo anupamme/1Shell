@@ -21,10 +21,6 @@ import {
   type ScriptsListResponse,
 } from '@/utils/scripts';
 
-const props = withDefaults(defineProps<{ embedded?: boolean }>(), {
-  embedded: false,
-});
-
 const { requestJson } = useApiClient();
 const notify = useNotifyStore();
 const { confirm } = useConfirm();
@@ -286,7 +282,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div :class="props.embedded ? 'flex-1 min-h-0 flex flex-col gap-2' : 'h-screen flex flex-col p-2 gap-2'">
+  <div class="flex flex-col flex-1 min-w-0 h-full p-2 gap-2">
     <header class="shrink-0 h-14 flex items-center px-5 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
       <div class="flex items-center gap-3 shrink-0">
         <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">

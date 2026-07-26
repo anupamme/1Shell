@@ -7,6 +7,7 @@ interface OneShellDesktopSettings {
   url: string;
   startAtLogin: boolean;
   backgroundOnClose: boolean;
+  skipLocalLogin: boolean;
   serviceRunning: boolean;
   serviceManaged: boolean;
   dataDir: string;
@@ -28,7 +29,8 @@ interface OneShellUpdateState {
 interface OneShellDesktopBridge {
   isDesktop: boolean;
   getSettings(): Promise<OneShellDesktopSettings>;
-  updateSettings(patch: Partial<Pick<OneShellDesktopSettings, 'startAtLogin' | 'backgroundOnClose'>>): Promise<OneShellDesktopSettings>;
+  refreshLocalSession?(): Promise<boolean>;
+  updateSettings(patch: Partial<Pick<OneShellDesktopSettings, 'startAtLogin' | 'backgroundOnClose' | 'skipLocalLogin'>>): Promise<OneShellDesktopSettings>;
   openWindow(): Promise<OneShellDesktopSettings>;
   quit(): Promise<void>;
   getUpdateState(): Promise<OneShellUpdateState>;

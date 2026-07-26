@@ -89,41 +89,6 @@ function validateCompletionRequestBody(payload) {
   return next;
 }
 
-function validateTerminalInlineCompletionBody(payload) {
-  const body = ensureObject(payload, '终端补全请求体必须是对象');
-  const hostId = ensureNonEmptyString(body.hostId, 'hostId 不能为空');
-  const shellType = ensureOptionalString(body.shellType, 'shellType 必须是字符串');
-  const platform = ensureOptionalString(body.platform, 'platform 必须是字符串');
-  const arch = ensureOptionalString(body.arch, 'arch 必须是字符串');
-  const cwd = ensureOptionalString(body.cwd, 'cwd 必须是字符串');
-  const currentInput = ensureOptionalString(body.currentInput, 'currentInput 必须是字符串');
-
-  const cursorIndex = Number(body.cursorIndex);
-  if (!Number.isInteger(cursorIndex) || cursorIndex < 0 || cursorIndex > currentInput.length) {
-    throw createValidationError('cursorIndex 不合法');
-  }
-
-  let recentCommands = undefined;
-  if (hasOwn(body, 'recentCommands')) {
-    const commands = ensureArray(body.recentCommands, 'recentCommands 必须是数组');
-    commands.forEach((item, index) => {
-      ensureOptionalString(item, `recentCommands[${index}] 必须是字符串`);
-    });
-    recentCommands = commands;
-  }
-
-  return {
-    hostId,
-    shellType,
-    platform,
-    arch,
-    cwd,
-    currentInput,
-    cursorIndex,
-    ...(recentCommands ? { recentCommands } : {}),
-  };
-}
-
 function validateManualLocation(value) {
   if (value == null) return null;
   const obj = ensureObject(value, 'manualLocation 必须是对象');
@@ -513,6 +478,5 @@ module.exports = {
   validateSkillContinuePayload,
   validateSkillRunPayload,
   validateSkillStopPayload,
-  validateTerminalInlineCompletionBody,
   validateAnalyzeSelectionBody,
 };

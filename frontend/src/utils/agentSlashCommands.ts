@@ -3,7 +3,6 @@ import type { IdeApprovalMode } from '@/composables/useIdeChat';
 export type AgentSlashSurface = 'agent' | 'ide' | 'console' | 'fab';
 export type AgentSlashCommandId =
   | '/model'
-  | '/task'
   | '/goal'
   | '/host'
   | '/mode'
@@ -21,7 +20,6 @@ export interface AgentSlashCommand {
 
 export const AGENT_SLASH_COMMANDS: AgentSlashCommand[] = [
   { cmd: '/model', label: '选择模型', desc: '切换或记录本次 1Shell AI 的模型偏好', icon: 'spark', surfaces: ['agent', 'ide', 'console', 'fab'] },
-  { cmd: '/task', label: '任务模式', desc: '只读探索目标并打包成可复用 AI 任务', icon: 'save', surfaces: ['agent', 'ide', 'console'] },
   { cmd: '/goal', label: '设置目标', desc: '设定本轮 1Shell AI 的长期工作目标', icon: 'target', surfaces: ['agent', 'ide', 'console'] },
   { cmd: '/host', label: '选择主机', desc: '限定 Agent 目标主机范围', icon: 'server', surfaces: ['agent'] },
   { cmd: '/mode', label: '审批模式', desc: '查看或切换人工审批、委托审批、完全权限', icon: 'shield', surfaces: ['agent', 'ide', 'console', 'fab'] },
@@ -49,12 +47,6 @@ export function parseAgentModelCommand(value: string): { arg: string } | null {
   const match = String(value || '').trim().match(/^\/model(?:\s+([\s\S]*))?$/i);
   if (!match) return null;
   return { arg: String(match[1] || '').trim() };
-}
-
-export function parseAgentTaskCommand(value: string): string | null {
-  const match = String(value || '').trim().match(/^\/task(?:\s+([\s\S]*))?$/i);
-  if (!match) return null;
-  return String(match[1] || '').trim();
 }
 
 export function parseAgentClearCommand(value: string): boolean {

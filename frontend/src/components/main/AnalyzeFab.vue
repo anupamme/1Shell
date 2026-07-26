@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // AnalyzeFab.vue — MainConsole 刀 3 阶段 1 · 选区分析悬浮按钮
 // 1:1 复刻 [public/index.html](public/index.html) row 424 #analyze-fab
-// 放在 terminal-main 内,absolute 与 GhostOverlay 同级
+// 放在 terminal-main 内 absolute 定位
 import { useTerminalAnalyze } from '@/composables/useTerminalAnalyze';
 
 const analyze = useTerminalAnalyze();

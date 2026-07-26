@@ -1,7 +1,8 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, session, shell } = require('electron');
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
@@ -20,7 +21,12 @@ const DEFAULT_PORT = 3301;
 const DEFAULT_SETTINGS = {
   startAtLogin: false,
   backgroundOnClose: true,
+  skipLocalLogin: true,
 };
+
+// 本机免登录：每次启动生成一次性 token，仅注入给桌面拉起的后端进程；
+// 窗口加载前由主进程凭它换正式会话 cookie，渲染进程全程接触不到 token。
+const desktopAuthToken = crypto.randomBytes(32).toString('hex');
 
 let mainWindow = null;
 let tray = null;
@@ -81,6 +87,7 @@ function readSettings() {
       ...DEFAULT_SETTINGS,
       startAtLogin: Boolean(parsed.startAtLogin),
       backgroundOnClose: parsed.backgroundOnClose !== false,
+      skipLocalLogin: parsed.skipLocalLogin !== false,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -380,6 +387,7 @@ function spawnServer() {
   env.ONESHELL_DESKTOP = '1';
   env.ONESHELL_DATA_DIR = getDesktopDataDir();
   env.ONESHELL_ENV_FILE = getDesktopEnvFile();
+  env.ONESHELL_DESKTOP_AUTH_TOKEN = desktopAuthToken;
   env.PORT = String(resolvePort());
   delete env.ELECTRON_RUN_AS_NODE;
 
@@ -430,10 +438,52 @@ async function ensureServer() {
   }
 }
 
+// 本机免登录：主进程凭一次性 token 换会话 cookie，种进 Electron session 后
+// 渲染进程的 fetch / socket.io 都自动带上。外部服务器（非桌面拉起）没有这个
+// token，接口返回 404/401，静默跳过走正常登录页。
+async function establishDesktopSession() {
+  if (!settings.skipLocalLogin || usingExternalServer) return;
+  const body = JSON.stringify({ token: desktopAuthToken });
+  const response = await new Promise((resolve, reject) => {
+    const req = http.request(appUrl('/api/auth/desktop-session'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res));
+    });
+    req.setTimeout(4000, () => { req.destroy(new Error('desktop-session timeout')); });
+    req.on('error', reject);
+    req.end(body);
+  });
+  if (response.statusCode < 200 || response.statusCode >= 300) return;
+
+  const setCookies = response.headers['set-cookie'] || [];
+  for (const raw of setCookies) {
+    const [pair] = String(raw).split(';');
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = decodeURIComponent(pair.slice(eq + 1).trim());
+    if (!name || !value) continue;
+    await session.defaultSession.cookies.set({
+      url: appUrl('/'),
+      name,
+      value,
+      path: '/',
+      httpOnly: /httponly/i.test(raw),
+      sameSite: 'lax',
+    }).catch(() => {});
+  }
+}
+
 async function openMainWindow({ show = true } = {}) {
   const win = createMainWindow({ show });
   try {
     await ensureServer();
+    await establishDesktopSession().catch((error) => {
+      appendBackendLog(`[desktop] desktop-session failed: ${error.message}\n`);
+    });
     await win.loadURL(appUrl('/app/'));
     if (show) showMainWindow();
   } catch (error) {
@@ -450,6 +500,7 @@ function getSettingsPayload() {
     url: appUrl('/app/'),
     startAtLogin: readStartAtLoginState(),
     backgroundOnClose: settings.backgroundOnClose,
+    skipLocalLogin: settings.skipLocalLogin,
     serviceRunning: usingExternalServer || Boolean(serverProcess),
     serviceManaged: !usingExternalServer,
     dataDir: getDesktopDataDir(),
@@ -468,6 +519,9 @@ async function updateDesktopSettings(patch) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'backgroundOnClose')) {
     settings.backgroundOnClose = Boolean(patch.backgroundOnClose);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'skipLocalLogin')) {
+    settings.skipLocalLogin = Boolean(patch.skipLocalLogin);
   }
   saveSettings();
   updateTrayMenu();
@@ -591,6 +645,17 @@ function quitAndInstall() {
 
 ipcMain.handle('desktop:get-settings', () => getSettingsPayload());
 ipcMain.handle('desktop:update-settings', (_event, patch) => updateDesktopSettings(patch));
+// 会话过期自愈：桌面窗口挂后台超过会话 TTL 再唤起时会撞到登录页，
+// 登录页检测到桌面模式后调这里重签本机会话，成功即可直接进入。
+ipcMain.handle('desktop:refresh-local-session', async () => {
+  if (!settings.skipLocalLogin) return false;
+  try {
+    await establishDesktopSession();
+    return true;
+  } catch {
+    return false;
+  }
+});
 ipcMain.handle('desktop:open-window', () => {
   showMainWindow();
   return getSettingsPayload();
@@ -621,6 +686,11 @@ app.on('activate', () => {
 app.whenReady().then(() => {
   if (process.platform === 'win32') {
     app.setAppUserModelId('com.oneshell.app');
+  }
+  // Windows/Linux 去掉 File/Edit/View 默认菜单栏（网页壳用不上）；
+  // macOS 保留系统菜单——Cmd+C/V 等编辑快捷键依赖应用菜单。
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null);
   }
   settings = readSettings();
   applyStartAtLogin(settings.startAtLogin);

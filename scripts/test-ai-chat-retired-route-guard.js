@@ -30,7 +30,7 @@ assert(!exists('src/agents/agent-pty.service.js'), 'agent-pty service must stay 
 assert(!exists('src/sockets/registerAgentSocketHandlers.js'), 'agent:* socket handlers must stay deleted');
 // 4.7.2 合并后的孤儿清理：老终端页/老 AI 面板的遗留部件一并退役
 assert(!exists('frontend/src/components/main/TopBar.vue'), 'TopBar must stay deleted (AgentView header supersedes it)');
-assert(!exists('frontend/src/components/main/ProbeWidget.vue'), 'ProbeWidget must stay deleted (AgentView renders probe via useTopbarProbe)');
+assert(!exists('frontend/src/components/main/ProbeWidget.vue'), 'ProbeWidget must stay deleted (probe strip retired)');
 assert(!exists('frontend/src/components/ToolProgressBar.vue'), 'ToolProgressBar must stay deleted (old AI panel tool card)');
 assert(!exists('frontend/src/composables/useTerminal.ts'), 'old useTerminal must stay deleted (useSessionTerminal supersedes it)');
 assert(!exists('frontend/src/composables/useAiAgentStream.ts'), 'old useAiAgentStream must stay deleted (useIdeChat supersedes it)');
@@ -47,5 +47,42 @@ assert(!terminalArea.includes('activeScopeKey'), 'terminal toolbar must not rend
 assert(!terminalArea.includes('scopeOptions'), 'terminal toolbar must not render old AI Chat scope options');
 assert(!agentView.includes('AiChatPanel'), 'AgentView must not mount old AI Chat');
 assert(agentView.includes('TerminalArea'), 'terminal split must stay mounted in AgentView');
+
+// 4.7.5 AI 任务板块整体退役（用户判定鸡肋）：/task 创作模式、功能页任务
+// tab、task_run 执行链、后端存储/路由/工具全部删除，脚本库回归 /config/features
+assert(!exists('frontend/src/views/FeaturesView.vue'), 'FeaturesView must stay deleted (AI tasks retired in 4.7.5)');
+assert(!exists('frontend/src/utils/aiTasks.ts'), 'aiTasks utils must stay deleted');
+assert(!exists('src/repositories/ai-task.repository.js'), 'ai-task repository must stay deleted');
+assert(!exists('src/services/ai-task.service.js'), 'ai-task service must stay deleted');
+assert(!exists('src/routes/ai-task.routes.js'), 'ai-task routes must stay deleted');
+{
+  const ideTools = read('src/ide/ide.tools.js');
+  const ideService = read('src/ide/ide.service.js');
+  const agentKernel = read('src/ide/ide.agent-kernel.js');
+  const capabilities = read('src/harness/capabilities.js');
+  const slashCommands = read('frontend/src/utils/agentSlashCommands.ts');
+  assert(!ideTools.includes('create_ai_task'), 'task authoring tools must stay removed from ide.tools');
+  assert(!ideService.includes('TASK_AUTHORING_SYSTEM_PROMPT'), 'task authoring prompt must stay removed');
+  assert(!ideService.includes('taskRepair'), 'task repair authorization must stay removed');
+  assert(!agentKernel.includes('task_authoring'), 'task_authoring capability must stay out of IDE policies');
+  assert(!capabilities.includes('task_authoring'), 'task_authoring capability must stay removed from harness');
+  assert(!slashCommands.includes("'/task'"), '/task slash command must stay removed');
+  assert(!agentView.includes('taskMode'), 'AgentView must not track task mode');
+}
+
+// 4.7.5 顶栏探针条 + AI 行内补全退役：多开 tab 时探针会挤占工具条，
+// 补全占位条显隐会把终端区上下顶动，二者整体删除
+assert(!exists('frontend/src/composables/useTopbarProbe.ts'), 'useTopbarProbe must stay deleted (probe strip retired in 4.7.5)');
+assert(!exists('frontend/src/components/main/SuggestionBox.vue'), 'SuggestionBox must stay deleted (inline AI completion retired in 4.7.5)');
+assert(!exists('frontend/src/components/main/GhostOverlay.vue'), 'GhostOverlay must stay deleted (inline AI completion retired in 4.7.5)');
+assert(!exists('frontend/src/composables/useTerminalAi.ts'), 'useTerminalAi must stay deleted (superseded by useTerminalCommandHistory)');
+assert(exists('frontend/src/composables/useTerminalCommandHistory.ts'), 'useTerminalCommandHistory must exist (analyze-selection recent commands)');
+assert(!terminalArea.includes('terminal-probe-strip'), 'terminal toolbar must not render probe strip');
+assert(!terminalArea.includes('SuggestionBox'), 'terminal area must not mount SuggestionBox');
+assert(!terminalArea.includes('GhostOverlay'), 'terminal area must not mount GhostOverlay');
+assert(!agentView.includes('useTopbarProbe'), 'AgentView must not poll topbar probe');
+assert(!aiRoutes.includes('complete-inline'), 'terminal inline completion route must stay removed');
+assert(!aiService.includes('requestTerminalInlineCompletion'), 'inline completion service must stay removed');
+assert(!validators.includes('validateTerminalInlineCompletionBody'), 'inline completion validator must stay removed');
 
 console.log('ai-chat retired route guard ok');
