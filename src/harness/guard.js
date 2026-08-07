@@ -28,6 +28,7 @@ const WRITE_TOOLS_NEEDING_APPROVAL = new Set([
   'upload_file', 'download_file', 'deploy_local_mcp',
   'add_mcp_server', 'remove_mcp_server', 'install_probe_agent',
   'restart_probe_agent', 'uninstall_probe_agent', 'run_script',
+  'save_script',
 ]);
 
 function summarize(toolName, input) {
@@ -107,6 +108,28 @@ function summarize(toolName, input) {
       actionKind: 'script',
       actionText: `run_script ${input.scriptId || input.name || ''}`,
       hostId: input.hostId || 'local',
+    };
+  }
+  if (toolName === 'save_script') {
+    // 审批这张卡的人要判断的是"这段以后会在主机上跑的正文该不该入库"，
+    // 所以直接贴正文；不贴的话会落到下面的 JSON fallback，转义后不可读。
+    // 不返回 hostId：这是与主机无关的库内写操作。
+    const isUpdate = Boolean(String(input.id || '').trim());
+    const content = String(input.content || '');
+    return {
+      title: isUpdate ? '覆盖脚本' : '新建脚本',
+      detail: [
+        `脚本: ${input.name || ''}`,
+        isUpdate ? `覆盖 ID: ${input.id}` : '（新建）',
+        `正文长度: ${content.length}`,
+      ].join('\n'),
+      actionKind: 'script',
+      actionText: [
+        `save_script ${isUpdate ? `id=${input.id}` : '(new)'} name=${input.name || ''}`,
+        '',
+        content.slice(0, 800),
+        content.length > 800 ? `…[truncated ${content.length - 800} chars]` : '',
+      ].filter(Boolean).join('\n'),
     };
   }
   return {

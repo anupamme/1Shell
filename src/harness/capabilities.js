@@ -219,6 +219,7 @@ const CAPABILITY_RULES = {
     allowedTools: new Set([
       'execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'list_hosts',
       'load_skill',
+      'list_scripts', 'get_script',
       'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
       'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
     ]),
@@ -232,6 +233,7 @@ const CAPABILITY_RULES = {
       'execute_command', 'host_exec', 'read_remote_file', 'list_remote_dir', 'list_hosts',
       'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
       'upload_file', 'download_file', 'run_script',
+      'list_scripts', 'get_script', 'save_script',
       'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
       'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
       'ack_probe_alert', 'install_probe_agent', 'restart_probe_agent',

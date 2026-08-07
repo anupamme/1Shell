@@ -3,47 +3,37 @@
 /**
  * Script Service
  *
- * 脚本库的业务逻辑层：
+ * 脚本库的业务逻辑层。4.7.6 起定位收窄为"存脚本 + 在终端里用"：
  *   - 列表 / 查询 / 创建 / 更新 / 删除
- *   - 参数渲染（{{var}} 占位符替换 + 必填校验 + 类型转换）
- *   - 风险检查（danger 需显式 confirmed=true；confirm 需 confirmed=true）
- *   - 执行编排：创建 run 记录 → 调用 bridgeService（远程）或 child_process（本机）→ 更新 run → 写审计日志
+ *   - 参数渲染：从正文扫描 {{var}} 占位符 → 逐个替换为 shell 转义后的值
+ *   - 执行：仅保留单主机执行，服务于 agent 的 run_script 工具
+ *     （Web 端执行入口、批量执行、执行历史表已随 4.7.6 退役）
  *
- * 执行结果会写入 audit_logs，action='script_run'。
+ * 参数语义：调用方必须为每个占位符提供键，值可以是空串；缺键直接抛 400 并
+ * 列出缺哪些。这样 agent 漏传参数会立刻拿到明确反馈，而不是静默跑出一条
+ * 带空值的命令。
+ *
+ * 执行结果写入 audit_logs，action='script_run'。
  */
 
 const os = require('os');
 const { execLocalScript } = require('../../lib/exec-local');
-const { collectSecretValues, redactKnownSecrets, redactObjectSecretValues } = require('../../lib/secret-redaction');
+const { extractPlaceholders, placeholderPattern } = require('../../lib/script-placeholders');
+const { redactCredentialPatterns } = require('../../lib/secret-redaction');
+const { assessCommandRisk } = require('../ai/command-safety');
 
 const LOCAL_HOST_ID = 'local';
 const DEFAULT_TIMEOUT_MS = 120000;
-
-// 危险关键词（启发式，仅用于提示，不是强约束）
-const DANGER_KEYWORDS = [
-  'rm -rf /',
-  'rm -rf /*',
-  'mkfs',
-  'dd if=',
-  ':(){ :|:& };:',
-  '> /dev/sda',
-  'chmod -R 777 /',
-  'chown -R',
-  'shutdown',
-  'reboot',
-  'init 0',
-  'init 6',
-  'halt',
-];
 
 function createScriptService({ scriptRepository, hostService, bridgeService, auditService }) {
 
   // 本机 shell 类型：Windows → powershell, 其他 → bash
   // 影响参数的 shellQuote 风格。远程主机一律按 POSIX bash 处理。
   const LOCAL_SHELL_STYLE = os.platform() === 'win32' ? 'powershell' : 'bash';
+
   // ─── 列表 / 查询 ─────────────────────────────────────────────────────
-  function listScripts({ category, keyword } = {}) {
-    return scriptRepository.listScripts({ category, keyword });
+  function listScripts({ keyword } = {}) {
+    return scriptRepository.listScripts({ keyword });
   }
 
   function getScript(id) {
@@ -63,112 +53,54 @@ function createScriptService({ scriptRepository, hostService, bridgeService, aud
     return scriptRepository.deleteScript(id);
   }
 
+  function shellStyleFor(hostId) {
+    return hostId === LOCAL_HOST_ID ? LOCAL_SHELL_STYLE : 'bash';
+  }
+
   // ─── 参数渲染 ────────────────────────────────────────────────────────
   /**
-   * 将 {{var}} 占位符替换为用户提供的参数值。
-   * - 必填缺失 → 抛 400
-   * - 类型转换（number/boolean）
-   * - select 值必须在 options 中
-   * - 参数值做 shell 转义，防止命令注入
+   * 将正文里的 {{var}} 占位符替换为 shell 转义后的参数值。
    *
    * @param {object} script - 脚本对象
-   * @param {object} rawParams - 前端传来的原始参数
+   * @param {object} rawParams - 调用方提供的参数键值对
    * @param {object} [opts]
    * @param {string} [opts.hostId] - 目标主机 ID，用于选择 shell 转义风格
+   * @param {boolean} [opts.allowMissing] - true 时缺键按空串处理（预览用），
+   *        false/省略时缺键抛 400（执行用）
    */
-  function renderContent(script, rawParams, { hostId } = {}) {
-    const params = { ...rawParams };
-    const defs = script.parameters || [];
+  function renderContent(script, rawParams, { hostId, allowMissing = false } = {}) {
+    const params = (rawParams && typeof rawParams === 'object' && !Array.isArray(rawParams)) ? rawParams : {};
+    const names = extractPlaceholders(script.content);
+    const shellStyle = shellStyleFor(hostId);
 
-    // 选择 shell 风格：local 按本机平台，远程按 POSIX bash
-    const shellStyle = hostId === LOCAL_HOST_ID ? LOCAL_SHELL_STYLE : 'bash';
-
-    // 归一化 / 校验
-    for (const def of defs) {
-      const raw = params[def.name];
-      const hasValue = raw != null && raw !== '';
-
-      if (!hasValue) {
-        if (def.required) {
-          throw validationError(`参数 ${def.label || def.name} 必填`);
-        }
-        params[def.name] = def.default != null ? def.default : '';
-        continue;
-      }
-
-      if (def.type === 'number') {
-        const n = Number(raw);
-        if (!Number.isFinite(n)) {
-          throw validationError(`参数 ${def.label || def.name} 必须是数字`);
-        }
-        params[def.name] = String(n);
-      } else if (def.type === 'boolean') {
-        params[def.name] = raw === true || raw === 'true' || raw === '1' || raw === 1 ? 'true' : 'false';
-      } else if (def.type === 'select') {
-        const opts = def.options || [];
-        const match = opts.find((o) => String(o.value) === String(raw));
-        if (!match) {
-          throw validationError(`参数 ${def.label || def.name} 不在可选列表中`);
-        }
-        params[def.name] = String(match.value);
-      } else {
-        // string / password
-        params[def.name] = String(raw);
+    if (!allowMissing) {
+      const missing = names.filter((name) => params[name] === undefined || params[name] === null);
+      if (missing.length > 0) {
+        throw validationError(`缺少脚本参数: ${missing.join(', ')}（每个占位符都必须提供键，值可以是空串）`);
       }
     }
 
-    // 渲染：{{name}} → shellQuote(value)
-    // 只替换参数定义中存在的占位符，未定义的保持原样
+    const normalizedParams = {};
     let rendered = script.content;
-    for (const def of defs) {
-      const placeholder = new RegExp(`\\{\\{\\s*${escapeRegExp(def.name)}\\s*\\}\\}`, 'g');
-      rendered = rendered.replace(placeholder, shellQuote(params[def.name], shellStyle));
+    for (const name of names) {
+      const value = params[name] == null ? '' : String(params[name]);
+      normalizedParams[name] = value;
+      rendered = rendered.replace(placeholderPattern(name), shellQuote(value, shellStyle));
     }
 
-    return { rendered, normalizedParams: params };
-  }
-
-  function redactRenderedContent(script, rendered, normalizedParams) {
-    const secretValues = collectSecretValues(script.parameters || [], normalizedParams);
-    return redactKnownSecrets(rendered, secretValues);
-  }
-
-  function redactParams(script, normalizedParams) {
-    return redactObjectSecretValues(normalizedParams, script.parameters || []);
-  }
-
-  // ─── 风险检查 ────────────────────────────────────────────────────────
-  function checkRisk(script, renderedContent, { confirmed }) {
-    // safe：任意执行
-    // confirm：必须 confirmed=true
-    // danger：必须 confirmed=true，并且会在返回中附带一条强提示
-    if (script.riskLevel === 'safe') {
-      return { ok: true, warnings: [] };
-    }
-    if (!confirmed) {
-      return {
-        ok: false,
-        needConfirm: true,
-        message: script.riskLevel === 'danger'
-          ? '该脚本标记为"危险"，请在前端显式确认后传入 confirmed=true'
-          : '该脚本需要确认后执行，请传入 confirmed=true',
-      };
-    }
-    const warnings = [];
-    if (script.riskLevel === 'danger') {
-      warnings.push('脚本标记为 danger，请谨慎确认执行目标主机');
-    }
-    const lower = String(renderedContent || '').toLowerCase();
-    for (const kw of DANGER_KEYWORDS) {
-      if (lower.includes(kw.toLowerCase())) {
-        warnings.push(`检测到高危命令关键词: ${kw}`);
-      }
-    }
-    return { ok: true, warnings };
+    return { rendered, normalizedParams, placeholders: names, shellStyle };
   }
 
   // ─── 执行脚本 ────────────────────────────────────────────────────────
-  async function runScript(id, { hostId, params, confirmed, timeoutMs, signal }, { clientIp } = {}) {
+  /**
+   * 在单台主机上执行脚本。仅供 agent 的 run_script 工具调用。
+   *
+   * 渲染完成后对成品命令跑一次灾难命令拦截：harness guard 的红线检查只覆盖
+   * execute_command / host_exec（它们的 input 里有 command），run_script 传进
+   * guard 的只有 scriptId，规则库看不到任何正文。不在这里拦，脚本库就成了绕过
+   * 整套命令安全规则的通道。
+   */
+  async function runScript(id, { hostId, params, timeoutMs, signal }, { clientIp, source } = {}) {
     const script = scriptRepository.findScript(id);
     if (!script) {
       throw notFoundError('脚本不存在');
@@ -181,178 +113,67 @@ function createScriptService({ scriptRepository, hostService, bridgeService, aud
     }
     const hostName = host?.name || (hostId === LOCAL_HOST_ID ? '本机' : hostId);
 
-    // 参数渲染
-    let renderResult;
-    try {
-      renderResult = renderContent(script, params || {}, { hostId });
-    } catch (err) {
-      throw err;
-    }
-    const { rendered, normalizedParams } = renderResult;
-    const redactedRendered = redactRenderedContent(script, rendered, normalizedParams);
-    const redactedParams = redactParams(script, normalizedParams);
+    const { rendered } = renderContent(script, params || {}, { hostId });
 
-    // 风险检查
-    const risk = checkRisk(script, rendered, { confirmed });
-    if (!risk.ok) {
-      const err = new Error(risk.message);
-      err.status = 409; // Conflict: 需要确认
-      err.code = 'NEED_CONFIRM';
-      err.riskLevel = script.riskLevel;
-      throw err;
+    const risk = assessCommandRisk(rendered);
+    if (risk.dangerous) {
+      throw validationError(`已拦截灾难性命令：${risk.reason}`);
     }
 
-    // 创建 run 记录
-    const runId = scriptRepository.createRun({
-      scriptId: script.id,
-      scriptName: script.name,
-      hostId,
-      hostName,
-      params: redactedParams,
-      renderedCommand: redactedRendered,
-    });
-
+    const auditSource = source || 'agent';
+    // 审计/桥接层记录的命令按键名与常见凭据格式脱敏：参数不再有 secret 标记，
+    // 改由 redactCredentialPatterns 兜住 PASSWORD=xxx / Bearer xxx / sk-xxx 这类写法。
+    const auditCommand = redactCredentialPatterns(rendered);
     const startAt = Date.now();
     try {
       const result = hostId === LOCAL_HOST_ID
-        ? await execLocal(rendered, timeoutMs || DEFAULT_TIMEOUT_MS, signal)
+        ? await execLocalScript(rendered, { timeout: timeoutMs || DEFAULT_TIMEOUT_MS, signal })
         : await bridgeService.execOnHost(
             hostId,
             rendered,
             timeoutMs || DEFAULT_TIMEOUT_MS,
-            { source: 'script_run', clientIp, signal, auditCommand: redactedRendered },
+            { source: 'script_run', clientIp, signal, auditCommand },
           );
 
       const status = result.exitCode === 0 ? 'success' : 'failed';
-      scriptRepository.updateRun(runId, {
-        status,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        error: null,
-      });
-      scriptRepository.incrementRunCount(script.id);
 
       auditService?.log({
         action: 'script_run',
-        source: 'web_ui',
+        source: auditSource,
         hostId,
         hostName,
-        command: `[${script.name}] ${redactedRendered}`.substring(0, 2000),
+        command: `[${script.name}] ${auditCommand}`.substring(0, 2000),
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         clientIp,
-        details: JSON.stringify({ scriptId: script.id, runId, riskLevel: script.riskLevel }),
+        details: JSON.stringify({ scriptId: script.id }),
       });
 
       return {
-        runId,
         status,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         stdout: result.stdout,
         stderr: result.stderr,
-        renderedCommand: redactedRendered,
-        warnings: risk.warnings,
+        renderedCommand: auditCommand,
       };
     } catch (err) {
       const durationMs = Date.now() - startAt;
-      scriptRepository.updateRun(runId, {
-        status: 'failed',
-        exitCode: null,
-        durationMs,
-        stdout: null,
-        stderr: null,
-        error: err.message,
-      });
 
       auditService?.log({
         action: 'script_run',
-        source: 'web_ui',
+        source: auditSource,
         hostId,
         hostName,
-        command: `[${script.name}] ${redactedRendered}`.substring(0, 2000),
+        command: `[${script.name}] ${auditCommand}`.substring(0, 2000),
         error: err.message,
         durationMs,
         clientIp,
-        details: JSON.stringify({ scriptId: script.id, runId, riskLevel: script.riskLevel }),
+        details: JSON.stringify({ scriptId: script.id }),
       });
 
       throw err;
     }
-  }
-
-  // ─── 批量执行 ────────────────────────────────────────────────────────
-  /**
-   * 在多台主机上并发执行同一脚本。
-   * concurrency 控制并发数（默认 5），避免同时打爆几十台 SSH。
-   * 每台主机独立生成 run 记录，任何单台失败不影响其他。
-   * 返回 results 数组，与 hostIds 等长。
-   */
-  async function runScriptBatch(id, { hostIds, params, confirmed, timeoutMs, concurrency = 5 }, { clientIp } = {}) {
-    const script = scriptRepository.findScript(id);
-    if (!script) throw notFoundError('脚本不存在');
-
-    if (!Array.isArray(hostIds) || hostIds.length === 0) {
-      throw validationError('hostIds 不能为空');
-    }
-    if (hostIds.length > 50) {
-      throw validationError('单次批量执行不能超过 50 台主机');
-    }
-
-    // 风险检查：取一个 hostId 做渲染（参数在所有主机上相同）
-    const { rendered } = renderContent(script, params || {}, { hostId: hostIds[0] });
-    const risk = checkRisk(script, rendered, { confirmed });
-    if (!risk.ok) {
-      const err = new Error(risk.message);
-      err.status = 409;
-      err.code = 'NEED_CONFIRM';
-      err.riskLevel = script.riskLevel;
-      throw err;
-    }
-
-    const limit = Math.max(1, Math.min(concurrency, 20));
-    const results = [];
-    const pending = [...hostIds];
-
-    // 并发限流执行
-    async function runOne(hostId) {
-      try {
-        const result = await runScript(id, { hostId, params, confirmed: true, timeoutMs }, { clientIp });
-        return { hostId, ...result, ok: true };
-      } catch (err) {
-        return { hostId, ok: false, error: err.message, status: 'failed' };
-      }
-    }
-
-    // 简单的池化并发
-    while (pending.length > 0) {
-      const batch = pending.splice(0, limit);
-      const batchResults = await Promise.all(batch.map(runOne));
-      results.push(...batchResults);
-    }
-
-    return {
-      total: hostIds.length,
-      success: results.filter((r) => r.ok && r.status === 'success').length,
-      failed: results.filter((r) => !r.ok || r.status === 'failed').length,
-      results,
-      warnings: risk.warnings,
-    };
-  }
-
-  // ─── 执行历史 ────────────────────────────────────────────────────────
-  function getRun(runId) {
-    return scriptRepository.findRun(runId);
-  }
-
-  function listRunsByScript(scriptId, opts) {
-    return scriptRepository.listRunsByScript(scriptId, opts);
-  }
-
-  function listAllRuns(opts) {
-    return scriptRepository.listAllRuns(opts);
   }
 
   return {
@@ -362,22 +183,11 @@ function createScriptService({ scriptRepository, hostService, bridgeService, aud
     updateScript,
     deleteScript,
     renderContent, // 暴露用于"命令预览"接口
-    redactRenderedContent,
-    redactParams,
-    checkRisk,
     runScript,
-    runScriptBatch,
-    getRun,
-    listRunsByScript,
-    listAllRuns,
   };
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────
-
-function execLocal(command, timeoutMs, signal) {
-  return execLocalScript(command, { timeout: timeoutMs || DEFAULT_TIMEOUT_MS, signal });
-}
 
 function shellQuote(value, style = 'bash') {
   const s = String(value ?? '');
@@ -387,10 +197,6 @@ function shellQuote(value, style = 'bash') {
   }
   // POSIX bash：'foo' → "'foo'"，嵌入的单引号 → '\''
   return `'${s.replace(/'/g, "'\\''")}'`;
-}
-
-function escapeRegExp(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function validationError(message) {

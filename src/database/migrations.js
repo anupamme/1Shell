@@ -577,6 +577,39 @@ const migrations = [
       `);
     },
   },
+  {
+    version: 19,
+    name: 'script library rebuild: drop runs, strip metadata',
+    up(db) {
+      // 脚本库（v1 建表）回归"存脚本 + 在终端里用"的定位：
+      //   - script_runs 整表删除：Web 端服务端执行入口、批量执行、执行历史一并退役，
+      //     agent 侧 run_script 仍可执行，但只写 audit_logs，不再留独立运行表。
+      //   - scripts 表去掉 icon / category / risk_level / run_count / parameters 五列：
+      //     参数改为从 content 里扫描 {{变量}} 派生，不再结构化定义；分类由自由标签承担。
+      // SQLite 无 DROP COLUMN 保证（老版本不支持），按建表-搬数据-换名重建。
+      db.exec(`
+        DROP TABLE IF EXISTS script_runs;
+
+        CREATE TABLE scripts_v19 (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          tags TEXT,
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO scripts_v19 (id, name, description, tags, content, created_at, updated_at)
+          SELECT id, name, description, tags, content, created_at, updated_at FROM scripts;
+
+        DROP TABLE scripts;
+        ALTER TABLE scripts_v19 RENAME TO scripts;
+
+        CREATE INDEX IF NOT EXISTS idx_scripts_updated_at ON scripts(updated_at);
+      `);
+    },
+  },
 ];
 
 function runMigrations(db, { logger } = {}) {

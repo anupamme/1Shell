@@ -912,8 +912,8 @@ onMounted(() => {
             <div class="flex flex-col gap-1.5">
               <div class="flex items-center justify-between gap-2">
                 <div>
-                  <div class="text-[12px] font-medium">允许运行的脚本</div>
-                  <div class="text-[11px] text-slate-400 mt-0.5">仅限制 run_script，留空表示不限制。</div>
+                  <div class="text-[12px] font-medium">允许操作的脚本</div>
+                  <div class="text-[11px] text-slate-400 mt-0.5">限制 run_script / get_script / save_script，留空表示不限制。</div>
                 </div>
                 <div class="flex gap-1 shrink-0">
                   <button class="text-[11px] px-2 h-7 rounded-md border border-slate-200 dark:border-[#1e293b] hover:border-blue-300" type="button" @click="fillTokenScripts(selectedRemoteToken, 'all')">全部</button>

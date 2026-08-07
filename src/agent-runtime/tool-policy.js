@@ -13,6 +13,7 @@ const READONLY_TOOL_NAMES = new Set([
   'list_artifacts',
   'query_format',
   'list_scripts',
+  'get_script',
   'query_audit',
   'query_probe',
   'list_probes',

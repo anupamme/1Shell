@@ -1,13 +1,16 @@
-// useScriptInject.ts — MainConsole 脚本快捷注入
+// useScriptInject.ts — 终端页脚本注入
+//
+// 渲染（占位符替换 + shell 转义）走服务端 /api/scripts/:id/render，不在前端拼：
+// 转义是防命令注入的关键，必须和 agent 执行走同一套实现。
 
-import { reactive, ref, type Ref } from 'vue';
+import { computed, reactive, ref, type Ref } from 'vue';
 
 import { useApiClient } from '@/composables/useApiClient';
 import { useSessionTerminal } from '@/composables/useSessionTerminal';
 import { useHostsStore } from '@/stores/hosts';
 import { useNotifyStore } from '@/stores/notify';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
-import type { ScriptInfo, PreviewResponse } from '@/utils/scripts';
+import type { ScriptInfo, RenderResponse } from '@/utils/scripts';
 
 interface ScriptsListResponse { scripts?: ScriptInfo[] }
 
@@ -16,6 +19,7 @@ export interface ScriptInjectApi {
   readonly scripts: Ref<ScriptInfo[]>;
   readonly selectedScriptId: Ref<string>;
   readonly selectedScript: Ref<ScriptInfo | null>;
+  readonly placeholders: Ref<string[]>;
   readonly params: Record<string, string>;
   readonly previewCommand: Ref<string>;
   readonly previewError: Ref<boolean>;
@@ -54,6 +58,9 @@ function create(): ScriptInjectApi {
   const params = reactive<Record<string, string>>({});
   const previewCommand = ref('');
   const previewError = ref(false);
+  const shellStyle = ref<'bash' | 'powershell'>('bash');
+
+  const placeholders = computed(() => selectedScript.value?.placeholders || []);
 
   let initialized = false;
 
@@ -62,10 +69,14 @@ function create(): ScriptInjectApi {
   }
 
   function injectToTerminal(command: string): boolean {
-    const lines = command.split('\n').filter((line) => line.trim() !== '');
-    const payload = lines.length <= 1
-      ? `${command.trim()}\n`
-      : `bash << '__1SHELL_EOF__'\n${command}\n__1SHELL_EOF__\n`;
+    const isMultiline = command.split('\n').filter((line) => line.trim() !== '').length > 1;
+    // 多行 POSIX 脚本包 heredoc，避免逐行进 shell 时被历史/补全打断；
+    // PowerShell 没有等价写法，原样送多行由它自己处理。
+    const body = (isMultiline && shellStyle.value === 'bash')
+      ? `bash << '__1SHELL_EOF__'\n${command}\n__1SHELL_EOF__`
+      : command.trim();
+    // PTY 的回车是 \r，不是 \n（与 AgentView 的注入保持一致）
+    const payload = `${body.replace(/\r?\n/g, '\r')}\r`;
 
     if (!sessionTerminal.sendSessionInput(payload)) {
       notify.warn('注入失败，终端会话未就绪');
@@ -95,9 +106,8 @@ function create(): ScriptInjectApi {
     previewCommand.value = '';
     previewError.value = false;
     if (!script) return;
-    (script.parameters || []).forEach((def) => {
-      params[def.name] = def.default !== undefined && def.default !== null ? String(def.default) : '';
-    });
+    // 每个占位符都建一个键（空串），服务端据此渲染
+    (script.placeholders || []).forEach((name) => { params[name] = ''; });
     void refreshPreview();
   }
 
@@ -110,17 +120,18 @@ function create(): ScriptInjectApi {
     const script = selectedScript.value;
     if (!script) return;
     try {
-      const resp = await requestJson<PreviewResponse>(
-        `/api/scripts/${encodeURIComponent(script.id)}/preview`,
+      const resp = await requestJson<RenderResponse>(
+        `/api/scripts/${encodeURIComponent(script.id)}/render`,
         {
           method: 'POST',
           body: JSON.stringify({ hostId: getHostId(), params: { ...params } }),
         },
       );
       previewCommand.value = resp.renderedCommand || '（空）';
+      shellStyle.value = resp.shellStyle === 'powershell' ? 'powershell' : 'bash';
       previewError.value = false;
     } catch (err) {
-      previewCommand.value = `预览失败: ${(err as Error).message}`;
+      previewCommand.value = `渲染失败: ${(err as Error).message}`;
       previewError.value = true;
     }
   }
@@ -164,6 +175,7 @@ function create(): ScriptInjectApi {
     scripts,
     selectedScriptId,
     selectedScript,
+    placeholders,
     params,
     previewCommand,
     previewError,

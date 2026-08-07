@@ -12,6 +12,7 @@ const { redactKnownSecrets } = require('../../lib/secret-redaction');
 const { emitIdeEvent } = require('../ide/ide.events');
 const { MCP_STANDARD_TOOL_SET } = require('./mcp-tool-profiles');
 const { formatOutputDiagnostics, withOutputDiagnostics } = require('../utils/output-diagnostics');
+const { validateScriptPayload } = require('../utils/validators');
 
 const INLINE_UPLOAD_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_INLINE_UPLOAD_MAX_BYTES', 1024 * 1024);
 const TEXT_WRITE_MAX_BYTES = envPositiveNumber('ONESHELL_MCP_TEXT_WRITE_MAX_BYTES', 2 * 1024 * 1024);
@@ -141,28 +142,54 @@ const TOOL_DEFS = [
   {
     name: 'list_scripts',
     targets: ['mcp', 'ide'],
-    description: '列出 1Shell 脚本库中的脚本。返回 id / name / description / category / tags。',
+    description: '列出 1Shell 脚本库中的脚本。返回 id / name / description / tags / placeholders（正文里的 {{变量}} 名单）。不返回正文，正文用 get_script 读。',
     schema: {
       type: 'object',
       properties: {
-        category: { type: 'string', description: '按分类过滤（可选）' },
-        keyword: { type: 'string', description: '关键词搜索（可选）' },
+        keyword: { type: 'string', description: '关键词搜索，匹配名称/描述/标签（可选）' },
       },
       required: [],
     },
   },
   {
+    name: 'get_script',
+    targets: ['ide'],
+    description: '读取脚本库里某个脚本的完整内容。返回 name / description / tags / content / placeholders。run_script 之前先用它确认需要传哪些参数键。',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '脚本 ID（list_scripts 返回的 id）' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'save_script',
+    targets: ['ide'],
+    description: '在脚本库里新建或整体覆盖一个脚本。传 id = 覆盖该脚本（name/content/description/tags 全量替换，改之前先用 get_script 读原文）；不传 id = 新建。正文里用 {{变量名}} 声明参数占位符。删除脚本请让用户在脚本库页面手工操作。',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '要覆盖的脚本 ID；不传表示新建' },
+        name: { type: 'string', description: '脚本名称，最长 120 字符' },
+        content: { type: 'string', description: '脚本正文，参数占位符写作 {{变量名}}' },
+        description: { type: 'string', description: '可选说明，最长 2000 字符' },
+        tags: { type: 'array', items: { type: 'string' }, description: '可选标签数组' },
+      },
+      required: ['name', 'content'],
+    },
+  },
+  {
     name: 'run_script',
     targets: ['mcp', 'ide'],
-    description: '在指定主机上运行一个已有脚本。复用脚本服务的参数校验、风险确认、执行记录和审计。',
+    description: '在指定主机上运行一个已有脚本。复用脚本库的占位符渲染、shell 转义、灾难命令拦截和审计。',
     schema: {
       type: 'object',
       properties: {
         scriptId: { type: 'string', description: '脚本 ID' },
         hostId: { type: 'string', description: '目标主机 ID' },
-        params: { type: 'object', description: '脚本参数键值对（可选）' },
+        params: { type: 'object', description: '脚本参数键值对。必须为 get_script 返回的每一个 placeholder 提供键（值可以是空串），缺键会直接失败并列出缺哪些。' },
         timeout: { type: 'number', description: '超时毫秒，默认 60000' },
-        confirmed: { type: 'boolean', description: '脚本需要确认或标记 danger 时必须为 true' },
       },
       required: ['scriptId', 'hostId'],
     },
@@ -793,6 +820,10 @@ function createOneShellCoreTools(deps = {}) {
         return handleGetOneShellAiRun(input);
       case 'list_scripts':
         return handleListScripts(input);
+      case 'get_script':
+        return handleGetScript(input);
+      case 'save_script':
+        return handleSaveScript(input, context);
       case 'run_script':
         return handleRunScript(input, context);
       case 'list_remote_dir':
@@ -1316,11 +1347,84 @@ function createOneShellCoreTools(deps = {}) {
   function handleListScripts(input) {
     if (!deps.scriptService) return err('scriptService 未初始化');
     try {
-      const scripts = deps.scriptService.listScripts({ category: input.category, keyword: input.keyword });
-      if (scripts.length === 0) return ok('（脚本库为空）');
-      return ok(scripts.map((s) =>
-        `id=${s.id}  name="${s.name}"  category=${s.category || '-'}  tags=[${(s.tags || []).join(',')}]  ${s.description ? '— ' + s.description.slice(0, 80) : ''}`
-      ).join('\n'));
+      const scripts = deps.scriptService.listScripts({ keyword: input.keyword });
+      return structured(true, scripts.length ? `脚本库共 ${scripts.length} 个脚本` : '脚本库为空', {
+        total: scripts.length,
+        scripts: scripts.map((s) => ({
+          id: s.id,
+          name: s.name,
+          description: s.description || '',
+          tags: s.tags || [],
+          placeholders: s.placeholders || [],
+          updatedAt: s.updatedAt,
+        })),
+      });
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  function handleGetScript(input) {
+    if (!deps.scriptService) return err('scriptService 未初始化');
+    // 兼容模型串用 run_script 的字段名
+    const id = String(input.id || input.scriptId || '').trim();
+    if (!id) return err('id 为必填');
+    try {
+      const script = deps.scriptService.getScript(id);
+      if (!script) return err(`脚本不存在: ${id}`);
+      return structured(true, `脚本 ${script.name}`, {
+        id: script.id,
+        name: script.name,
+        description: script.description || '',
+        tags: script.tags || [],
+        content: script.content || '',
+        placeholders: script.placeholders || [],
+        createdAt: script.createdAt,
+        updatedAt: script.updatedAt,
+      });
+    } catch (e) {
+      return err(e.message);
+    }
+  }
+
+  function handleSaveScript(input, context) {
+    if (!deps.scriptService) return err('scriptService 未初始化');
+    const id = String(input.id || input.scriptId || '').trim();
+    try {
+      // 与 POST/PUT /api/scripts 共用校验器，避免 agent 写出 HTTP 层会拒绝的脚本
+      const payload = validateScriptPayload({
+        name: input.name,
+        content: input.content,
+        description: input.description,
+        tags: input.tags,
+      });
+      const script = id
+        ? deps.scriptService.updateScript(id, payload)
+        : deps.scriptService.createScript(payload);
+      if (!script) return err(`脚本不存在: ${id}`);
+
+      deps.auditService?.log?.({
+        action: 'script_save',
+        source: context.source || 'agent',
+        command: `[${script.name}] ${id ? 'update' : 'create'} ${script.id}`.substring(0, 2000),
+        clientIp: context.clientIp,
+        details: JSON.stringify({
+          scriptId: script.id,
+          mode: id ? 'update' : 'create',
+          contentLength: (script.content || '').length,
+          placeholders: script.placeholders || [],
+        }),
+      });
+
+      return structured(true, id ? `脚本已更新: ${script.name}` : `脚本已创建: ${script.name}`, {
+        mode: id ? 'update' : 'create',
+        id: script.id,
+        name: script.name,
+        description: script.description || '',
+        tags: script.tags || [],
+        placeholders: script.placeholders || [],
+        updatedAt: script.updatedAt,
+      });
     } catch (e) {
       return err(e.message);
     }
@@ -1328,25 +1432,22 @@ function createOneShellCoreTools(deps = {}) {
 
   async function handleRunScript(input, context) {
     if (!deps.scriptService) return err('scriptService 未初始化');
-    const scriptId = String(input.scriptId || '').trim();
+    const scriptId = String(input.scriptId || input.id || '').trim();
     const hostId = String(input.hostId || '').trim();
     if (!scriptId || !hostId) return err('scriptId 和 hostId 为必填');
     try {
       const result = await deps.scriptService.runScript(scriptId, {
         hostId,
         params: input.params || {},
-        confirmed: input.confirmed === true,
         timeoutMs: input.timeout || 60000,
         signal: context.signal,
-      }, { clientIp: context.clientIp });
+      }, { clientIp: context.clientIp, source: context.source || 'agent' });
       const okRun = result.exitCode === 0;
       return structured(okRun, okRun ? '脚本执行成功' : `脚本执行失败，exitCode=${result.exitCode}`, {
         scriptId,
         hostId,
-        runId: result.runId,
         status: result.status,
         renderedCommand: result.renderedCommand,
-        warnings: result.warnings || [],
         params: input.params || {},
         stdout: result.stdout || '',
         stderr: result.stderr || '',

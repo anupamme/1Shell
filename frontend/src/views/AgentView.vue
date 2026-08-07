@@ -26,12 +26,11 @@ import {
   type AgentGoalCommand,
 } from '@/utils/agentGoal';
 import { LOCAL_HOST_ID } from '@/utils/mainConsole';
-import type { MainHost, HostFormPayload, HostLink } from '@/utils/mainConsole';
+import type { MainHost, HostFormPayload, HostLink, HostInfo } from '@/utils/mainConsole';
 import { renderMarkdown, streamingPlainText } from '@/utils/markdown';
 import { isNearScrollBottom, scrollToBottomIfPinned } from '@/utils/streaming';
 import { parseHostListResult, parseProbeListResult } from '@/utils/structuredToolResults';
 import { agentSlashCommandsForSurface, filterAgentSlashCommands, type AgentSlashCommand } from '@/utils/agentSlashCommands';
-import type { HostInfo } from '@/utils/scripts';
 
 // 异步加载：CodeMirror 体积大，只在真正打开文件面板时拉取
 const AgentFilePanel = defineAsyncComponent(() => import('@/components/ide/AgentFilePanel.vue'));

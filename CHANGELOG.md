@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.7.6 - 2026-07-29
+
+脚本库彻底重构：回归"存脚本 + 在终端里用"，并把它接成 1Shell AI 能读能写能跑的东西。
+
+- 脚本库重做，只剩四个字段（名称 / 描述 / 标签 / 正文）。删掉固定分类、风险等级、emoji 图标、运行次数；分类改由自由标签承担，页面从三栏压成两栏，搜索按名称/描述/标签走。正文编辑器从裸 `<textarea>` 换成 CodeMirror + shell 高亮（复用既有 `languageExtensionForFile`，无新增依赖）。
+- 参数机制从"结构化定义"改为"自动识别"：不再有参数表格，正文里写 `{{变量名}}` 即为参数，注入时按识别到的占位符生成输入框。此前 UI 上选 `select` 类型必定保存失败（后端要求 options 非空，前端根本没有编辑 options 的地方）、`secret` 脱敏开关无处可开——这两条断链随参数表格一并消失。占位符正则收敛为 `lib/script-placeholders.js` 单一实现，前后端同源。
+- Web 端不再执行脚本：执行入口、批量执行（`/run`、`/run-batch`）、执行历史（`script_runs` 表、`/api/script-runs*`、历史面板）整体退役，migration v19 DROP 表并重建 `scripts`。服务端执行只保留给 agent。渲染接口 `/scripts/:id/render` 留在服务端——shell 转义是唯一的防注入手段，不能挪到前端。
+- 1Shell AI 现在能读写脚本库：新增 `get_script`（读全文 + 占位符名单）与 `save_script`（新建/覆盖，与 HTTP 层共用校验器），连同既有 `list_scripts` / `run_script` 构成读-写-执行闭环。`save_script` 接入审批链路，审批卡直接贴脚本正文（不贴就会落到 JSON fallback，审的人看不清要入库的是什么）。写工具不对外部 MCP 客户端暴露。
+- 修复：`list_scripts` 此前对内部 agent **完全不可用**——三档 capability 的 `allowedTools` 都没登记它，`guard.check` 第一步就拦死。同一个洞下顺带把 `get_script` / `save_script` 一并登记。
+- 修复：脚本执行绕过命令风险规则。harness guard 的灾难命令拦截只覆盖 `execute_command` / `host_exec`（它们的 input 里有 command），`run_script` 传进去的只有 `scriptId`，规则库看不到正文；旧的 `riskLevel` 兜底在默认档 `safe` 时直接 return，等于没兜。现在渲染后的成品命令在 service 里过一次 `assessCommandRisk`。
+- 修复：终端注入固定发 `bash << EOF`，Windows/PowerShell 会话必坏（而渲染侧是按 hostId 选 PowerShell 转义风格的，两边规则互相矛盾）。现在按服务端返回的 `shellStyle` 决定包装方式，行尾统一为 PTY 要的 `\r`。
+- 修复：agent 漏传脚本参数会静默渲染成空值。现在缺键直接 400 并列出缺哪些（空串是合法值，不算缺）。
+- 移除 AI 生成脚本弹窗与 `/api/scripts/ai-generate`：提示词产出的 `icon`/`category`/`riskLevel`/`parameters` 在新模型下已全部不存在，且能力被 `save_script` 完全覆盖且更强（可对话迭代）。
+- 清理：`ide.tools.js` 里被 core 委派永久遮蔽的 `list_scripts` / `run_script` 影子副本（schema + handler）删除；时间线补上四个脚本工具的中文名（此前 `list_scripts` 会显示成"列出目录"），顺带清掉 4.7.5 漏删的 AI 任务工具标签；`HostInfo` 从脚本模块归位到 `utils/mainConsole`。
+- 页面上三个装饰性控件（导入/导出、"+ 新标签"、排序）与 BETA 徽章一并移除。
+
+### Verification
+
+- `npm test`（40 个脚本；新增 `test-script-library` 覆盖占位符扫描/缺键报错/shell 转义/灾难命令拦截，退役守卫固化本次全部删除项）
+- `npm --prefix frontend run build`
+
 ## 4.7.5 - 2026-07-26
 
 桌面版回归 + 终端区减负 + 会话列表随主机删除联动清理 + AI 任务板块退役。

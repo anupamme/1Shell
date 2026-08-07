@@ -10,6 +10,7 @@ const SIDE_EFFECT_TOOL_NAMES = new Set([
   'upload_file',
   'download_file',
   'run_script',
+  'save_script',
   'reload_registry',
   'add_mcp_server',
   'remove_mcp_server',

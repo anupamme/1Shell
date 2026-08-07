@@ -193,36 +193,6 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
       },
     },
 
-    // ── 1Shell Core：脚本管理 ─────────────────────────────────────────
-    {
-      name: 'list_scripts',
-      description: '列出 1Shell 脚本库中的所有脚本。返回 id / name / description / category / tags。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          category: { type: 'string', description: '按分类过滤（可选）' },
-          keyword:  { type: 'string', description: '关键词搜索（可选）' },
-        },
-        required: [],
-      },
-    },
-    {
-      name: 'run_script',
-      description:
-        '在指定主机上运行一个已有的脚本。' +
-        '\n返回 stdout / stderr / exitCode。支持传入参数。',
-      input_schema: {
-        type: 'object',
-        properties: {
-          scriptId: { type: 'string', description: '脚本 ID' },
-          hostId:   { type: 'string', description: '目标主机 ID' },
-          params:   { type: 'object', description: '脚本参数键值对（可选）' },
-          timeout:  { type: 'number', description: '超时毫秒，默认 60000' },
-        },
-        required: ['scriptId', 'hostId'],
-      },
-    },
-
     // ── 1Shell Core：探针与审计 ───────────────────────────────────────
     {
       name: 'query_probe',
@@ -278,6 +248,8 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
     'upload_file',
     'download_file',
     'list_scripts',
+    'get_script',
+    'save_script',
     'run_script',
     'list_mcp_servers',
     'add_mcp_server',
@@ -792,35 +764,6 @@ function createIdeTools({ bridgeService, hostService, auditService, mcpRegistry,
         } catch (e) {
           return err(`部署失败: ${e.message}`);
         }
-      }
-
-      // ── 1Shell Core：脚本管理 ──────────────────────────────────────
-      case 'list_scripts': {
-        if (!scriptService) return err('scriptService 未初始化');
-        try {
-          const scripts = scriptService.listScripts({ category: input.category, keyword: input.keyword });
-          if (scripts.length === 0) return ok('（脚本库为空）');
-          const lines = scripts.map(s =>
-            `id=${s.id}  name="${s.name}"  category=${s.category || '-'}  tags=[${(s.tags || []).join(',')}]  ${s.description ? '— ' + s.description.slice(0, 80) : ''}`
-          );
-          return ok(lines.join('\n'));
-        } catch (e) { return err(e.message); }
-      }
-
-      case 'run_script': {
-        if (!scriptService) return err('scriptService 未初始化');
-        const scriptId = String(input.scriptId || '').trim();
-        const hostId = String(input.hostId || '').trim();
-        if (!scriptId || !hostId) return err('scriptId 和 hostId 为必填');
-        try {
-          const result = await scriptService.runScript(scriptId, {
-            hostId,
-            params: input.params || {},
-            confirmed: true,
-            timeoutMs: input.timeout || 60000,
-          });
-          return ok(formatExec(result));
-        } catch (e) { return err(e.message); }
       }
 
       // ── 1Shell Core：探针与审计 ─────────────────────────────────────

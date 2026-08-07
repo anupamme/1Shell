@@ -327,60 +327,11 @@ function validateSkillStopPayload(payload) {
   return body;
 }
 
-// ─── 脚本库（2.0 新增） ─────────────────────────────────────────────────
-
-const SCRIPT_CATEGORIES = ['system', 'docker', 'network', 'backup', 'security', 'other'];
-const SCRIPT_RISK_LEVELS = ['safe', 'confirm', 'danger'];
-const PARAM_TYPES = ['string', 'number', 'boolean', 'select', 'password'];
-const PARAM_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-
-function validateScriptParameters(value) {
-  if (value == null) return [];
-  const arr = ensureArray(value, 'parameters 必须是数组');
-  const seen = new Set();
-
-  return arr.map((raw, index) => {
-    const item = ensureObject(raw, `parameters[${index}] 必须是对象`);
-    const name = ensureNonEmptyString(item.name, `parameters[${index}].name 不能为空`);
-    if (!PARAM_NAME_RE.test(name)) {
-      throw createValidationError(`parameters[${index}].name 只能包含字母/数字/下划线，且不能以数字开头`);
-    }
-    if (seen.has(name)) {
-      throw createValidationError(`parameters[${index}].name 重复：${name}`);
-    }
-    seen.add(name);
-
-    const type = ensureEnum(item.type || 'string', PARAM_TYPES, `parameters[${index}].type 不合法`);
-    const label = ensureOptionalString(item.label, `parameters[${index}].label 必须是字符串`).trim();
-    const required = item.required === true;
-    const defaultValue = item.default == null ? '' : String(item.default);
-
-    let options;
-    if (type === 'select') {
-      const rawOptions = ensureArray(item.options, `parameters[${index}].options 必须是数组`);
-      if (rawOptions.length === 0) {
-        throw createValidationError(`parameters[${index}].options 不能为空`);
-      }
-      options = rawOptions.map((opt) => {
-        if (opt && typeof opt === 'object') {
-          return {
-            value: String(opt.value ?? opt.label ?? ''),
-            label: String(opt.label ?? opt.value ?? ''),
-          };
-        }
-        return { value: String(opt), label: String(opt) };
-      }).filter((o) => o.value);
-      if (options.length === 0) {
-        throw createValidationError(`parameters[${index}].options 中所有项都为空`);
-      }
-    }
-
-    const result = { name, type, label: label || name, required, default: defaultValue };
-    if (item.secret === true) result.secret = true;
-    if (options) result.options = options;
-    return result;
-  });
-}
+// ─── 脚本库 ─────────────────────────────────────────────────────────────
+//
+// 4.7.6 起脚本只有 name / description / tags / content 四个字段。参数不再结构化
+// 定义，改为从 content 扫描 {{变量}} 派生（见 lib/script-placeholders.js），
+// 所以这里没有 parameters / category / riskLevel / icon 的校验。
 
 function validateScriptTags(value) {
   if (value == null) return [];
@@ -391,7 +342,7 @@ function validateScriptTags(value) {
     .slice(0, 20);
 }
 
-function validateScriptPayload(payload, { isEditing = false } = {}) {
+function validateScriptPayload(payload) {
   const body = ensureObject(payload, '脚本请求体必须是对象');
 
   const name = ensureNonEmptyString(body.name, '脚本名称不能为空');
@@ -404,59 +355,19 @@ function validateScriptPayload(payload, { isEditing = false } = {}) {
     throw createValidationError('脚本内容不能超过 100KB');
   }
 
-  const icon = ensureOptionalString(body.icon, 'icon 必须是字符串').trim();
-  if (icon.length > 8) {
-    throw createValidationError('icon 不能超过 8 字符');
-  }
-
-  const category = body.category != null && body.category !== ''
-    ? ensureEnum(body.category, SCRIPT_CATEGORIES, `category 必须是 ${SCRIPT_CATEGORIES.join('/')}`)
-    : 'other';
-
-  const riskLevel = body.riskLevel != null && body.riskLevel !== ''
-    ? ensureEnum(body.riskLevel, SCRIPT_RISK_LEVELS, `riskLevel 必须是 ${SCRIPT_RISK_LEVELS.join('/')}`)
-    : 'safe';
-
   const description = ensureOptionalString(body.description, 'description 必须是字符串');
   if (description.length > 2000) {
     throw createValidationError('description 不能超过 2000 字符');
   }
 
   const tags = validateScriptTags(body.tags);
-  const parameters = validateScriptParameters(body.parameters);
-
-  // isEditing 暂无特殊处理，预留
-  void isEditing;
 
   return {
     name,
-    icon,
-    category,
-    riskLevel,
     description: description.trim(),
     content,
     tags,
-    parameters,
   };
-}
-
-function validateScriptRunPayload(payload) {
-  const body = ensureObject(payload, '执行请求体必须是对象');
-  const hostId = ensureNonEmptyString(body.hostId, 'hostId 不能为空');
-
-  let params = {};
-  if (hasOwn(body, 'params') && body.params != null) {
-    params = ensureObject(body.params, 'params 必须是对象');
-  }
-
-  const confirmed = body.confirmed === true;
-
-  let timeoutMs = null;
-  if (hasOwn(body, 'timeoutMs') && body.timeoutMs != null && body.timeoutMs !== '') {
-    timeoutMs = ensureIntegerInRange(body.timeoutMs, { field: 'timeoutMs', min: 1000, max: 3600000 });
-  }
-
-  return { hostId, params, confirmed, timeoutMs };
 }
 
 module.exports = {
@@ -470,7 +381,6 @@ module.exports = {
   validateHostPayload,
   validateManualLocation,
   validateScriptPayload,
-  validateScriptRunPayload,
   validateSessionClosePayload,
   validateSessionCreatePayload,
   validateSessionInputPayload,

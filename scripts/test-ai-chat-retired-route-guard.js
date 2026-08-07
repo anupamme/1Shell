@@ -85,4 +85,55 @@ assert(!aiRoutes.includes('complete-inline'), 'terminal inline completion route 
 assert(!aiService.includes('requestTerminalInlineCompletion'), 'inline completion service must stay removed');
 assert(!validators.includes('validateTerminalInlineCompletionBody'), 'inline completion validator must stay removed');
 
+// 4.7.6 脚本库重构：回归"存脚本 + 在终端里注入"。Web 端服务端执行入口、批量
+// 执行、执行历史（script_runs 表）、AI 生成脚本弹窗全部退役；结构化参数定义
+// 换成从正文扫描 {{变量}}；分类/风险等级/图标/运行次数四类元数据删除。
+// 服务端执行只保留给 agent 的 run_script。
+{
+  const scriptRoutes = read('src/routes/script.routes.js');
+  const scriptService = read('src/services/script.service.js');
+  const scriptRepo = read('src/repositories/script.repository.js');
+  const scriptsUtil = read('frontend/src/utils/scripts.ts');
+  const coreTools = read('src/tools/oneshell-core.tools.js');
+  const ideTools = read('src/ide/ide.tools.js');
+  const capabilities = read('src/harness/capabilities.js');
+  const guard = read('src/harness/guard.js');
+
+  assert(!exists('frontend/src/components/scripts/RunModal.vue'), 'RunModal must stay deleted (web-side script execution retired in 4.7.6)');
+  assert(!exists('frontend/src/components/scripts/HistoryPane.vue'), 'HistoryPane must stay deleted (script_runs table dropped in 4.7.6)');
+  assert(!exists('frontend/src/components/scripts/AiGenModal.vue'), 'AiGenModal must stay deleted (superseded by agent save_script)');
+  assert(exists('lib/script-placeholders.js'), 'script placeholder scanner must exist (single source of the {{var}} regex)');
+
+  assert(!scriptRoutes.includes("'/scripts/:id/run'"), 'web script run route must stay removed');
+  assert(!scriptRoutes.includes('run-batch'), 'batch script run route must stay removed');
+  assert(!scriptRoutes.includes('script-runs'), 'script run history routes must stay removed');
+  assert(!scriptRoutes.includes('ai-generate'), 'AI script generation route must stay removed');
+  assert(scriptRoutes.includes("'/scripts/:id/render'"), 'render route must exist (terminal injection needs server-side escaping)');
+
+  assert(!scriptService.includes('runScriptBatch'), 'batch execution must stay removed');
+  assert(!scriptService.includes('checkRisk'), 'per-script riskLevel gate must stay removed');
+  assert(!scriptService.includes('DANGER_KEYWORDS'), 'keyword-based risk heuristic must stay removed');
+  assert(scriptService.includes('assessCommandRisk'), 'rendered command must still go through catastrophic-command interception');
+  assert(!scriptRepo.includes('script_runs'), 'script_runs statements must stay removed from repository');
+  assert(!scriptRepo.includes('risk_level'), 'risk_level column must stay out of the repository');
+  assert(scriptRepo.includes('placeholders'), 'repository must derive placeholders');
+
+  assert(!validators.includes('validateScriptRunPayload'), 'script run payload validator must stay removed');
+  assert(!validators.includes('validateScriptParameters'), 'structured script parameter validator must stay removed');
+  assert(!validators.includes('SCRIPT_RISK_LEVELS'), 'script risk levels must stay removed');
+
+  assert(!scriptsUtil.includes('RunHistoryEntry'), 'run history types must stay removed from frontend');
+  assert(!scriptsUtil.includes('RISK_BADGES'), 'risk badges must stay removed from frontend');
+  assert(!scriptsUtil.includes('CATEGORY_LABELS'), 'fixed categories must stay removed from frontend');
+  assert(!scriptsUtil.includes('HostInfo'), 'HostInfo must live in utils/mainConsole, not the script module');
+
+  // agent 侧：读/写/执行三件套齐全，且都通过了 capability 准入
+  assert(coreTools.includes("name: 'get_script'"), 'get_script tool must be registered');
+  assert(coreTools.includes("name: 'save_script'"), 'save_script tool must be registered');
+  assert(capabilities.includes('list_scripts'), 'list_scripts must be allowed by a capability rule (was blocked by guard before 4.7.6)');
+  assert(capabilities.includes('save_script'), 'save_script must be allowed under exec_command');
+  assert(guard.includes("toolName === 'save_script'"), 'save_script must have a readable approval card');
+  assert(!ideTools.includes("case 'run_script'"), 'shadowed run_script handler in ide.tools must stay deleted');
+}
+
 console.log('ai-chat retired route guard ok');

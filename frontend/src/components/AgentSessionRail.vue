@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from '@/components/AppIcon.vue';
 import AgentToolsRail from '@/components/AgentToolsRail.vue';
 import { useFileBrowser, type DirItem } from '@/composables/useFileBrowser';
-import type { HostInfo } from '@/utils/scripts';
+import type { HostInfo } from '@/utils/mainConsole';
 import { formatOsInfo, isLocalHost } from '@/utils/mainConsole';
 import type { MainHost } from '@/utils/mainConsole';
 

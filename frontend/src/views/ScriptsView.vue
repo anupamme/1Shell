@@ -1,25 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, shallowRef, watch } from 'vue';
-import AiGenModal from '@/components/scripts/AiGenModal.vue';
 import AppIcon from '@/components/AppIcon.vue';
-import HistoryPane from '@/components/scripts/HistoryPane.vue';
-import RunModal from '@/components/scripts/RunModal.vue';
 import ScriptDetail from '@/components/scripts/ScriptDetail.vue';
 import ScriptList from '@/components/scripts/ScriptList.vue';
 import { useApiClient } from '@/composables/useApiClient';
 import { useConfirm } from '@/composables/useConfirm';
 import { getCachedPageState, isPageStateFresh, readStorageState, setCachedPageState, writeStorageState } from '@/composables/usePageState';
 import { useNotifyStore } from '@/stores/notify';
-import {
-  CATEGORIES,
-  deepClone,
-  makeDraftScript,
-  type HostInfo,
-  type HostsListResponse,
-  type ScriptCategory,
-  type ScriptInfo,
-  type ScriptsListResponse,
-} from '@/utils/scripts';
+import { deepClone, makeDraftScript, type ScriptInfo, type ScriptsListResponse } from '@/utils/scripts';
 
 const { requestJson } = useApiClient();
 const notify = useNotifyStore();
@@ -27,52 +15,37 @@ const { confirm } = useConfirm();
 
 interface ScriptsPrefs {
   currentId: string | null;
-  categoryFilter: 'all' | ScriptCategory;
   keyword: string;
-  view: 'scripts' | 'history';
+  activeTag: string;
 }
 
-interface ScriptsCache {
-  scripts: ScriptInfo[];
-  hosts: HostInfo[];
-}
-
-const SCRIPTS_PREFS_KEY = '1shell.scripts.prefs.v1';
-const SCRIPTS_CACHE_KEY = 'scripts.page.cache.v1';
+const SCRIPTS_PREFS_KEY = '1shell.scripts.prefs.v2';
+const SCRIPTS_CACHE_KEY = 'scripts.page.cache.v2';
 const SCRIPTS_CACHE_TTL_MS = 45_000;
 const savedPrefs = readStorageState<ScriptsPrefs>(SCRIPTS_PREFS_KEY, {
   currentId: null,
-  categoryFilter: 'all',
   keyword: '',
-  view: 'scripts',
+  activeTag: '',
 });
 
 const scripts = shallowRef<ScriptInfo[]>([]);
-const hosts = ref<HostInfo[]>([]);
 const currentId = ref<string | null>(savedPrefs.currentId);
 const currentDraft = ref<ScriptInfo | null>(null);
 const isNew = ref(false);
-const categoryFilter = ref<'all' | ScriptCategory>(savedPrefs.categoryFilter);
 const keyword = ref(savedPrefs.keyword);
-const view = ref<'scripts' | 'history'>(savedPrefs.view);
+const activeTag = ref(savedPrefs.activeTag);
 const saving = ref(false);
-const runModalOpen = ref(false);
-const aiGenModalOpen = ref(false);
 
-function saveScriptsPrefs(): void {
+function savePrefs(): void {
   writeStorageState<ScriptsPrefs>(SCRIPTS_PREFS_KEY, {
     currentId: currentId.value,
-    categoryFilter: categoryFilter.value,
     keyword: keyword.value,
-    view: view.value,
+    activeTag: activeTag.value,
   });
 }
 
-function saveScriptsCache(): void {
-  setCachedPageState<ScriptsCache>(SCRIPTS_CACHE_KEY, {
-    scripts: scripts.value,
-    hosts: hosts.value,
-  });
+function saveCache(): void {
+  setCachedPageState<ScriptInfo[]>(SCRIPTS_CACHE_KEY, scripts.value);
 }
 
 function syncCurrentDraft(): void {
@@ -82,37 +55,31 @@ function syncCurrentDraft(): void {
   if (!current) currentId.value = null;
 }
 
-function restoreScriptsCache(): boolean {
-  const entry = getCachedPageState<ScriptsCache>(SCRIPTS_CACHE_KEY);
+function restoreCache(): boolean {
+  const entry = getCachedPageState<ScriptInfo[]>(SCRIPTS_CACHE_KEY);
   if (!entry) return false;
-  scripts.value = entry.value.scripts || [];
-  hosts.value = entry.value.hosts || [];
+  scripts.value = entry.value || [];
   syncCurrentDraft();
   return true;
 }
 
-const categoryCounts = computed(() => {
-  const c: Record<string, number> = { all: scripts.value.length };
+// 所有脚本用过的标签，带出现次数，供左侧筛选
+const allTags = computed(() => {
+  const counts = new Map<string, number>();
   for (const s of scripts.value) {
-    const cat = s.category || 'other';
-    c[cat] = (c[cat] || 0) + 1;
+    for (const tag of s.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1);
   }
-  return c;
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 });
 
-const totalCount = computed(() => {
+const visibleCount = computed(() => {
   const kw = keyword.value.trim().toLowerCase();
   return scripts.value.filter((s) => {
-    if (categoryFilter.value !== 'all' && s.category !== categoryFilter.value) return false;
+    if (activeTag.value && !(s.tags || []).includes(activeTag.value)) return false;
     if (!kw) return true;
     const hay = `${s.name || ''} ${s.description || ''} ${(s.tags || []).join(' ')}`.toLowerCase();
     return hay.includes(kw);
   }).length;
-});
-
-const runModalScript = computed(() => {
-  if (!currentId.value) return null;
-  return scripts.value.find((s) => s.id === currentId.value) || null;
 });
 
 async function loadScripts(): Promise<void> {
@@ -120,20 +87,10 @@ async function loadScripts(): Promise<void> {
     const resp = await requestJson<ScriptsListResponse>('/api/scripts');
     scripts.value = Array.isArray(resp.scripts) ? resp.scripts : [];
     syncCurrentDraft();
-    saveScriptsCache();
+    saveCache();
   } catch (err) {
     notify.error(err instanceof Error ? err.message : String(err), 5000);
     scripts.value = [];
-  }
-}
-
-async function loadHosts(): Promise<void> {
-  try {
-    const resp = await requestJson<HostsListResponse>('/api/hosts');
-    hosts.value = Array.isArray(resp.hosts) ? resp.hosts : [];
-    saveScriptsCache();
-  } catch {
-    hosts.value = [];
   }
 }
 
@@ -143,43 +100,41 @@ function selectScript(id: string): void {
   currentId.value = id;
   isNew.value = false;
   currentDraft.value = deepClone(s);
-  if (view.value === 'history') view.value = 'scripts';
-  saveScriptsPrefs();
+  savePrefs();
 }
 
 function newScript(): void {
   currentId.value = null;
   isNew.value = true;
   currentDraft.value = makeDraftScript();
-  if (view.value === 'history') view.value = 'scripts';
-  saveScriptsPrefs();
+  savePrefs();
 }
 
 async function onSave(draft: ScriptInfo): Promise<void> {
   if (!draft.name.trim()) { notify.warn('请填写脚本名称'); return; }
   if (!draft.content.trim()) { notify.warn('请填写脚本内容'); return; }
 
+  const body = JSON.stringify({
+    name: draft.name,
+    description: draft.description || '',
+    tags: draft.tags || [],
+    content: draft.content,
+  });
+
   saving.value = true;
   try {
     if (isNew.value) {
-      const payload: Partial<ScriptInfo> = { ...draft };
-      delete payload.id;
-      const resp = await requestJson<{ ok: boolean; script: ScriptInfo }>('/api/scripts', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+      const resp = await requestJson<{ ok: boolean; script: ScriptInfo }>('/api/scripts', { method: 'POST', body });
       const saved = resp.script;
       scripts.value = [saved, ...scripts.value];
       isNew.value = false;
       currentId.value = saved.id;
       currentDraft.value = deepClone(saved);
-      saveScriptsPrefs();
-      saveScriptsCache();
       notify.success('脚本已创建');
     } else if (currentId.value) {
       const resp = await requestJson<{ ok: boolean; script: ScriptInfo }>(
         `/api/scripts/${encodeURIComponent(currentId.value)}`,
-        { method: 'PUT', body: JSON.stringify(draft) },
+        { method: 'PUT', body },
       );
       const saved = resp.script;
       const idx = scripts.value.findIndex((s) => s.id === currentId.value);
@@ -189,10 +144,10 @@ async function onSave(draft: ScriptInfo): Promise<void> {
         scripts.value = next;
       }
       currentDraft.value = deepClone(saved);
-      saveScriptsPrefs();
-      saveScriptsCache();
       notify.success('脚本已保存');
     }
+    savePrefs();
+    saveCache();
   } catch (err) {
     notify.error(err instanceof Error ? err.message : String(err), 5000);
   } finally {
@@ -220,175 +175,110 @@ async function onDelete(): Promise<void> {
     scripts.value = scripts.value.filter((s) => s.id !== currentId.value);
     currentId.value = null;
     currentDraft.value = null;
-    saveScriptsPrefs();
-    saveScriptsCache();
+    savePrefs();
+    saveCache();
     notify.success('脚本已删除');
   } catch (err) {
     notify.error(err instanceof Error ? err.message : String(err), 5000);
   }
 }
 
-function onRunOpen(): void {
-  if (isNew.value || !currentId.value) {
-    notify.warn('请先保存脚本后再执行');
-    return;
-  }
-  runModalOpen.value = true;
-}
-
-function onRanComplete(scriptId: string, count: number): void {
-  const idx = scripts.value.findIndex((s) => s.id === scriptId);
-  if (idx !== -1) {
-    const next = scripts.value.slice();
-    next[idx] = { ...next[idx], runCount: (next[idx].runCount || 0) + count };
-    scripts.value = next;
+async function onCopy(content: string): Promise<void> {
+  try {
+    await navigator.clipboard?.writeText(content);
+    notify.success('脚本内容已复制');
+  } catch {
+    notify.warn('复制失败，请手动选中复制');
   }
 }
 
-function onAiGenerated(scriptData: Partial<ScriptInfo>): void {
-  const draft = makeDraftScript();
-  Object.assign(draft, {
-    name: scriptData.name || draft.name,
-    icon: scriptData.icon || draft.icon,
-    category: scriptData.category || draft.category,
-    tags: scriptData.tags || [],
-    riskLevel: scriptData.riskLevel || 'safe',
-    description: scriptData.description || '',
-    content: scriptData.content || '',
-    parameters: scriptData.parameters || [],
-  });
-  currentId.value = null;
-  isNew.value = true;
-  currentDraft.value = draft;
-  if (view.value === 'history') view.value = 'scripts';
+function toggleTag(tag: string): void {
+  activeTag.value = activeTag.value === tag ? '' : tag;
+  savePrefs();
 }
 
-function showHistory(): void { view.value = 'history'; saveScriptsPrefs(); }
-function backFromHistory(): void { view.value = 'scripts'; saveScriptsPrefs(); }
-
-function onExportClick(): void {
-  notify.info('导入/导出功能将在 P1 阶段上线');
-}
-
-watch([categoryFilter, keyword], saveScriptsPrefs);
+watch(keyword, savePrefs);
 
 onMounted(() => {
-  const restored = restoreScriptsCache();
+  const restored = restoreCache();
   if (!restored || !isPageStateFresh(SCRIPTS_CACHE_KEY, SCRIPTS_CACHE_TTL_MS)) {
     void loadScripts();
-    void loadHosts();
   }
 });
 </script>
 
 <template>
-  <div class="flex flex-col flex-1 min-w-0 h-full p-2 gap-2">
-    <header class="shrink-0 h-14 flex items-center px-5 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm">
+  <div class="flex flex-col flex-1 min-w-0 h-full p-3 gap-3">
+    <header class="shrink-0 h-[52px] flex items-center px-4 bg-shell-panel dark:bg-[#111827] rounded-xl border border-slate-200/80 dark:border-[#1e293b] shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <div class="flex items-center gap-3 shrink-0">
-        <span class="w-9 h-9 rounded-xl bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
-          <AppIcon name="terminal" :size="20" />
+        <span class="w-8 h-8 rounded-lg bg-blue-600/10 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300 flex items-center justify-center">
+          <AppIcon name="terminal" :size="17" />
         </span>
         <div>
-          <div class="text-base font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-            脚本库
-            <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300 font-semibold">BETA</span>
-          </div>
-          <div class="text-[11px] text-slate-400">沉淀、复用、审计地操作主机</div>
+          <div class="text-[15px] font-semibold text-slate-800 dark:text-slate-100 leading-tight">脚本库</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 leading-tight mt-0.5">存常用脚本，在终端里一键注入；1Shell AI 也能读写和运行它们</div>
         </div>
       </div>
       <div class="flex-1"></div>
-      <div class="flex items-center gap-2 shrink-0">
-        <button
-          type="button"
-          class="h-8 px-3 rounded-lg border border-blue-200 dark:border-blue-500/30 bg-blue-50 dark:bg-blue-500/10 text-xs font-semibold text-blue-600 dark:text-blue-300 hover:border-blue-400 hover:bg-blue-100 transition-all"
-          @click="aiGenModalOpen = true"
-        >✦ AI 生成</button>
-        <button
-          type="button"
-          class="h-8 px-3 rounded-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white text-xs font-semibold shadow-md hover:shadow-lg transition-all"
-          @click="newScript"
-        >+ 新建脚本</button>
-      </div>
+      <button
+        type="button"
+        class="h-8 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-medium shadow-sm transition-colors shrink-0 flex items-center gap-1.5"
+        @click="newScript"
+      >
+        <span class="text-sm leading-none">＋</span>新建脚本
+      </button>
     </header>
 
-    <div class="flex-1 min-h-0 flex gap-2">
-      <aside class="w-48 shrink-0 flex flex-col bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm overflow-hidden">
-        <div class="px-4 py-3 border-b border-slate-100 dark:border-[#1e293b] flex items-center justify-between">
-          <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">标签分类</span>
-          <button type="button" class="text-[10px] text-blue-500 hover:underline" title="管理标签">+ 新标签</button>
-        </div>
-        <div class="flex-1 overflow-y-auto p-2 flex flex-col gap-1">
-          <button
-            v-for="c in CATEGORIES"
-            :key="c.value"
-            type="button"
-            class="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border transition-colors"
-            :class="categoryFilter === c.value
-              ? 'text-blue-600 bg-blue-50 border-blue-200 dark:bg-blue-500/15 dark:border-blue-500/30 dark:text-blue-300'
-              : 'text-slate-500 dark:text-slate-400 border-transparent hover:bg-slate-50 dark:hover:bg-slate-800'"
-            @click="categoryFilter = c.value"
-          >
-            <AppIcon :name="c.icon" :size="14" />
-            <span>{{ c.label }}</span>
-            <span class="ml-auto text-[10px] text-slate-400">{{ categoryCounts[c.value] || 0 }}</span>
-          </button>
-        </div>
-        <div class="border-t border-slate-100 dark:border-[#1e293b] p-2 flex flex-col gap-1">
-          <button type="button" class="flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800" @click="showHistory">
-            <AppIcon name="history" :size="14" /><span>执行历史</span>
-          </button>
-          <button type="button" class="flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800" @click="onExportClick">
-            <AppIcon name="download" :size="14" /><span>导入 / 导出</span>
-          </button>
-        </div>
-      </aside>
-
-      <aside class="w-80 shrink-0 flex flex-col bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm overflow-hidden">
-        <div class="shrink-0 p-2.5 border-b border-slate-100 dark:border-[#1e293b] flex items-center gap-2">
+    <div class="flex-1 min-h-0 flex gap-3">
+      <aside class="w-72 shrink-0 flex flex-col bg-shell-panel dark:bg-[#111827] rounded-xl border border-slate-200/80 dark:border-[#1e293b] shadow-[0_1px_2px_rgba(15,23,42,0.04)] overflow-hidden">
+        <div class="shrink-0 p-2.5 border-b border-slate-100 dark:border-[#1e293b]">
           <input
             v-model="keyword"
             type="text"
-            placeholder="搜索脚本、标签、描述…"
-            class="flex-1 h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] text-xs text-slate-700 dark:text-slate-200 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+            placeholder="搜索名称、描述、标签…"
+            class="w-full h-8 px-3 rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] text-xs text-slate-700 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-500/10 transition-shadow"
           />
-          <button type="button" class="h-8 w-8 flex items-center justify-center rounded-lg border border-slate-200 dark:border-[#1e293b] bg-slate-50 dark:bg-[#0b1324] text-slate-400 hover:text-blue-500 hover:border-blue-300 text-xs" title="排序">⇅</button>
         </div>
+
+        <div v-if="allTags.length > 0" class="shrink-0 px-2.5 py-2 border-b border-slate-100 dark:border-[#1e293b] flex items-center gap-1 flex-wrap">
+          <button
+            v-for="[tag, count] in allTags"
+            :key="tag"
+            type="button"
+            class="h-6 px-2.5 rounded-full border text-[10px] font-medium transition-colors"
+            :class="activeTag === tag
+              ? 'border-blue-300 bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:border-blue-500/30 dark:text-blue-300'
+              : 'border-slate-200 dark:border-[#1e293b] text-slate-500 dark:text-slate-400 hover:border-blue-300 hover:text-blue-500'"
+            @click="toggleTag(tag)"
+          >{{ tag }} <span class="opacity-60">{{ count }}</span></button>
+        </div>
+
         <ScriptList
           :scripts="scripts"
           :current-id="currentId"
-          :category="categoryFilter"
           :keyword="keyword"
+          :active-tag="activeTag"
           @select="selectScript"
+          @new="newScript"
         />
-        <div class="shrink-0 px-3 py-2 border-t border-slate-100 dark:border-[#1e293b] flex items-center justify-between text-[10px] text-slate-400">
-          <span>共 <b class="text-slate-600 dark:text-slate-300">{{ totalCount }}</b> 个脚本</span>
+
+        <div class="shrink-0 px-3.5 py-2.5 border-t border-slate-100 dark:border-[#1e293b] flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400">
+          <span>共 <b class="text-slate-700 dark:text-slate-300">{{ visibleCount }}</b> 个脚本</span>
           <span>按更新时间排序</span>
         </div>
       </aside>
 
-      <main class="flex-1 flex flex-col min-w-0 bg-shell-panel dark:bg-[#111827] rounded-2xl border border-slate-200 dark:border-[#1e293b] shadow-sm overflow-hidden">
-        <HistoryPane v-if="view === 'history'" @back="backFromHistory" />
+      <main class="flex-1 flex flex-col min-w-0 bg-shell-panel dark:bg-[#111827] rounded-xl border border-slate-200/80 dark:border-[#1e293b] shadow-[0_1px_2px_rgba(15,23,42,0.04)] overflow-hidden">
         <ScriptDetail
-          v-else
           :script="currentDraft"
           :is-new="isNew"
           :saving="saving"
           @save="onSave"
           @delete="onDelete"
-          @run="onRunOpen"
+          @copy="onCopy"
+          @new="newScript"
         />
       </main>
     </div>
-
-    <RunModal
-      v-model:open="runModalOpen"
-      :script="runModalScript"
-      :hosts="hosts"
-      @ran="onRanComplete"
-    />
-    <AiGenModal
-      v-model:open="aiGenModalOpen"
-      @generated="onAiGenerated"
-    />
   </div>
 </template>

@@ -1002,7 +1002,7 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
 const READONLY_TOOLS = new Set([
   'list_hosts', 'list_artifacts', 'query_format',
   'verify_outcome',
-  'reload_registry', 'list_mcp_servers', 'list_scripts', 'query_audit',
+  'reload_registry', 'list_mcp_servers', 'list_scripts', 'get_script', 'query_audit',
   'query_probe', 'list_probes', 'get_probe', 'get_probe_samples',
   'get_probe_timeseries', 'get_probe_traffic', 'list_probe_alerts',
   'list_remote_dir', 'read_remote_file',
@@ -2897,7 +2897,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     }
     const writeTools = new Set([
       'execute_command',
-      'run_script', 'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
+      'run_script', 'save_script', 'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
       'upload_file', 'download_file', 'add_mcp_server',
       'remove_mcp_server', 'deploy_local_mcp', 'ack_probe_alert', 'install_probe_agent',
       'restart_probe_agent', 'uninstall_probe_agent', 'invoke_claude_code',
@@ -2916,9 +2916,20 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       }
       if (!allowsValue(value, policy.allowedHosts)) return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许访问主机: ${value}`);
     }
-    if (tc.name === 'run_script') {
-      const scriptId = String(input.scriptId || '').trim();
-      if (scriptId && !allowsValue(scriptId, policy.allowedScripts)) return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许运行脚本: ${scriptId}`);
+    // 脚本 id 白名单。注意字段名不统一：run_script 用 scriptId，get_script /
+    // save_script 用 id —— 照抄单一字段会让新工具静默漏检。
+    const scriptIdField = { run_script: 'scriptId', get_script: 'id', save_script: 'id' }[tc.name];
+    if (scriptIdField) {
+      const scriptId = String(input[scriptIdField] || '').trim();
+      if (scriptId && !allowsValue(scriptId, policy.allowedScripts)) {
+        return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许操作脚本: ${scriptId}`);
+      }
+      // save_script 新建分支没有 id 可比对，id 白名单表达不了"允许创建未知 id"，
+      // 有非通配白名单时直接拒（fail-closed）。
+      if (!scriptId && tc.name === 'save_script'
+          && policy.allowedScripts.length > 0 && !policy.allowedScripts.includes('*')) {
+        return deniedByPolicy(`${toolPolicyLabel(policy)} 不允许新建脚本`);
+      }
     }
     const pathFieldsByTool = {
       list_remote_dir: ['path'],

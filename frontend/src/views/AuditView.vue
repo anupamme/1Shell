@@ -9,6 +9,7 @@ const PAGE_SIZE = 20;
 const ACTION_LABELS: Record<string, string> = {
   bridge_exec: '命令执行',
   script_run: '脚本执行',
+  script_save: '脚本保存',
   host_create: '新增主机',
   host_update: '更新主机',
   host_delete: '删除主机',
@@ -19,6 +20,7 @@ const ACTION_LABELS: Record<string, string> = {
 const ACTION_BADGES: Record<string, string> = {
   bridge_exec:         'bg-blue-50 text-blue-600 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20',
   script_run:          'bg-purple-50 text-purple-600 border-purple-200 dark:bg-purple-500/10 dark:text-purple-300 dark:border-purple-500/20',
+  script_save:         'bg-indigo-50 text-indigo-600 border-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-300 dark:border-indigo-500/20',
   host_create:         'bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20',
   host_update:         'bg-amber-50 text-amber-600 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20',
   host_delete:         'bg-rose-50 text-rose-600 border-rose-200 dark:bg-rose-500/10 dark:text-rose-300 dark:border-rose-500/20',
@@ -517,6 +519,7 @@ onMounted(() => {
               >
                 <option value="">全部</option>
                 <option value="web_ui">Web UI</option>
+                <option value="ide">1Shell AI</option>
                 <option value="bridge_api">Bridge API</option>
                 <option value="mcp">MCP</option>
                 <option value="script_run">脚本执行</option>

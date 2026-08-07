@@ -102,10 +102,10 @@ function toolDisplayName(tool: IdeToolTimelineItem): string {
     probe_diag_ping: 'Ping 诊断',
     probe_diag_http: 'HTTP 诊断',
     probe_diag_dns: 'DNS 诊断',
-    preview_ai_task: '预览任务',
-    create_ai_task: '保存任务',
-    update_ai_task: '更新任务',
-    get_ai_task: '读取任务',
+    list_scripts: '列出脚本',
+    get_script: '读取脚本',
+    save_script: '保存脚本',
+    run_script: '运行脚本',
   };
   if (exactNames[name]) return exactNames[name];
   if (name.includes('execute') || name.includes('command') || name === 'shell') return '执行命令';
@@ -138,6 +138,7 @@ function toolIcon(tool: IdeToolTimelineItem): string {
   if (name.includes('host') || name.includes('server')) return 'server';
   if (name.includes('download')) return 'download';
   if (name.includes('upload')) return 'cloud';
+  if (name.includes('script')) return 'terminal';
   if (name.includes('file') || name.includes('dir') || name.includes('list')) return 'folder';
   if (name.includes('approval') || name.includes('permission')) return 'shield';
   if (name.includes('secret')) return 'lock';

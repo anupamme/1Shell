@@ -1,9 +1,9 @@
 'use strict';
 
 const express = require('express');
-const multer = require('multer');
+const Busboy = require('busboy');
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+const UPLOAD_MAX_BYTES = 512 * 1024 * 1024; // 上传大小上限
 
 // 下载接口按扩展名回真实 Content-Type：前端图片预览走 fetch→blob→<img>，
 // blob 类型若是 octet-stream 浏览器会拒绝解码（裂图）。仅映射预览需要的类型，
@@ -95,22 +95,79 @@ function createFileRouter({ fileService }) {
   /**
    * POST /api/files/upload
    * Body: multipart/form-data { hostId, dirPath, file }
+   *
+   * 流式转发到目标主机：multipart 解析边收边传，不把整个文件读进内存。
+   * 字段顺序要求 hostId/dirPath 在 file 之前（浏览器 FormData 按 append 顺序发送）。
    */
-  router.post('/files/upload', upload.single('file'), async (req, res, next) => {
+  router.post('/files/upload', (req, res, next) => {
+    let busboy;
     try {
-      const hostId = req.body.hostId || 'local';
-      const dirPath = req.body.dirPath;
-      if (!dirPath) {
-        return res.status(400).json({ error: '缺少 dirPath 参数' });
-      }
-      if (!req.file) {
-        return res.status(400).json({ error: '缺少上传文件' });
-      }
-      const result = await fileService.uploadFile(hostId, dirPath, req.file.originalname, req.file.buffer);
-      res.json(result);
+      busboy = Busboy({ headers: req.headers, limits: { files: 1, fileSize: UPLOAD_MAX_BYTES } });
     } catch (err) {
-      next(err);
+      return res.status(400).json({ error: `解析上传请求失败: ${err.message}` });
     }
+
+    const fields = {};
+    let handled = false;
+    let uploadPromise = null;
+    let sizeExceeded = false;
+
+    function failOnce(status, message) {
+      if (handled) return;
+      handled = true;
+      req.unpipe(busboy);
+      res.status(status).json({ error: message });
+    }
+
+    busboy.on('field', (name, value) => { fields[name] = value; });
+
+    busboy.on('file', (name, fileStream, info) => {
+      const hostId = fields.hostId || 'local';
+      const dirPath = fields.dirPath;
+      if (!dirPath) {
+        fileStream.resume();
+        return failOnce(400, '缺少 dirPath 参数');
+      }
+      const declaredSize = Number(req.headers['x-1shell-file-size']);
+      const expectedSize = Number.isFinite(declaredSize) && declaredSize > 0 ? declaredSize : null;
+
+      fileStream.on('limit', () => {
+        sizeExceeded = true;
+        fileStream.unpipe?.();
+        fileStream.destroy(new Error(`文件超过上传上限 ${Math.floor(UPLOAD_MAX_BYTES / 1024 / 1024)}MB`));
+      });
+
+      uploadPromise = fileService
+        .uploadFileStream(hostId, dirPath, info.filename, fileStream, expectedSize)
+        .then((result) => {
+          if (handled) return;
+          handled = true;
+          res.json(result);
+        })
+        .catch((err) => {
+          if (handled) return;
+          handled = true;
+          if (sizeExceeded) {
+            res.status(413).json({ error: `文件超过上传上限 ${Math.floor(UPLOAD_MAX_BYTES / 1024 / 1024)}MB` });
+          } else {
+            next(err);
+          }
+        });
+    });
+
+    busboy.on('error', (err) => {
+      if (handled) return;
+      handled = true;
+      next(err);
+    });
+
+    busboy.on('close', () => {
+      if (!uploadPromise && !handled) {
+        failOnce(400, '缺少上传文件');
+      }
+    });
+
+    req.pipe(busboy);
   });
 
   /**

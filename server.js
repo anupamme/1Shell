@@ -331,7 +331,7 @@ app.use('/api', createFileRouter({ fileService }));
 app.use('/api', createIpFilterRouter({ ipFilterService }));
 app.use('/api', createIdeSessionRouter({ ideService }));
 app.use('/api', createProtocolAgentRouter({ protocolAgentService }));
-app.use('/api', createScriptRouter({ scriptService, aiService }));
+app.use('/api', createScriptRouter({ scriptService }));
 app.use('/api', createHostCapabilityRouter({ hostCapabilityService }));
 app.use('/api', createSkillRouter({ libraryService, skillRunner, skillImportStager, aiService }));
 app.use('/api', createMcpRegistryRouter({ mcpRegistry, localMcpService, localMcpDeployer }));

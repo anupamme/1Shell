@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
-const { Readable } = require('stream');
+const { Readable, Writable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { DATA_DIR } = require('../config/env');
 
@@ -193,10 +193,23 @@ function createFileService({ hostService, probeAgentService = null }) {
   const DEFAULT_DOWNLOAD_CHUNK_SIZE = 256 * 1024;
   const DEFAULT_DOWNLOAD_BUFFERED_CHUNKS = 64;
 
+  // 上传与下载对称调优：ssh2 默认 32KB 分块且串行写，跨洋链路上每块要等一个完整
+  // RTT，50MB 需要 1600 次往返，实测只有 ~100KB/s 且会中途停止推进。
+  const DEFAULT_UPLOAD_CONCURRENCY = 32;
+  const DEFAULT_UPLOAD_CHUNK_SIZE = 256 * 1024;
+
   function clampInt(value, fallback, min, max) {
     const n = Number(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.max(min, Math.min(max, Math.floor(n)));
+  }
+
+  function getSftpWriteTuning(sftp) {
+    const maxWriteLen = clampInt(sftp?._maxWriteLen, DEFAULT_UPLOAD_CHUNK_SIZE, 16 * 1024, DEFAULT_UPLOAD_CHUNK_SIZE);
+    const envChunkSize = clampInt(process.env.ONESHELL_SFTP_UPLOAD_CHUNK_SIZE, DEFAULT_UPLOAD_CHUNK_SIZE, 16 * 1024, DEFAULT_UPLOAD_CHUNK_SIZE);
+    const chunkSize = Math.min(envChunkSize, maxWriteLen);
+    const concurrency = clampInt(process.env.ONESHELL_SFTP_UPLOAD_CONCURRENCY, DEFAULT_UPLOAD_CONCURRENCY, 1, 128);
+    return { chunkSize, concurrency };
   }
 
   function getSftpReadTuning(sftp) {
@@ -303,6 +316,39 @@ function createFileService({ hostService, probeAgentService = null }) {
     ], {}, action);
   }
 
+  // 部分 sshd 在 exec 通道上不派发 EOF/CLOSE（远端命令已退出、exit 事件已到，
+  // 但 close 事件可能永久不来，见 uploadRemoteViaExec 实测）。只等 close 会让
+  // promise 永不结算、连接泄漏。统一改为：exit 事件驱动 + close 兜底——exit 到达
+  // 后最多再等 GRACE 毫秒收尾（flush stdout/stderr），超时按 exit code 结算。
+  const EXEC_CLOSE_GRACE_MS = 1000;
+
+  function waitForExecExit(execStream, { graceMs = EXEC_CLOSE_GRACE_MS } = {}) {
+    return new Promise((resolve, reject) => {
+      let exitCode = null;
+      let settled = false;
+      let graceTimer = null;
+
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(graceTimer);
+        resolve(exitCode);
+      };
+
+      execStream.on('exit', (code) => {
+        exitCode = code;
+        if (!graceTimer) graceTimer = setTimeout(settle, graceMs);
+      });
+      execStream.on('close', settle);
+      execStream.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(graceTimer);
+        reject(err);
+      });
+    });
+  }
+
   async function runRemoteShell(hostId, command, action) {
     const { client, proxyClient } = await hostService.connectToHost(hostId, { readyTimeout: 30000, probeOs: false });
     let closed = false;
@@ -324,7 +370,7 @@ function createFileService({ hostService, probeAgentService = null }) {
         const stderrChunks = [];
         stream.on('data', (chunk) => { stdoutChunks.push(chunk); });
         stream.stderr?.on('data', (chunk) => { stderrChunks.push(chunk); });
-        stream.on('close', (code) => {
+        waitForExecExit(stream).then((code) => {
           closeConnection();
           const stdout = Buffer.concat(stdoutChunks).toString('utf8');
           const stderr = Buffer.concat(stderrChunks).toString('utf8');
@@ -334,8 +380,7 @@ function createFileService({ hostService, probeAgentService = null }) {
             return;
           }
           resolve({ stdout, stderr });
-        });
-        stream.on('error', (streamErr) => {
+        }, (streamErr) => {
           closeConnection();
           reject(new Error(`${action}失败: ${streamErr.message}`));
         });
@@ -482,6 +527,157 @@ function createFileService({ hostService, probeAgentService = null }) {
         return;
       }
       scheduleReads();
+    });
+
+    return stream;
+  }
+
+  /**
+   * 并发 SFTP 写流：把入流数据聚合成 chunkSize 的块，按显式偏移并发下发多个 WRITE
+   * 包。SFTP 的 WRITE 自带 offset，乱序完成不影响结果，因此可以用流水线掩盖 RTT。
+   */
+  function createParallelSftpWriteStream(sftp, filePath, options = {}) {
+    const chunkSize = clampInt(options.chunkSize, DEFAULT_UPLOAD_CHUNK_SIZE, 16 * 1024, DEFAULT_UPLOAD_CHUNK_SIZE);
+    const concurrency = clampInt(options.concurrency, DEFAULT_UPLOAD_CONCURRENCY, 1, 128);
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+
+    let handle = null;
+    let opened = false;
+    let closing = false;
+    let failed = false;
+    let streamError = null;
+    let fileOffset = 0;
+    let inflight = 0;
+    let carry = null;
+    const queue = [];
+    let writeCb = null;
+    let finalCb = null;
+
+    const stream = new Writable({
+      highWaterMark: Math.max(1024 * 1024, chunkSize * 4),
+      write(chunk, encoding, cb) {
+        if (failed) {
+          cb(streamError || new Error('上传已中断'));
+          return;
+        }
+        enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+        if (!opened) {
+          writeCb = cb;
+          return;
+        }
+        dispatch();
+        if (inflight >= concurrency) writeCb = cb;
+        else cb();
+      },
+      final(cb) {
+        if (failed) {
+          cb(streamError || new Error('上传已中断'));
+          return;
+        }
+        if (carry && carry.length > 0) {
+          queue.push(carry);
+          carry = null;
+        }
+        finalCb = cb;
+        if (!opened) return;
+        dispatch();
+        maybeFinish();
+      },
+      destroy(err, cb) {
+        if (err && !streamError) streamError = err;
+        failed = failed || Boolean(err);
+        closeHandle(() => cb(err));
+      },
+    });
+
+    function enqueue(buf) {
+      carry = carry ? Buffer.concat([carry, buf]) : buf;
+      while (carry.length >= chunkSize) {
+        queue.push(carry.subarray(0, chunkSize));
+        carry = carry.subarray(chunkSize);
+      }
+    }
+
+    function fail(err) {
+      if (failed) return;
+      failed = true;
+      streamError = err;
+      const cb = writeCb || finalCb;
+      writeCb = null;
+      finalCb = null;
+      if (cb) cb(err);
+      else if (!stream.destroyed) stream.destroy(err);
+    }
+
+    function closeHandle(cb = () => {}) {
+      if (!handle || closing) {
+        cb();
+        return;
+      }
+      const h = handle;
+      handle = null;
+      closing = true;
+      sftp.close(h, () => {
+        closing = false;
+        cb();
+      });
+    }
+
+    function releaseWriter() {
+      if (!writeCb || failed || inflight >= concurrency) return;
+      const cb = writeCb;
+      writeCb = null;
+      cb();
+    }
+
+    function maybeFinish() {
+      if (!finalCb || failed) return;
+      if (queue.length > 0 || inflight > 0) return;
+      const cb = finalCb;
+      finalCb = null;
+      closeHandle(() => cb());
+    }
+
+    function dispatch() {
+      if (failed || !handle) return;
+      while (inflight < concurrency && queue.length > 0) {
+        const buf = queue.shift();
+        const offset = fileOffset;
+        fileOffset += buf.length;
+        inflight += 1;
+        sftp.write(handle, buf, 0, buf.length, offset, (err) => {
+          inflight -= 1;
+          if (failed) return;
+          if (err) {
+            fail(new Error(`SFTP write failed: ${err.message}`));
+            return;
+          }
+          if (onProgress) onProgress(buf.length);
+          dispatch();
+          releaseWriter();
+          maybeFinish();
+        });
+      }
+      releaseWriter();
+    }
+
+    sftp.open(filePath, 'w', (err, openedHandle) => {
+      if (failed || stream.destroyed) {
+        if (openedHandle) {
+          handle = openedHandle;
+          closeHandle();
+        }
+        return;
+      }
+      if (err) {
+        fail(new Error(`SFTP open failed: ${err.message}`));
+        return;
+      }
+      handle = openedHandle;
+      opened = true;
+      dispatch();
+      releaseWriter();
+      maybeFinish();
     });
 
     return stream;
@@ -786,7 +982,7 @@ function createFileService({ hostService, probeAgentService = null }) {
         const stderrChunks = [];
         stream.on('data', (chunk) => { stdoutChunks.push(chunk); });
         stream.stderr?.on('data', (chunk) => { stderrChunks.push(chunk); });
-        stream.on('close', (code) => {
+        waitForExecExit(stream).then((code) => {
           const stdout = Buffer.concat(stdoutChunks).toString('utf8');
           const stderr = Buffer.concat(stderrChunks).toString('utf8');
           if (code !== 0) {
@@ -798,8 +994,7 @@ function createFileService({ hostService, probeAgentService = null }) {
           const size = parsePositiveSize(stdout);
           if (size === null) return reject(new Error(`远程文件大小解析失败: ${stdout.trim()}`));
           resolve(size);
-        });
-        stream.on('error', reject);
+        }, reject);
       });
     });
   }
@@ -831,6 +1026,8 @@ function createFileService({ hostService, probeAgentService = null }) {
       });
       stream.on('close', closeConnection);
       stream.on('error', closeConnection);
+      // 部分 sshd 不派发 close，exit 后兜底关闭，避免连接泄漏
+      stream.on('exit', () => setTimeout(closeConnection, EXEC_CLOSE_GRACE_MS));
       return {
         stream,
         size,
@@ -915,17 +1112,6 @@ function createFileService({ hostService, probeAgentService = null }) {
     return uploadLocalStream(dirPath, safeName, Readable.from(buffer), buffer.length);
   }
 
-  async function uploadLocalDirectOld(dirPath, filename, buffer) {
-    const safeName = safeUploadFilename(filename);
-    const resolved = path.resolve(dirPath, safeName);
-    try {
-      await fs.promises.writeFile(resolved, buffer);
-    } catch (err) {
-      throw await enrichLocalWriteError(err, resolved, '上传');
-    }
-    return { path: resolved, size: buffer.length };
-  }
-
   async function uploadLocalStream(dirPath, filename, readStream, size = null) {
     const safeName = safeUploadFilename(filename);
     const resolved = path.resolve(dirPath, safeName);
@@ -954,48 +1140,73 @@ function createFileService({ hostService, probeAgentService = null }) {
     return uploadRemoteStream(hostId, dirPath, safeName, Readable.from(buffer), buffer.length);
   }
 
-  async function uploadRemoteDirectOld(hostId, dirPath, filename, buffer) {
+  /**
+   * 通过 ssh exec 上传：把数据直接灌进远端 `cat > tmp` 的 stdin，走 SSH 通道自身的
+   * 流控，不受 SFTP 每包一次 RTT 的限制。与下载侧的 exec 优先策略对称。
+   */
+  async function uploadRemoteViaExec(hostId, dirPath, filename, readStream, size = null, options = {}) {
     const safeName = safeUploadFilename(filename);
     const remotePath = dirPath.endsWith('/') ? dirPath + safeName : dirPath + '/' + safeName;
-    const tempPath = buildRemoteTempSibling(remotePath);
     assertSafeFilePath(remotePath, '上传');
+    const tempPath = buildRemoteTempSibling(remotePath);
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
 
-    const entry = await acquireSftp(hostId);
-    const { sftp } = entry;
+    const { client, proxyClient } = await hostService.connectToHost(hostId, { readyTimeout: 15000, probeOs: false });
+    let closed = false;
+    function closeConnection() {
+      if (closed) return;
+      closed = true;
+      try { client.end(); } catch { /* ignore */ }
+      try { proxyClient?.end(); } catch { /* ignore */ }
+    }
 
     try {
-      return await new Promise((resolve, reject) => {
-        const writeStream = sftp.createWriteStream(remotePath);
+      const command = `exec cat > ${shellQuote(tempPath)}`;
+      const { stderr, exitCode } = await new Promise((resolve, reject) => {
+        client.exec(command, { pty: false }, (err, execStream) => {
+          if (err) return reject(err);
+          const stderrChunks = [];
+          execStream.stderr?.on('data', (chunk) => { stderrChunks.push(chunk); });
+          // 只等 close 在部分 sshd 上会永久挂起（exit 已到但 close 不来），
+          // 统一走 waitForExecExit：exit 后最多再等 GRACE 毫秒收尾
+          waitForExecExit(execStream).then((code) => {
+            resolve({ stderr: Buffer.concat(stderrChunks).toString('utf8'), exitCode: code });
+          }, reject);
 
-        writeStream.on('close', () => {
-          resolve({ path: remotePath, size: buffer.length });
+          const source = onProgress
+            ? readStream.pipe(new Transform({
+              transform(chunk, encoding, cb) {
+                onProgress(Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk, encoding));
+                cb(null, chunk);
+              },
+            }))
+            : readStream;
+          source.on('error', reject);
+          source.pipe(execStream);
         });
-        writeStream.on('error', (writeErr) => {
-          reject(new Error(`写入文件失败: ${writeErr.message}`));
-        });
-
-        writeStream.end(buffer);
       });
+
+      if (exitCode !== 0 && exitCode !== null) {
+        throw new Error(`远程写入失败: ${stderr.trim() || `exit ${exitCode}`}`);
+      }
+
+      const verified = await verifyAndPromoteRemoteUpload(hostId, tempPath, remotePath, size);
+      closeConnection();
+      return { ...verified, source: 'ssh-exec' };
     } catch (err) {
-      releaseSftp(hostId);
+      closeConnection();
+      await cleanupRemoteTemp(hostId, tempPath);
       throw err;
-    } finally {
-      returnSftp(hostId);
     }
   }
 
-  async function uploadRemoteStream(hostId, dirPath, filename, readStream, size = null) {
-    const safeName = safeUploadFilename(filename);
-    const remotePath = dirPath.endsWith('/') ? dirPath + safeName : dirPath + '/' + safeName;
-    const tempPath = buildRemoteTempSibling(remotePath);
-    assertSafeFilePath(remotePath, '上传');
-
+  /**
+   * 校验临时文件大小并原子改名到目标路径。失败时由调用方清理临时文件。
+   */
+  async function verifyAndPromoteRemoteUpload(hostId, tempPath, remotePath, size) {
     const entry = await acquireSftp(hostId);
     const { sftp } = entry;
-
     try {
-      const writeStream = sftp.createWriteStream(tempPath);
-      await pipeline(readStream, writeStream);
       const tempStats = await sftpCall(sftp, 'stat', tempPath).catch(() => null);
       const expectedSize = Number(size);
       if (Number.isFinite(expectedSize) && tempStats?.size !== expectedSize) {
@@ -1005,12 +1216,81 @@ function createFileService({ hostService, probeAgentService = null }) {
       const stats = await sftpCall(sftp, 'stat', remotePath).catch(() => null);
       return { path: remotePath, size: stats?.size ?? tempStats?.size ?? 0 };
     } catch (err) {
+      releaseSftp(hostId);
+      throw err;
+    } finally {
+      returnSftp(hostId);
+    }
+  }
+
+  /**
+   * 清理远端遗留的 .part 临时文件。上传中断时必须调用，否则目标目录会堆积孤儿文件。
+   */
+  async function cleanupRemoteTemp(hostId, tempPath) {
+    if (!tempPath) return;
+    try {
+      const entry = await acquireSftp(hostId);
+      try {
+        await sftpCall(entry.sftp, 'unlink', tempPath).catch(() => {});
+      } finally {
+        returnSftp(hostId);
+      }
+    } catch {
+      // 连接已不可用时无法清理，交由远端自行残留，不要掩盖原始错误
+    }
+  }
+
+  async function uploadRemoteViaSftp(hostId, dirPath, filename, readStream, size = null, options = {}) {
+    const safeName = safeUploadFilename(filename);
+    const remotePath = dirPath.endsWith('/') ? dirPath + safeName : dirPath + '/' + safeName;
+    const tempPath = buildRemoteTempSibling(remotePath);
+    assertSafeFilePath(remotePath, '上传');
+
+    const entry = await acquireSftp(hostId);
+    const { sftp } = entry;
+
+    try {
+      const tuning = getSftpWriteTuning(sftp);
+      const writeStream = createParallelSftpWriteStream(sftp, tempPath, {
+        ...tuning,
+        onProgress: options.onProgress,
+      });
+      await pipeline(readStream, writeStream);
+      const tempStats = await sftpCall(sftp, 'stat', tempPath).catch(() => null);
+      const expectedSize = Number(size);
+      if (Number.isFinite(expectedSize) && tempStats?.size !== expectedSize) {
+        throw new Error(`upload size mismatch: expected ${expectedSize}, got ${tempStats?.size ?? 0}`);
+      }
+      await renameRemoteReplacing(sftp, tempPath, remotePath);
+      const stats = await sftpCall(sftp, 'stat', remotePath).catch(() => null);
+      return { path: remotePath, size: stats?.size ?? tempStats?.size ?? 0, source: 'sftp' };
+    } catch (err) {
       await sftpCall(sftp, 'unlink', tempPath).catch(() => {});
       releaseSftp(hostId);
       throw err;
     } finally {
       returnSftp(hostId);
     }
+  }
+
+  /**
+   * 远程上传统一调度：默认先试 exec（吞吐最高），失败再退回并发 SFTP。
+   * ONESHELL_FILE_UPLOAD_MODE=sftp 强制走 SFTP，=exec 则不做兜底。
+   */
+  async function uploadRemoteStream(hostId, dirPath, filename, readStream, size = null, options = {}) {
+    const mode = process.env.ONESHELL_FILE_UPLOAD_MODE;
+    if (mode !== 'sftp') {
+      try {
+        return await uploadRemoteViaExec(hostId, dirPath, filename, readStream, size, options);
+      } catch (err) {
+        if (mode === 'exec') throw err;
+        // 入流已被消费，无法重放，只有可重读的源才能安全兜底
+        if (typeof readStream.path !== 'string') throw err;
+        readStream = fs.createReadStream(readStream.path);
+        if (typeof options.onRetry === 'function') options.onRetry();
+      }
+    }
+    return uploadRemoteViaSftp(hostId, dirPath, filename, readStream, size, options);
   }
 
   /**
@@ -1025,14 +1305,14 @@ function createFileService({ hostService, probeAgentService = null }) {
     return uploadRemote(hostId, dirPath, filename, buffer);
   }
 
-  async function uploadFileStream(hostId, dirPath, filename, readStream, size = null) {
+  async function uploadFileStream(hostId, dirPath, filename, readStream, size = null, options = {}) {
     const host = hostService.findHost(hostId);
     if (!host) throw new Error('主机不存在');
     if (!readStream || typeof readStream.pipe !== 'function') throw new Error('上传流无效');
     if (host.type === 'local' || host.id === 'local') {
       return uploadLocalStream(dirPath, filename, readStream, size);
     }
-    return uploadRemoteStream(hostId, dirPath, filename, readStream, size);
+    return uploadRemoteStream(hostId, dirPath, filename, readStream, size, options);
   }
 
   // ─── 文件写入（编辑保存） ──────────────────────────────────────────────

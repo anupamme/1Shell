@@ -53,6 +53,13 @@ export interface MainHost {
   preference?: HostPreference;
 }
 
+/** MainHost 的轻量投影，供只需要 id/name/host 的消费方使用。 */
+export interface HostInfo {
+  id: string;
+  name: string;
+  host?: string;
+}
+
 export interface HostFormPayload {
   name: string;
   host: string;

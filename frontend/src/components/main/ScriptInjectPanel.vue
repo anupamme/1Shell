@@ -1,14 +1,12 @@
 <script setup lang="ts">
-// ScriptInjectPanel.vue — MainConsole 刀 3 阶段 1 · 脚本注入面板
-// 1:1 复刻 [public/index.html](public/index.html) row 384-400 + [public/script-inject.js](public/script-inject.js)
-// 22.3 节定调：class 用 .inject-panel，border-bottom（面板在终端上方）
+// ScriptInjectPanel.vue — 终端上方的脚本注入面板
+// 参数框按脚本正文里扫描出的 {{变量}} 自动生成，没有类型/必填之分。
 import { computed } from 'vue';
 import { useScriptInject } from '@/composables/useScriptInject';
 
 const script = useScriptInject();
 
-const paramDefs = computed(() => script.selectedScript.value?.parameters || []);
-const showParams = computed(() => paramDefs.value.length > 0);
+const showParams = computed(() => script.placeholders.value.length > 0);
 const showPreview = computed(() => Boolean(script.selectedScript.value));
 </script>
 
@@ -23,43 +21,21 @@ const showPreview = computed(() => Boolean(script.selectedScript.value));
       >
         <option value="">选择脚本…</option>
         <option v-for="s in script.scripts.value" :key="s.id" :value="s.id">
-          {{ s.icon || '📜' }} {{ s.name }}
+          {{ s.name }}
         </option>
       </select>
       <button type="button" class="inject-close-btn" @click="script.closeScriptPanel">✕</button>
     </div>
 
     <div v-if="showParams" class="inject-params-row">
-      <label v-for="def in paramDefs" :key="def.name" class="inject-param">
-        <span class="inject-param-label">
-          {{ def.label || def.name }}<span v-if="def.required" class="inject-param-required">*</span>
-        </span>
-        <select
-          v-if="def.type === 'boolean'"
-          class="inject-param-input"
-          :value="script.params[def.name] ?? 'false'"
-          @change="script.updateParam(def.name, ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="false">false</option>
-          <option value="true">true</option>
-        </select>
-        <select
-          v-else-if="def.type === 'select'"
-          class="inject-param-input"
-          :value="script.params[def.name] ?? ''"
-          @change="script.updateParam(def.name, ($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="opt in (def.options || [])" :key="opt.value" :value="opt.value">
-            {{ opt.label || opt.value }}
-          </option>
-        </select>
+      <label v-for="name in script.placeholders.value" :key="name" class="inject-param">
+        <span class="inject-param-label">{{ name }}</span>
         <input
-          v-else
-          :type="def.type === 'number' ? 'number' : 'text'"
+          type="text"
           class="inject-param-input inject-param-input-text"
-          :value="script.params[def.name] ?? ''"
-          :placeholder="def.label || def.name"
-          @input="script.updateParam(def.name, ($event.target as HTMLInputElement).value)"
+          :value="script.params[name] ?? ''"
+          :placeholder="name"
+          @input="script.updateParam(name, ($event.target as HTMLInputElement).value)"
         />
       </label>
     </div>
