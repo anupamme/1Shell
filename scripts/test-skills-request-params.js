@@ -206,7 +206,7 @@ async function runE2E() {
   // ── 3b. openai 协议:requestParams 合并进 chat/completions 请求体 ──
   const openaiPid = e2eStore.addProvider('skills', {
     name: 'DeepSeek',
-    apiBase: upstreamBase,
+    apiBase: `${upstreamBase}/v1`,
     apiKey: 'sk-b',
     upstreamProtocol: 'openai',
     models: [{

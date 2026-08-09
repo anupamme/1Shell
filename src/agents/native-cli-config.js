@@ -1426,7 +1426,7 @@ function tomlBareOrQuotedKey(value) {
 function normalizeOpenAIBaseUrl(apiBase) {
   const raw = String(apiBase || '').trim().replace(/\/+$/, '');
   if (!raw) return 'https://api.openai.com/v1';
-  return /\/v1$/i.test(raw) ? raw : `${raw}/v1`;
+  return raw;
 }
 
 function sanitizeCodexProviderId(value) {

@@ -37,9 +37,7 @@ function sendSSE(res, event, data) {
 }
 
 function normalizeBase(apiBase) {
-  let base = apiBase.replace(/\/$/, '');
-  if (!/\/v1$/.test(base)) base += '/v1';
-  return base;
+  return apiBase.replace(/\/$/, '');
 }
 
 const DEFAULT_CLAUDE_MODEL_PROFILES = [

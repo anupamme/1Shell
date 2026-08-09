@@ -20,7 +20,8 @@
  *
  * 数据原则:
  *   - 只做"自动填",不做"模型清单的真理来源"
- *   - apiBase 不带 /v1 后缀(由调用方按协议补)— 但 OpenAI 兼容服务历史习惯参差,以官方文档为准
+ *   - apiBase 携带完整 base 到版本段(如 /v1、/api/paas/v4、/api/v3),后端不再自动补版本段;
+ *     用户手填时同样需填到版本段,以供应商文档为准
  *   - reasoningModels 只列已知前缀,模型迭代快不强求齐全
  */
 
@@ -29,7 +30,7 @@ const PROVIDER_PRESETS = [
   {
     id: 'deepseek',
     name: 'DeepSeek',
-    apiBase: 'https://api.deepseek.com',
+    apiBase: 'https://api.deepseek.com/v1',
     protocol: 'openai',
     apiKeyField: 'DEEPSEEK_API_KEY',
     models: ['deepseek-chat', 'deepseek-reasoner'],
@@ -97,7 +98,7 @@ const PROVIDER_PRESETS = [
   {
     id: 'openai',
     name: 'OpenAI',
-    apiBase: 'https://api.openai.com',
+    apiBase: 'https://api.openai.com/v1',
     protocol: 'openai',
     apiKeyField: 'OPENAI_API_KEY',
     models: ['gpt-5', 'gpt-5-mini', 'gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini'],

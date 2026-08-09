@@ -539,7 +539,7 @@ function resetFormToAdd(): void {
   editingPid.value = null;
   fName.value = isCodex.value ? 'OpenAI' : '';
   fUpstream.value = normalizeUpstreamForCli();
-  fApiBase.value = isCodex.value ? 'https://api.openai.com' : '';
+  fApiBase.value = isCodex.value ? 'https://api.openai.com/v1' : '';
   fApiKey.value = '';
   fApiKeyPlaceholder.value = isCodex.value ? '请填 OPENAI_API_KEY' : 'sk-...';
   fPrimaryModel.value = '';
@@ -969,7 +969,8 @@ const presetHint = computed(() => (
         </div>
         <div class="flex flex-col gap-1.5">
           <label class="text-[10px] font-semibold text-slate-400 uppercase">API Base URL</label>
-          <input v-model="fApiBase" type="text" placeholder="https://api.openai.com" class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400" />
+          <input v-model="fApiBase" type="text" placeholder="https://api.example.com/v1" class="h-8 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1324] text-xs font-mono text-slate-700 dark:text-slate-200 outline-none focus:border-cyan-400" />
+          <div class="text-[10px] text-slate-400">需填到版本段：OpenAI 兼容填 <code class="font-mono">…/v1</code>，智谱填 <code class="font-mono">https://open.bigmodel.cn/api/paas/v4</code>（系统不再自动补）</div>
         </div>
         <div class="flex flex-col gap-1.5">
           <label class="text-[10px] font-semibold text-slate-400 uppercase">API Key</label>

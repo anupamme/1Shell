@@ -23,7 +23,7 @@ function withNativeConfigHarness(reasoningEffort) {
   const provider = {
     id: 'p',
     name: 'P',
-    apiBase: 'https://api.openai.com',
+    apiBase: 'https://api.openai.com/v1',
     apiKey: 'sk-test',
     model: 'gpt-5-codex',
     upstreamProtocol: 'openai',

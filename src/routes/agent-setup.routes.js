@@ -257,12 +257,12 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     };
   }
 
-  function normalizeApiV1Base(apiBase) {
+  function normalizeApiBase(apiBase) {
     const raw = String(apiBase || '').trim().replace(/\/+$/, '');
     if (!raw) throw new Error('apiBase 不能为空');
     // eslint-disable-next-line no-new
     new URL(raw);
-    return /\/v1$/i.test(raw) ? raw : `${raw}/v1`;
+    return raw;
   }
 
   function truncateText(text, max = 500) {
@@ -288,7 +288,7 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     if (!provider?.apiKey) throw new Error('apiKey 不能为空');
     if (!model) throw new Error('模型不能为空');
 
-    const base = normalizeApiV1Base(provider.apiBase);
+    const base = normalizeApiBase(provider.apiBase);
     const signal = AbortSignal.timeout(10000);
     let url;
     let body;
@@ -296,8 +296,10 @@ function createAgentSetupRouter({ proxyConfigStore, nativeCliConfig, mcpPresetSt
     let probe;
 
     if (upstream === 'anthropic') {
+      // Anthropic 协议 base 语义为 ANTHROPIC_BASE_URL，需补 /v1 到 /messages
+      const anthropicBase = /\/v1$/i.test(base) ? base : `${base}/v1`;
       probe = 'anthropic.messages';
-      url = `${base}/messages`;
+      url = `${anthropicBase}/messages`;
       headers = {
         'Content-Type': 'application/json',
         'x-api-key': provider.apiKey,

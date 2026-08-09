@@ -31,13 +31,9 @@ const SKILL_ADAPTATION_PROVIDER_TIMEOUT_MS = 120000;
 
 function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigStore = null, skillRegistry = null } = {}) {
   function resolveConfig() {
-    let rawBase = `${ENV_API_BASE || ''}`;
-    // 自动补 /v1 后缀（兼容 One-API / New-API 等中转站）
-    if (rawBase && !/\/v1$/.test(rawBase)) {
-      rawBase = rawBase.replace(/\/$/, '') + '/v1';
-    }
+    const rawBase = `${ENV_API_BASE || ''}`.replace(/\/$/, '');
     return {
-      base: rawBase.replace(/\/$/, ''),
+      base: rawBase,
       key: ENV_API_KEY,
       model: ENV_MODEL,
     };
