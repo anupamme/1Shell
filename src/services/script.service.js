@@ -53,8 +53,16 @@ function createScriptService({ scriptRepository, hostService, bridgeService, aud
     return scriptRepository.deleteScript(id);
   }
 
+  /**
+   * 选择参数转义风格。
+   *
+   * 远端主机按探测到的 OS 判定（Windows → powershell），探测未完成或失败时
+   * 保守回落 bash —— 与本功能之前的行为一致。
+   */
   function shellStyleFor(hostId) {
-    return hostId === LOCAL_HOST_ID ? LOCAL_SHELL_STYLE : 'bash';
+    if (hostId === LOCAL_HOST_ID) return LOCAL_SHELL_STYLE;
+    const osName = String(hostService?.findHost?.(hostId)?.osInfo?.os || '').toLowerCase();
+    return osName === 'windows' ? 'powershell' : 'bash';
   }
 
   // ─── 参数渲染 ────────────────────────────────────────────────────────

@@ -34,6 +34,41 @@ function createSshPool({ hostService }) {
   }
 
   /**
+   * 存活检测：exec 一个 no-op，看通道能否完整往返。
+   *
+   * 两个必须注意的点（都踩过）：
+   *   1. **必须排空 stdout/stderr**。ssh2 的 stream 默认是暂停的，不读就有背压，
+   *      `close` 永远不会触发。POSIX 上 `:` 是静默内建命令，恰好没有输出所以侥幸没事；
+   *      Windows（cmd.exe）会有输出，于是这里直接挂死。
+   *   2. **超时必须一直armed到 promise 落定**。以前在 exec 回调里就 clearTimeout，
+   *      之后若 `close` 不来，这个 promise 永远不落定 —— 调用方一路挂到外层超时。
+   */
+  function checkLiveness(client) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(livenessTimer);
+        if (err) reject(err);
+        else resolve();
+      };
+      const livenessTimer = setTimeout(
+        () => finish(new Error('liveness check timeout')),
+        LIVENESS_TIMEOUT_MS,
+      );
+      client.exec(':', (err, stream) => {
+        if (err) return finish(err);
+        // 排空两条流，否则背压会让 close 永不触发
+        stream.on('data', () => {});
+        stream.stderr?.on('data', () => {});
+        stream.on('close', () => finish());
+        stream.on('error', finish);
+      });
+    });
+  }
+
+  /**
    * 获取一个到指定主机的可用 SSH client。
    * 如果池中有空闲连接，直接复用；否则新建。
    *
@@ -47,19 +82,7 @@ function createSshPool({ hostService }) {
     // 有空闲连接且连接仍存活
     if (entry && !entry.busy) {
       try {
-        // 存活检测：exec 一个 no-op，设置超时避免 half-open 连接无限挂起
-        await new Promise((resolve, reject) => {
-          const livenessTimer = setTimeout(
-            () => reject(new Error('liveness check timeout')),
-            LIVENESS_TIMEOUT_MS,
-          );
-          entry.client.exec(':', (err, stream) => {
-            clearTimeout(livenessTimer);
-            if (err) return reject(err);
-            stream.on('close', () => resolve());
-            stream.on('error', reject);
-          });
-        });
+        await checkLiveness(entry.client);
         entry.busy = true;
         resetTimer(hostId);
         return { client: entry.client, proxyClient: entry.proxyClient, fromPool: true };

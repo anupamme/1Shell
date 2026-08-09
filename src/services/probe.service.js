@@ -18,6 +18,7 @@ const {
   LOCAL_LINUX_EXTRA_COMMAND,
   REMOTE_PROBE_COMMAND,
 } = require('./probe/commands');
+const { WINDOWS_PROBE_SCRIPT } = require('./probe/windows-commands');
 const {
   parseInteger,
   parseKeyProcesses,
@@ -25,8 +26,13 @@ const {
   parseProbeOutput,
   parseSystemHealth,
 } = require('./probe/parsers');
+const { buildWindowsPayload, decodeClixml, decodeRemoteOutput } = require('../../lib/win-shell');
 
-function createProbeService({ hostRepository, hostService, sshShellPool, probeAgentService, probeRelayService, probeTrafficService }) {
+function createProbeService({ hostRepository, hostService, sshShellPool, bridgeService, probeAgentService, probeRelayService, probeTrafficService }) {
+  // bridgeService 在 server.js 里晚于 probeService 构建（Windows 探测才需要它），
+  // 所以允许事后注入；setBridgeService 之前 Windows 主机会明确报"监控不可用"。
+  let bridge = bridgeService || null;
+  function setBridgeService(next) { bridge = next || null; }
   let lastLocalCpuSample = null;
   let latestSnapshot = {
     generatedAt: null,
@@ -102,6 +108,39 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
     const delta = currentValue - previousValue;
     if (delta < 0) return null;
     return Number((delta / elapsedSeconds).toFixed(2));
+  }
+
+  /**
+   * 本机跑 Windows 探针脚本。
+   *
+   * 必须走 EncodedCommand：脚本里有多行 try/catch，经 `powershell -Command -`
+   * 的 stdin 喂进去时空行会截断语句块（实测 try 和 catch 会双双执行，
+   * 输出里出现重复键），EncodedCommand 则解析正常。
+   */
+  function runLocalWindowsProbe() {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process');
+      const payload = buildWindowsPayload(WINDOWS_PROBE_SCRIPT, {});
+      const encoded = Buffer.from(payload, 'utf16le').toString('base64');
+      let child;
+      try {
+        child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true });
+      } catch {
+        return resolve('');
+      }
+      const out = [];
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch { /* ignore */ }
+        resolve('');
+      }, PROBE_TIMEOUT_MS);
+      child.stdout.on('data', (chunk) => out.push(chunk));
+      child.stderr.on('data', () => { /* CLIXML 噪音，忽略 */ });
+      child.on('error', () => { clearTimeout(timer); resolve(''); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        resolve(decodeRemoteOutput(Buffer.concat(out)));
+      });
+    });
   }
 
   function buildRemoteProbePayload(host, stdout, latencyMs) {
@@ -336,6 +375,7 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
   }
 
   async function getLocalDiskUsage() {
+    // Windows 的磁盘占用率由 Windows 探针脚本一并采集（DISK 键），见 getLocalExtras
     if (os.platform() === 'win32') return null;
 
     try {
@@ -346,17 +386,38 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
     }
   }
 
-  async function getLocalLinuxExtras() {
+  const EMPTY_LOCAL_EXTRAS = {
+    networkRxBytes: null,
+    networkTxBytes: null,
+    diskReadBytes: null,
+    diskWriteBytes: null,
+    processCount: null,
+    keyProcesses: [],
+    systemHealth: null,
+    platformInfo: null,
+  };
+
+  /**
+   * 本机的扩展指标。原来这里在 win32 直接返回空对象（函数名带 Linux 是诚实的），
+   * 于是本机 Windows 的磁盘/进程数/平台/健康度全是 null —— 现在补上 PowerShell 版。
+   */
+  async function getLocalExtras() {
     if (os.platform() === 'win32') {
+      const output = await runLocalWindowsProbe();
+      if (!output.trim()) return { ...EMPTY_LOCAL_EXTRAS };
+      const parsed = parseProbeOutput(output);
       return {
-        networkRxBytes: null,
-        networkTxBytes: null,
-        diskReadBytes: null,
-        diskWriteBytes: null,
-        processCount: null,
-        keyProcesses: [],
-        systemHealth: null,
-        platformInfo: null,
+        networkRxBytes: parseInteger(parsed.NET_RX),
+        networkTxBytes: parseInteger(parsed.NET_TX),
+        diskReadBytes: parseInteger(parsed.DISK_READ_BYTES),
+        diskWriteBytes: parseInteger(parsed.DISK_WRITE_BYTES),
+        processCount: parseInteger(parsed.PROC_COUNT),
+        keyProcesses: parseKeyProcesses(parsed.KEY_PROC),
+        systemHealth: parseSystemHealth(parsed),
+        platformInfo: parsePlatformInfo(parsed),
+        // Windows 专有：这两项本机原本拿不到，顺带从同一次采集里取出来
+        diskUsage: parseNumber(parsed.DISK),
+        cpuUsage: parseNumber(parsed.CPU),
       };
     }
 
@@ -374,16 +435,7 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
         platformInfo: parsePlatformInfo(parsed),
       };
     } catch {
-      return {
-        networkRxBytes: null,
-        networkTxBytes: null,
-        diskReadBytes: null,
-        diskWriteBytes: null,
-        processCount: null,
-        keyProcesses: [],
-        systemHealth: null,
-        platformInfo: null,
-      };
+      return { ...EMPTY_LOCAL_EXTRAS };
     }
   }
 
@@ -392,7 +444,7 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
     const checkedAt = new Date(checkedAtMs).toISOString();
     const [diskUsage, extras] = await Promise.all([
       getLocalDiskUsage(),
-      getLocalLinuxExtras(),
+      getLocalExtras(),
     ]);
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
@@ -406,9 +458,10 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
       hostname: os.hostname(),
       online: true,
       latencyMs: 0,
-      cpuUsage: getLocalCpuUsage(),
+      // Windows 上 os.cpus() 的 times 不随负载更新，用探针脚本采到的值兜底
+      cpuUsage: getLocalCpuUsage() ?? (extras.cpuUsage ?? null),
       memoryUsage,
-      diskUsage,
+      diskUsage: diskUsage ?? (extras.diskUsage ?? null),
       uptimeSec: Math.round(os.uptime()),
       checkedAt,
       error: null,
@@ -428,11 +481,90 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
   }
 
   function probeRemoteHost(host) {
+    // Windows 主机：POSIX 探针脚本（/proc、awk、df）在它上面一个都不成立，
+    // 且 shell 池的边界标记协议也是 POSIX 的。必须走 bridge —— 由 bridge 负责
+    // PowerShell 包装、exec 模式路由与解码。
+    if (isWindowsHost(host)) {
+      return probeRemoteWindows(host);
+    }
     // 优先使用持久 shell 池（复用长连接，避免频繁 TCP 连接触发云安全告警）
     if (sshShellPool) {
       return probeRemoteViaShellPool(host);
     }
     return probeRemoteViaConnect(host);
+  }
+
+  function isWindowsHost(host) {
+    return String(host?.osInfo?.os || '').trim().toLowerCase() === 'windows';
+  }
+
+  /**
+   * Windows 远端探测：经 bridgeService 发 PowerShell 脚本。
+   * 没有 bridgeService（老装配/测试替身）时明确标为不支持，
+   * 而不是退回 POSIX 路径去拿一份"在线但全 null"的假数据。
+   */
+  async function probeRemoteWindows(host) {
+    const startedAt = Date.now();
+    const timeout = getAdaptiveTimeout(host.id);
+
+    if (!bridge?.execOnHost) {
+      return {
+        hostId: host.id,
+        name: host.name,
+        checkedAt: nowIso(),
+        online: false,
+        latencyMs: Date.now() - startedAt,
+        error: 'Windows 主机监控需要 bridge 服务',
+        errorCode: 'WINDOWS_PROBE_UNAVAILABLE',
+      };
+    }
+
+    try {
+      const result = await bridge.execOnHost(host.id, WINDOWS_PROBE_SCRIPT, timeout, {
+        source: 'probe',
+        auditCommand: 'windows probe',
+      });
+      const latencyMs = Date.now() - startedAt;
+      const stdout = decodeClixml(String(result.stdout || ''));
+
+      // 解析不出任何键 = 脚本没真正跑起来，明确报错而不是给一份全 null 的"在线"
+      const parsed = parseProbeOutput(stdout);
+      if (!parsed.PLATFORM_OS && parsed.UPTIME === undefined && parsed.MEM === undefined) {
+        return {
+          hostId: host.id,
+          name: host.name,
+          checkedAt: nowIso(),
+          online: false,
+          latencyMs,
+          error: trimProbeError(result.stderr || stdout) || `exit code ${result.exitCode}`,
+          errorCode: 'REMOTE_ERROR',
+        };
+      }
+
+      recordLatency(host.id, latencyMs);
+
+      return {
+        hostId: host.id,
+        name: host.name,
+        checkedAt: nowIso(),
+        errorCode: null,
+        ...buildRemoteProbePayload(host, stdout, latencyMs),
+      };
+    } catch (err) {
+      return {
+        hostId: host.id,
+        name: host.name,
+        checkedAt: nowIso(),
+        online: false,
+        latencyMs: Date.now() - startedAt,
+        error: err.message,
+        errorCode: err.code === 'EXEC_TIMEOUT' ? 'TIMEOUT' : 'REMOTE_ERROR',
+      };
+    }
+  }
+
+  function trimProbeError(text) {
+    return String(text || '').trim().split(/\r?\n/)[0]?.slice(0, 300) || '';
   }
 
   /**
@@ -804,6 +936,7 @@ function createProbeService({ hostRepository, hostService, sshShellPool, probeAg
     getSampleIntervalMs: () => PROBE_INTERVAL_MS,
     refreshSnapshot,
     removeHost,
+    setBridgeService,
     startScheduler,
     stopScheduler,
   };

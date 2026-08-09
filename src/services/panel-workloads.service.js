@@ -45,7 +45,6 @@ function createPanelWorkloadsService({ hostService, bridgeService, auditService 
       source: 'panel_workloads',
       auditCommand: plan.auditCommand,
       clientIp: options.clientIp,
-      ...(plan.localShell ? { localShell: plan.localShell } : {}),
     });
     auditService?.log?.({
       action: 'panel_workload_action',
@@ -187,14 +186,12 @@ function createPanelWorkloadsService({ hostService, bridgeService, auditService 
       let result = await bridgeService.execOnHost(host.id, discovery.command, options.timeoutMs || DEFAULT_TIMEOUT_MS, {
         source: 'panel_workloads',
         auditCommand: 'workload discovery',
-        ...(discovery.localShell ? { localShell: discovery.localShell } : {}),
       });
       if (platform !== 'windows' && shouldRetryWithWindowsDiscovery(result)) {
         discovery = buildWorkloadDiscovery(host, { platform: 'windows' });
         result = await bridgeService.execOnHost(host.id, discovery.command, options.timeoutMs || DEFAULT_TIMEOUT_MS, {
           source: 'panel_workloads',
           auditCommand: 'workload discovery windows fallback',
-          ...(discovery.localShell ? { localShell: discovery.localShell } : {}),
         });
       }
       const parsed = parseWorkloadDiscoveryOutput(result.stdout || '');
@@ -379,7 +376,9 @@ function buildWindowsServiceActionPlan(item, action) {
     `Get-Service -Name ${psSingleQuote(serviceName)} | Select-Object Name,Status | ConvertTo-Json -Compress`,
   ].join('\n');
   return {
-    command: buildWindowsPowerShellCommand(script),
+    // 裸脚本：执行层负责送进 PowerShell（本机 execLocalScript / 远端 EncodedCommand 包装）。
+    // 自己再包一层等于嵌套调用 powershell，白白翻倍命令行长度。
+    command: script,
     auditCommand: `powershell ${action} <windows-service:${serviceName}>`,
     targetLabel: serviceName,
   };
@@ -398,10 +397,6 @@ function psSingleQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function buildWindowsPowerShellCommand(script) {
-  return `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(String(script || ''), 'utf16le').toString('base64')}`;
-}
-
 function createStatusError(status, message) {
   const error = new Error(message);
   error.status = status;
@@ -410,14 +405,18 @@ function createStatusError(status, message) {
 
 function buildWorkloadDiscovery(host, options = {}) {
   const platform = options.platform || detectHostPlatform(host);
-  if (platform === 'windows' && (host?.type === 'local' || host?.id === 'local')) {
-    return { command: buildWindowsWorkloadDiscoveryScript(), localShell: 'powershell' };
+  // Windows 一律给裸 PowerShell 脚本：执行层（本机 execLocalScript / 远端
+  // bridge 的 EncodedCommand 包装）自己会送进 PowerShell。
+  // 这里若再自行 EncodedCommand 一次，远端就是二次 base64 包装 ——
+  // 4.4k 的脚本会膨胀到 12k 命令行，直接撞上载荷上限被拒。
+  if (platform === 'windows') {
+    return { command: buildWindowsWorkloadDiscoveryScript() };
   }
   return { command: buildWorkloadDiscoveryCommand({ platform }) };
 }
 
 function buildWorkloadDiscoveryCommand(options = {}) {
-  if (options.platform === 'windows') return buildWindowsWorkloadDiscoveryCommand();
+  if (options.platform === 'windows') return buildWindowsWorkloadDiscoveryScript();
   return `#!/bin/sh
 export LC_ALL=C LANG=C
 printf '__1SHELL_PLATFORM=linux\\n'
@@ -598,11 +597,6 @@ if command -v ps >/dev/null 2>&1; then
   done
 fi
 printf '__1SHELL_PROCESSES_END__\\n'`;
-}
-
-function buildWindowsWorkloadDiscoveryCommand() {
-  const script = buildWindowsWorkloadDiscoveryScript();
-  return `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
 }
 
 function buildWindowsWorkloadDiscoveryScript() {
@@ -1699,7 +1693,6 @@ module.exports = {
   _internals: {
     buildWorkloadDiscoveryCommand,
     buildWindowsWorkloadDiscoveryScript,
-    buildWindowsWorkloadDiscoveryCommand,
     parseWorkloadDiscoveryOutput,
     detectHostPlatform,
     isPrimaryWorkload,

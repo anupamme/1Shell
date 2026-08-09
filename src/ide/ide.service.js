@@ -2856,6 +2856,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       const name = String(host.name || id || '').trim();
       const hostAddress = type === 'local' ? '127.0.0.1' : String(host.host || '127.0.0.1').trim();
       const port = type === 'local' ? null : (Number(host.port) || 22);
+      // OS 让模型知道该吐 PowerShell 还是 bash —— agent 多数时候是从这里挑主机的。
+      const osName = String(host.osInfo?.os || '').toLowerCase() || null;
       return {
         id,
         name,
@@ -2863,12 +2865,19 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
         port,
         address: port ? `${hostAddress}:${port}` : hostAddress,
         type,
+        ...(osName ? { os: osName } : {}),
+        ...(host.osInfo?.prettyName ? { osName: host.osInfo.prettyName } : {}),
+        ...(osName === 'windows' ? { shell: 'powershell' } : {}),
       };
     }).filter((host) => host.id);
+    const windowsCount = normalized.filter((host) => host.os === 'windows').length;
     return {
       content: formatJson({
         ok: true,
         summary: normalized.length > 0 ? '主机列表读取成功' : '无允许访问的主机',
+        ...(windowsCount > 0
+          ? { note: 'os=windows 的主机上命令以 PowerShell 执行，请使用 PowerShell 语法与 Windows 路径，不要用 bash/POSIX 命令。' }
+          : {}),
         data: { hosts: normalized },
       }),
       is_error: false,
@@ -3145,10 +3154,19 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       const parts = [];
       if (context.hosts?.length > 0) {
         parts.push('**目标主机**：');
+        let anyWindows = false;
         for (const h of context.hosts) {
-          const osText = h.platform || h.os || '';
+          // OS 以服务端探测结果为准：前端 context 里通常没有这个字段，
+          // 而"目标是什么系统"决定模型该吐 PowerShell 还是 bash。
+          const probed = hostService?.findHost?.(h.id)?.osInfo || null;
+          const osText = probed?.prettyName || probed?.os || h.platform || h.os || '';
+          if (String(probed?.os || '').toLowerCase() === 'windows') anyWindows = true;
           const osSuffix = osText ? ` · OS: ${osText}` : '';
           parts.push(`  - id=${h.id} · ${h.name || h.id} (${h.username || 'root'}@${h.host || '127.0.0.1'}:${h.port || 22})${osSuffix}`);
+        }
+        if (anyWindows) {
+          parts.push('  注意：标记为 Windows 的主机上，命令以 PowerShell 执行（不是 bash）。');
+          parts.push('  请使用 PowerShell 语法与 Windows 路径，不要用 apt/systemctl/ls 这类 POSIX 命令。');
         }
       }
       if (context.files?.length > 0) {

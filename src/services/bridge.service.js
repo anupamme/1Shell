@@ -5,6 +5,12 @@ const { StringDecoder } = require('string_decoder');
 const { BRIDGE_EXEC_TIMEOUT_MS } = require('../config/env');
 const { execLocalScript } = require('../../lib/exec-local');
 const { redactKnownSecrets } = require('../../lib/secret-redaction');
+const {
+  buildWindowsRemoteCommand,
+  decodeClixml,
+  decodeRemoteOutput,
+  isWindowsOsName,
+} = require('../../lib/win-shell');
 
 /**
  * Bridge Service
@@ -12,6 +18,9 @@ const { redactKnownSecrets } = require('../../lib/secret-redaction');
  * 在远端主机执行命令，支持两种模式：
  *   1. 持久 shell（sshShellPool）— MCP 调用优先使用，复用长驻 shell channel
  *   2. exec 模式（sshPool）— 每次 exec 一条命令，作为后备
+ *
+ * Windows 远端主机强制走 exec 模式：持久 shell 的边界标记协议依赖 POSIX 语法
+ * （`(...)` 子 shell、`$?`），在 cmd.exe 下不成立；而独立 exec 通道本就原生传退出码。
  *
  * 级联（ProxyJump）逻辑由 hostService.connectToHost 统一处理，本层无感知。
  */
@@ -97,22 +106,44 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
       return execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput: redactingOutput, env: execEnv, secrets: redactionSecrets });
     }
 
+    const isWindows = isWindowsOsName((await resolveHostOsInfo(hostId, host))?.os);
+
     // 持久 shell 模式（所有远端调用优先走此路径）
     // 优势：单次 SSH 握手，后续命令写 stdin，无 liveness check，极低延迟
     // 并发安全：sshShellPool 内置队列，同一 host 的并发命令自动排队
-    if (sshShellPool) {
+    // Windows 例外：池协议是 POSIX 的，强制降级到 exec 模式
+    if (sshShellPool && !isWindows) {
       return execViaShellPool(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput: redactingOutput, env: execEnv, secrets: redactionSecrets });
     }
 
     // 降级：没有 shell pool 时走 exec 模式（兼容旧配置）
-    return execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput: redactingOutput, env: execEnv, secrets: redactionSecrets });
+    return execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand: safeAuditCommand, signal, onOutput: redactingOutput, env: execEnv, secrets: redactionSecrets, isWindows });
   }
 
   // ─── 本机模式 ───────────────────────────────────────────────────────────
 
+  /**
+   * 决定用哪套包装之前，先确认目标是什么系统。
+   * hostService 提供 ensureHostOsInfo 时用它（未知则现场探一次，结果落库，只付一次代价）；
+   * 老的 hostService（测试替身等）没有这个方法，就退回读已有记录。
+   */
+  async function resolveHostOsInfo(hostId, host) {
+    if (typeof hostService.ensureHostOsInfo === 'function') {
+      try {
+        return await hostService.ensureHostOsInfo(hostId);
+      } catch {
+        // OS 未知时按 POSIX 走，等于回到本功能之前的行为。
+      }
+    }
+    return host?.osInfo || null;
+  }
+
   async function execLocal(command, timeout, { source, hostId, hostName, clientIp, auditCommand, signal, onOutput, env, secrets }) {
     const commandForAudit = auditCommand || command;
-    const result = await execLocalScript(command, { timeout, signal, windowsShell: 'cmd', onOutput, env });
+    // Windows 本机统一用 PowerShell：脚本库的转义风格（LOCAL_SHELL_STYLE）与
+    // list_hosts 告诉模型的 shell 都是 powershell，执行端必须对齐，
+    // 否则模型写的 PowerShell 会被 cmd.exe 拒收（'Write-Output' 不是内部或外部命令）。
+    const result = await execLocalScript(command, { timeout, signal, windowsShell: 'powershell', onOutput, env });
     auditService?.log({
       action: 'bridge_exec',
       source,
@@ -163,18 +194,47 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
 
   // ─── exec 模式（原有逻辑）────────────────────────────────────────────────
 
-  function execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput, env, secrets }) {
+  function execViaExec(hostId, command, timeout, { source, hostName, clientIp, auditCommand, signal, onOutput, env, secrets, isWindows = false }) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(makeAbortError());
       const startAt = Date.now();
       const commandForAudit = auditCommand || command;
-      const commandForExecution = withRemoteEnv(wrapRemoteCommand(command), env);
+      let commandForExecution;
+      let stdinPayload = null;
+      try {
+        if (isWindows) {
+          // 长脚本自动改走 stdin：cmd.exe 命令行只有 8191 字符，
+          // 工作负载探测这类 4k+ 脚本直传必然被"命令行太长。"打回。
+          const built = buildWindowsRemoteCommand(command, env);
+          commandForExecution = built.command;
+          stdinPayload = built.stdin;
+        } else {
+          commandForExecution = withRemoteEnv(wrapRemoteCommand(command), env);
+        }
+      } catch (buildErr) {
+        // 构建期错误：直接以失败结果返回，语义与 guard 拒绝一致。
+        return resolve({
+          stdout: '',
+          stderr: buildErr.message,
+          exitCode: 126,
+          durationMs: Date.now() - startAt,
+        });
+      }
       let settled = false;
       let timer = null;
       let targetClient = null;
       let proxyClientRef = null;
       const stdoutChunks = [];
       const stderrChunks = [];
+
+      // Windows：stdout 是 UTF-8（载荷里设过编码），但非包装路径可能回落 cp936；
+      // stderr 是 PowerShell 的 CLIXML，需要还原成纯文本。
+      const collectStdout = () => (isWindows
+        ? decodeRemoteOutput(Buffer.concat(stdoutChunks))
+        : Buffer.concat(stdoutChunks).toString('utf8'));
+      const collectStderr = () => (isWindows
+        ? decodeClixml(decodeRemoteOutput(Buffer.concat(stderrChunks)))
+        : Buffer.concat(stderrChunks).toString('utf8'));
 
       const usePool = Boolean(sshPool);
 
@@ -222,8 +282,8 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
         if (settled) return;
         settled = true;
         attachExecutionContext(err, {
-          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-          stderr: Buffer.concat(stderrChunks).toString('utf8'),
+          stdout: collectStdout(),
+          stderr: collectStderr(),
           startAt,
         });
         cleanup(false);
@@ -277,21 +337,36 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
               try { onOutput({ stream: streamName, text }); } catch { /* ignore */ }
             };
 
+            // Windows 的 stderr 是 CLIXML，按块剥离会切坏标签：
+            // 累积原文、整体清洗、只发增量，代价是 stderr 量级很小时的重复解析。
+            let winStderrRaw = '';
+            let winStderrEmitted = 0;
+            const emitStderr = (text) => {
+              if (!isWindows) return emitOutput('stderr', text);
+              if (!text) return;
+              winStderrRaw += text;
+              const cleaned = decodeClixml(winStderrRaw);
+              if (cleaned.length <= winStderrEmitted) return;
+              const delta = cleaned.slice(winStderrEmitted);
+              winStderrEmitted = cleaned.length;
+              emitOutput('stderr', delta);
+            };
+
             stream.on('data', (chunk) => {
               stdoutChunks.push(chunk);
               emitOutput('stdout', stdoutDecoder.write(chunk));
             });
             stream.stderr.on('data', (chunk) => {
               stderrChunks.push(chunk);
-              emitOutput('stderr', stderrDecoder.write(chunk));
+              emitStderr(stderrDecoder.write(chunk));
             });
 
             stream.on('close', (code) => {
               emitOutput('stdout', stdoutDecoder.end());
-              emitOutput('stderr', stderrDecoder.end());
+              emitStderr(stderrDecoder.end());
               settle({
-                stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-                stderr: Buffer.concat(stderrChunks).toString('utf8'),
+                stdout: collectStdout(),
+                stderr: collectStderr(),
                 exitCode: typeof code === 'number' ? code : -1,
                 durationMs: Date.now() - startAt,
               });
@@ -302,6 +377,14 @@ function createBridgeService({ hostService, auditService, sshPool, sshShellPool,
               e.code = 'SSH_STREAM_ERROR';
               fail(e);
             });
+
+            // 长脚本经 stdin 送达（命令行侧只有恒定长度的引导程序）
+            if (stdinPayload !== null) {
+              try {
+                stream.write(stdinPayload);
+                stream.end();
+              } catch { /* stream 出错会走上面的 error 处理 */ }
+            }
           });
         })
         .catch((connectErr) => {
@@ -367,4 +450,4 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-module.exports = { createBridgeService, __private: { wrapRemoteCommand } };
+module.exports = { createBridgeService, __private: { wrapRemoteCommand, withRemoteEnv } };

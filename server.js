@@ -154,8 +154,12 @@ const probeRelayService = createProbeRelayService({ db, hostService, probeAgentS
 const probeService = createProbeService({ hostRepository, hostService, sshShellPool, probeAgentService, probeRelayService, probeTrafficService });
 const probeAlertService = createProbeAlertService({ db, hostService, logger: log });
 const probeAggregatorService = createProbeAggregatorService({ db, logger: log });
-probeService.refreshSnapshot().catch((error) => log.warn?.(`[probe] initial refresh failed: ${error.message}`));
 const bridgeService = createBridgeService({ hostService, auditService, sshPool, sshShellPool, commandGuard: createCommandGuard() });
+// Windows 主机的探针要经 bridge 发 PowerShell（POSIX 探针脚本在 Windows 上不成立），
+// 而 bridgeService 构建晚于 probeService，故在此回注。
+// 首次 refresh 必须排在回注之后，否则第一轮快照里 Windows 主机会是"监控不可用"。
+probeService.setBridgeService(bridgeService);
+probeService.refreshSnapshot().catch((error) => log.warn?.(`[probe] initial refresh failed: ${error.message}`));
 const panelWorkloadsService = createPanelWorkloadsService({ hostService, bridgeService, auditService });
 const securitySettingsService = createSecuritySettingsService({ dataDir, auditService, logger: log });
 // ─── Harness — AI 与外部世界的统一边界层 ────────────────────────────────

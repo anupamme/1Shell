@@ -100,11 +100,30 @@ function createSessionService({ hostService }) {
     return null;
   }
 
+  /**
+   * 交互式终端用哪个 shell。
+   *
+   * Windows 上 COMSPEC 恒为 cmd.exe，所以原来那个 `|| 'powershell.exe'` 分支
+   * 永远走不到 —— 想用 PowerShell 的人没有任何入口。这里改成显式可选：
+   * 设 ONESHELL_LOCAL_SHELL=powershell（或直接给可执行路径）即可切换。
+   *
+   * 默认仍是 cmd.exe：这是人自己敲的终端，不跟着 agent 的执行链路走
+   * （agent/脚本库那边统一 PowerShell，见 bridge.execLocal 与 LOCAL_SHELL_STYLE）。
+   */
   function resolveLocalShell() {
+    const override = String(process.env.ONESHELL_LOCAL_SHELL || '').trim();
+
     if (os.platform() === 'win32') {
+      if (override) {
+        if (/^powershell$/i.test(override)) return 'powershell.exe';
+        if (/^pwsh$/i.test(override)) return 'pwsh.exe';
+        if (/^cmd$/i.test(override)) return process.env.COMSPEC || 'cmd.exe';
+        return override;
+      }
       return process.env.COMSPEC || 'powershell.exe';
     }
 
+    if (override) return override;
     if (process.env.SHELL) return process.env.SHELL;
     if (fs.existsSync('/bin/bash')) return '/bin/bash';
     return '/bin/sh';

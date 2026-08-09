@@ -44,6 +44,8 @@ function normalizeHostForTool(host = {}) {
   const name = String(host.name || id || '').trim();
   const hostAddress = type === 'local' ? '127.0.0.1' : String(host.host || '127.0.0.1').trim();
   const port = type === 'local' ? null : (Number(host.port) || 22);
+  // OS/shell 让模型知道该吐 PowerShell 还是 bash —— 不给这个信号，模型默认吐 bash。
+  const osName = String(host.osInfo?.os || '').trim().toLowerCase() || null;
   return {
     id,
     name,
@@ -51,6 +53,9 @@ function normalizeHostForTool(host = {}) {
     port,
     address: port ? `${hostAddress}:${port}` : hostAddress,
     type,
+    ...(osName ? { os: osName } : {}),
+    ...(host.osInfo?.prettyName ? { osName: host.osInfo.prettyName } : {}),
+    ...(osName === 'windows' ? { shell: 'powershell' } : {}),
   };
 }
 
@@ -1186,7 +1191,11 @@ function createOneShellCoreTools(deps = {}) {
       .filter((h) => context.exposure !== 'remote' || allowedHosts.length === 0 || allowedHosts.includes('*') || allowedHosts.includes(h.id))
       .map(normalizeHostForTool)
       .filter((h) => h.id);
-    return structured(true, hosts.length > 0 ? '主机列表读取成功' : '无允许访问的主机', { hosts });
+    const payload = { hosts };
+    if (hosts.some((h) => h.os === 'windows')) {
+      payload.note = 'os=windows 的主机上命令以 PowerShell 执行，请使用 PowerShell 语法与 Windows 路径，不要用 bash/POSIX 命令。';
+    }
+    return structured(true, hosts.length > 0 ? '主机列表读取成功' : '无允许访问的主机', payload);
   }
 
   function normalizeAskTimeout(input, background = false) {

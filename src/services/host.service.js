@@ -6,6 +6,13 @@ const path = require('path');
 const { decryptText, encryptText } = require('../../lib/crypto');
 const { LOCAL_HOST_ID, ROOT_DIR } = require('../config/env');
 const {
+  WINDOWS_DETAIL_PROBE_COMMAND,
+  WINDOWS_VER_PROBE_COMMAND,
+  decodeRemoteOutput,
+  parseWindowsDetailOutput,
+  parseWindowsVerOutput,
+} = require('../../lib/win-shell');
+const {
   createId,
   hasOwn,
   normalizeHttpUrl,
@@ -44,6 +51,7 @@ function saveLocalHostConfig(config) {
 
 function createHostService({ hostRepository }) {
   const pendingOsProbeHosts = new Set();
+  const pendingOsEnsures = new Map();
 
   function normalizeHostLinks(links) {
     if (!Array.isArray(links)) return [];
@@ -197,8 +205,10 @@ function createHostService({ hostRepository }) {
         stream.on('data', (data) => { stdoutChunks.push(data); });
         stream.stderr?.on('data', (data) => { stderrChunks.push(data); });
         stream.on('close', (code) => {
+          const stdoutBuffer = Buffer.concat(stdoutChunks);
           resolve({
-            stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+            stdout: stdoutBuffer.toString('utf8'),
+            stdoutBuffer,
             stderr: Buffer.concat(stderrChunks).toString('utf8'),
             exitCode: typeof code === 'number' ? code : 0,
           });
@@ -253,8 +263,39 @@ function createHostService({ hostRepository }) {
   async function probeOsInfoFromConnection(client) {
     const command = "cat /etc/os-release 2>/dev/null; printf '\\n__1SHELL_OS_SPLIT__\\n'; uname -m 2>/dev/null; printf '\\n__1SHELL_OS_SPLIT__\\n'; uname -r 2>/dev/null";
     const result = await runSshCommand(client, command);
-    if (result.exitCode !== 0 && !String(result.stdout || '').trim()) return null;
-    return parseRemoteOsInfo(result.stdout);
+    const posix = parseRemoteOsInfo(result.stdout);
+    if (posix) return posix;
+
+    // POSIX 探测无果 → 可能是 Windows。顶层裸 `ver`（`cmd /c ver` 这类嵌套调用
+    // 会被 Windows OpenSSH 的引号处理搅坏），认出来后再用 PowerShell 拿细节。
+    return probeWindowsOsInfoFromConnection(client);
+  }
+
+  async function probeWindowsOsInfoFromConnection(client) {
+    const verResult = await runSshCommand(client, WINDOWS_VER_PROBE_COMMAND);
+    const verText = decodeRemoteOutput(verResult.stdoutBuffer);
+    const ver = parseWindowsVerOutput(verText);
+    if (!ver) return null;
+
+    let detail = null;
+    try {
+      const detailResult = await runSshCommand(client, WINDOWS_DETAIL_PROBE_COMMAND);
+      detail = parseWindowsDetailOutput(decodeRemoteOutput(detailResult.stdoutBuffer));
+    } catch {
+      // 细节探测失败不影响"这是 Windows"这个结论，走 ver 的降级信息即可。
+      detail = null;
+    }
+
+    return normalizeOsInfo({
+      os: 'windows',
+      distroId: 'windows',
+      versionId: detail?.versionId || null,
+      prettyName: detail?.prettyName || 'Windows',
+      arch: detail?.arch || null,
+      kernel: detail?.kernel || ver.kernel || null,
+      source: 'ssh',
+      detectedAt: nowIso(),
+    });
   }
 
   async function refreshHostOsInfo(hostId, { force = false, connection = null, ttlMs = 10 * 60 * 1000 } = {}) {
@@ -306,6 +347,26 @@ function createHostService({ hostRepository }) {
     if (!host) return Promise.resolve(null);
     if (host.id === LOCAL_HOST_ID || host.type === 'local') return Promise.resolve(getLocalOsInfo());
     return refreshHostOsInfo(host.id, { force: true });
+  }
+
+  /**
+   * 执行前确保知道目标主机是什么系统 —— 包装方式（POSIX vs PowerShell）依赖它。
+   * 已有记录就直接用（OS 不会变，不看新鲜度），只有完全未知时才付一次探测的代价。
+   * 探测失败返回 null，调用方按 POSIX 走，等于回到本功能之前的行为。
+   */
+  async function ensureHostOsInfo(hostId) {
+    const host = findHost(hostId);
+    if (!host) return null;
+    if (host.id === LOCAL_HOST_ID || host.type === 'local') return getLocalOsInfo();
+    const existing = normalizeOsInfo(host.osInfo);
+    if (existing?.os) return existing;
+    const inflight = pendingOsEnsures.get(hostId);
+    if (inflight) return inflight;
+    const probe = refreshHostOsInfo(hostId, { force: true })
+      .catch(() => null)
+      .finally(() => { pendingOsEnsures.delete(hostId); });
+    pendingOsEnsures.set(hostId, probe);
+    return probe;
   }
 
   function scheduleHostOsProbe(host) {
@@ -808,6 +869,7 @@ function createHostService({ hostRepository }) {
     buildStoredHost,
     connectToHost,
     ensureDefaultPreference,
+    ensureHostOsInfo,
     findHost,
     findStoredHost,
     getHostPlatformText,

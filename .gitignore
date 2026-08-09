@@ -68,6 +68,7 @@ probe-*.js
 !src/routes/probe-*.js
 !src/services/probe-*.js
 !src/services/probe/**/*.js
+!scripts/probe-*.js
 fix-claude-mcp.js
 deploy.js
 evil.txt

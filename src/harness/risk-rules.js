@@ -95,6 +95,74 @@ function hasOperationalStateMutationIntent(text) {
     || hasUnsafeOverwriteRedirect(text);
 }
 
+// ── Windows 规则辅助 ────────────────────────────────────────────────────────
+// 归一化只剥引号、不动反斜杠，故按 C:\Windows 的真实形态书写。
+
+const WIN_SENSITIVE_PATH_REGEX = /[a-z]:[\\/]+(?:windows|program files(?:\s*\(x86\))?|programdata|users|boot|recovery|\$recycle\.bin)(?:[\\/]|\s|$|[;&|,])/i;
+const WIN_SENSITIVE_VAR_REGEX = /\$env:(?:systemroot|windir|systemdrive|programfiles(?:\(x86\))?|programdata|allusersprofile)\b/i;
+
+function hasWindowsSensitivePath(text) {
+  return WIN_SENSITIVE_PATH_REGEX.test(`${text} `) || WIN_SENSITIVE_VAR_REGEX.test(text);
+}
+
+function hasWindowsRecursiveFlag(text) {
+  return /(?:^|\s)(?:-r(?:ecurse)?\b|\/s\b)/i.test(text);
+}
+
+function hasWindowsForceFlag(text) {
+  return /(?:^|\s)(?:-f(?:orce)?\b|\/f\b|\/q\b)/i.test(text)
+    || /-confirm:\s*\$false/i.test(text);
+}
+
+function hasWindowsDeleteVerb(text) {
+  return /\b(?:remove-item|rd|rmdir|del|erase)\b/i.test(text)
+    || /(?:^|[|;&\s])ri\s/i.test(text);
+}
+
+function hasWindowsFirewallDisableIntent(text) {
+  return /\bnetsh\b[^|;&\n]*\badvfirewall\b[^|;&\n]*\b(?:set\b[^|;&\n]*\bstate\s+off|reset)\b/i.test(text)
+    || /\bset-netfirewallprofile\b[^|;&\n]*-enabled\s+(?:false|0)\b/i.test(text)
+    || /\bnetsh\b[^|;&\n]*\bfirewall\b[^|;&\n]*\bset\b[^|;&\n]*\bopmode\s+disable\b/i.test(text)
+    || /\bremove-netfirewallrule\b/i.test(text);
+}
+
+function hasWindowsSecurityDisableIntent(text) {
+  // Defender / UAC / SmartScreen / 事件日志 —— 关掉它们是典型的入侵后动作
+  return /\bset-mppreference\b[^|;&\n]*-disable(?:realtimemonitoring|antispyware|behaviormonitoring|ioavprotection|scriptscanning)\s*(?:\$true|1|true)?/i.test(text)
+    || /\badd-mppreference\b[^|;&\n]*-exclusionpath\b/i.test(text)
+    || /\buninstall-windowsfeature\b[^|;&\n]*windows-defender/i.test(text)
+    || /\benablelua\b[^|;&\n]*(?:\/d\s*0|0\b)/i.test(text)
+    || /\bwevtutil\b[^|;&\n]*\b(?:cl|clear-log)\b/i.test(text)
+    || /\bclear-eventlog\b/i.test(text)
+    || /\bset-executionpolicy\b[^|;&\n]*\bbypass\b[^|;&\n]*-scope\s+localmachine/i.test(text)
+    || /\bbcdedit\b[^|;&\n]*\/set\b[^|;&\n]*\b(?:testsigning|nointegritychecks)\s+on\b/i.test(text);
+}
+
+function hasWindowsRemoteScriptPipe(text) {
+  // iwr/curl … | iex 与 DownloadString(...) | iex —— PowerShell 版 curl|sh
+  return /\b(?:invoke-webrequest|iwr|invoke-restmethod|irm|curl|wget)\b[^|;&\n]*\|\s*(?:iex|invoke-expression)\b/i.test(text)
+    || /\bdownloadstring\b[^|;&\n]*\)\s*\|\s*(?:iex|invoke-expression)\b/i.test(text)
+    || /(?:iex|invoke-expression)\s*\(\s*(?:new-object\s+net\.webclient|\(?\s*(?:iwr|irm|invoke-webrequest|invoke-restmethod))/i.test(text);
+}
+
+function hasWindowsServiceMutationIntent(text) {
+  return /\b(?:stop-service|set-service|suspend-service)\b/i.test(text)
+    || /\bsc(?:\.exe)?\s+(?:stop|delete|config)\b/i.test(text)
+    || /\bnet\s+stop\b/i.test(text)
+    || /\bdisable-(?:scheduledtask|windowsoptionalfeature)\b/i.test(text);
+}
+
+function hasWindowsUserManagementIntent(text) {
+  return /\bnet\s+(?:user|localgroup)\b[^|;&\n]*\/(?:add|delete)\b/i.test(text)
+    || /\b(?:new|remove|set)-localuser\b/i.test(text)
+    || /\b(?:add|remove)-localgroupmember\b/i.test(text);
+}
+
+function hasWindowsRebootIntent(text) {
+  return /\b(?:restart-computer|stop-computer)\b/i.test(text)
+    || /\bshutdown(?:\.exe)?\s+\/[rsh]\b/i.test(text);
+}
+
 const COMMAND_RISK_RULES = Object.freeze([
   {
     id: 'chmod-world-writable-sensitive',
@@ -155,6 +223,68 @@ const COMMAND_RISK_RULES = Object.freeze([
     level: 'high',
     label: 'Operational config, database, key, or secret file mutation',
     test: (text) => hasOperationalStateFile(text) && hasOperationalStateMutationIntent(text),
+  },
+  // ── Windows 规则 ──（红线级灾难由 command-safety 兜底，这里是分级档）
+  {
+    id: 'win-delete-sensitive-recursive-force',
+    level: 'critical',
+    label: '递归强制删除 Windows 系统路径',
+    test: (text) => hasWindowsDeleteVerb(text) && hasWindowsRecursiveFlag(text) && hasWindowsForceFlag(text) && hasWindowsSensitivePath(text),
+  },
+  {
+    id: 'win-delete-sensitive-recursive',
+    level: 'high',
+    label: '递归删除 Windows 系统路径',
+    test: (text) => hasWindowsDeleteVerb(text) && hasWindowsRecursiveFlag(text) && hasWindowsSensitivePath(text),
+  },
+  {
+    id: 'win-remote-script-pipe',
+    level: 'high',
+    label: '远程脚本管道执行 iwr/curl | iex',
+    test: hasWindowsRemoteScriptPipe,
+  },
+  {
+    id: 'win-disable-firewall',
+    level: 'high',
+    label: '关闭或重置 Windows 防火墙',
+    test: hasWindowsFirewallDisableIntent,
+  },
+  {
+    id: 'win-disable-security-mechanism',
+    level: 'high',
+    label: '关闭 Windows 安全机制 (Defender/UAC/日志)',
+    test: hasWindowsSecurityDisableIntent,
+  },
+  {
+    id: 'win-registry-write',
+    level: 'high',
+    label: '写入/删除系统注册表',
+    test: (text) => /\b(?:reg(?:\.exe)?\s+(?:add|delete|import)|new-itemproperty|set-itemproperty|remove-itemproperty)\b/i.test(text)
+      && /\bhk(?:lm|cu|cr|u|cc)\b[:\\]|\bhkey_/i.test(text),
+  },
+  {
+    id: 'win-service-mutation',
+    level: 'medium',
+    label: '停止/禁用 Windows 服务或计划任务',
+    test: hasWindowsServiceMutationIntent,
+  },
+  {
+    id: 'win-user-management',
+    level: 'medium',
+    label: 'Windows 用户/组管理',
+    test: hasWindowsUserManagementIntent,
+  },
+  {
+    id: 'win-reboot-poweroff',
+    level: 'medium',
+    label: 'Windows 重启/关机',
+    test: hasWindowsRebootIntent,
+  },
+  {
+    id: 'win-delete-recursive',
+    level: 'medium',
+    label: 'Windows 递归删除',
+    test: (text) => hasWindowsDeleteVerb(text) && hasWindowsRecursiveFlag(text),
   },
   {
     id: 'service-stop',
