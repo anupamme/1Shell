@@ -193,6 +193,25 @@ function sanitizeBasePackage(packageDir) {
       rm(path.join(packageDir, entry.name));
     }
   }
+
+  const ssh2Dir = path.join(packageDir, 'node_modules', 'ssh2');
+  rm(path.join(ssh2Dir, 'test'));
+
+  const ssh2BuildDir = path.join(ssh2Dir, 'lib', 'protocol', 'crypto', 'build');
+  for (const rel of [
+    'binding.sln',
+    'binding.Makefile',
+    'config.gypi',
+    'Makefile',
+    'sshcrypto.target.mk',
+    'sshcrypto.vcxproj',
+    'sshcrypto.vcxproj.filters',
+    'Release/.deps',
+    'Release/obj',
+    'Release/obj.target',
+  ]) {
+    rm(path.join(ssh2BuildDir, rel));
+  }
 }
 
 function nodeModulePath(nodeModulesDir, packageName) {

@@ -226,7 +226,7 @@ try {
   // native import — 原生文件扫描结果 upsert 到界面缓存；后续扫描不应清空旧 key
   const nativeImport = store.upsertNativeProvider('codex', {
     name: 'cpa-codex',
-    apiBase: 'https://codex.weidu.my/v1',
+    apiBase: 'https://codex.example.com/v1',
     apiKey: 'sk-native-codex',
     upstreamProtocol: 'openai',
     model: 'gpt-5.5',
@@ -241,14 +241,14 @@ try {
   assert.strictEqual(nativeImport.id, 'native-codex-cpa');
   const nativeListed = store.listProviders('codex').providers.find(p => p.id === nativeImport.id);
   assert.strictEqual(nativeListed.name, 'cpa-codex');
-  assert.strictEqual(nativeListed.apiBase, 'https://codex.weidu.my/v1');
+  assert.strictEqual(nativeListed.apiBase, 'https://codex.example.com/v1');
   assert.strictEqual(nativeListed.apiKeySet, true);
   assert.strictEqual(nativeListed.nativeSource, 'host-config');
   assert.strictEqual(nativeListed.nativeProviderId, 'cpa');
 
   const nativeUpdate = store.upsertNativeProvider('codex', {
     name: 'cpa-codex-renamed',
-    apiBase: 'https://codex.weidu.my/v1',
+    apiBase: 'https://codex.example.com/v1',
     apiKey: '',
     upstreamProtocol: 'openai',
     model: 'gpt-5.6',

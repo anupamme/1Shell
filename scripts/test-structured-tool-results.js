@@ -29,7 +29,7 @@ const { displayAssistantTextAfterToolResult } = moduleContext.exports;
 const generatedProxyTitle = '搭建完成 - GOST 代理服务';
 
 const fileText = [
-  'HTTP 157.254.234.107:8080',
+  'HTTP 192.0.2.10:8080',
   '密码 OX81WGskwhij0CH6WJXc5psu',
 ].join('\n');
 const readRemoteFileItems = [
@@ -49,8 +49,8 @@ assert.ok(
 );
 
 const commandText = [
-  'verification passed: curl -x http://204.136.11.229:18317 https://example.com',
-  'HTTP 204.136.11.229:18317',
+  'verification passed: curl -x http://198.51.100.23:18317 https://example.com',
+  'HTTP 198.51.100.23:18317',
   '密码 secret-value',
 ].join('\n');
 const commandItems = [
@@ -67,14 +67,14 @@ const explicitAssistantSummary = [
   generatedProxyTitle,
   '',
   '```text',
-  'HTTP   204.136.11.229:18317',
+  'HTTP   198.51.100.23:18317',
   '密码   ed',
   '```',
   '',
   '使用方式',
   '',
   '```bash',
-  'curl -x http://204.136.11.229:18317 https://example.com',
+  'curl -x http://198.51.100.23:18317 https://example.com',
   '```',
 ].join('\n');
 assert.strictEqual(
@@ -85,14 +85,14 @@ assert.strictEqual(
 
 const proxyToolResult = [
   'GOST proxy is ready',
-  'SOCKS5 10.88.90.221:12325',
-  'HTTP 10.88.90.221:12324',
+  'SOCKS5 203.0.113.21:12325',
+  'HTTP 203.0.113.21:12324',
 ].join('\n');
 const vpsReport = [
   '| Service | URL | Status |',
   '| --- | --- | --- |',
   '| 1Panel HTTP service | https://example.com | running |',
-  '| SSH | 10.88.90.221:22 | running |',
+  '| SSH | 203.0.113.21:22 | running |',
 ].join('\n');
 const crossTurnItems = [
   { kind: 'user', role: 'user', text: '搭建 GOST 代理' },

@@ -193,7 +193,7 @@
     <section class="grid">
       <aside class="panel">
         <div class="panel-head"><div><h3>主机态势</h3><p>左栏不再发空，改成更强的运行态和资源浓度。</p></div><span class="pill">HOSTS</span></div>
-        <div class="host"><strong>vip-hk</strong><small>root@82.158.226.220</small><div class="bar"><span style="width:82%"></span></div></div>
+        <div class="host"><strong>example-hk</strong><small>root@198.51.100.22</small><div class="bar"><span style="width:82%"></span></div></div>
         <div class="host"><strong>local-shell</strong><small>Windows 11 / Local Agent</small><div class="bar"><span style="width:54%"></span></div></div>
         <div class="host"><strong>edge-ch</strong><small>Debian 13 / Probe Relay</small><div class="bar"><span style="width:67%"></span></div></div>
       </aside>
@@ -204,9 +204,9 @@
         <div class="step"><i>2</i><div><strong>生成修复脚本并写入草稿区</strong><em>AI Task + Script Draft</em></div><em>执行中</em></div>
         <div class="step"><i>3</i><div><strong>审批后批量推送到选定主机</strong><em>Approval Gate</em></div><em>待审批</em></div>
         <div class="term">
-          <span class="line dim">$ probe host vip-hk --window 15m</span>
+          <span class="line dim">$ probe host example-hk --window 15m</span>
           <span class="line ok">cpu: 24%  mem: 61%  disk: 48%  rx: 7.4 MiB/s</span>
-          <span class="line dim">$ ai-draft repair --target vip-hk</span>
+          <span class="line dim">$ ai-draft repair --target example-hk</span>
           <span class="line warn">approval required: write_remote_file /etc/nginx/nginx.conf</span>
           <span class="line dim">$ waiting for operator...</span>
         </div>
@@ -215,7 +215,7 @@
       <aside class="panel">
         <div class="panel-head"><div><h3>AI 协作</h3><p>右栏强调“你和 Agent 一起做事”，不再像空白聊天框。</p></div><span class="pill">COPILOT</span></div>
         <div class="approval">
-          <span><div><b>写入 nginx 配置</b><small>目标：vip-hk</small></div><small>高风险</small></span>
+          <span><div><b>写入 nginx 配置</b><small>目标：example-hk</small></div><small>高风险</small></span>
           <span><div><b>重启容器栈</b><small>目标：edge-ch</small></div><small>已排队</small></span>
           <span><div><b>刷新 MCP 注册表</b><small>范围：全局</small></div><small>低风险</small></span>
         </div>

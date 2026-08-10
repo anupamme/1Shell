@@ -16,7 +16,7 @@ PowerShell 5.1 在位）。**不要求目标机安装任何 1Shell 组件**，
 
 ## 靶机
 
-`yun-computer`（8.134.159.135:3022），Win10 Enterprise LTSC 2021 19044（21H2），
+`windows-rig`（192.0.2.22:3022），Win10 Enterprise LTSC 2021 19044（21H2），
 已托管进本机 1Shell。
 
 - `scripts/test-windows-ssh-probe.js` —— 裸 ssh2 特征化探测（调研用）
@@ -115,7 +115,7 @@ stdout 原样吐回整段 POSIX 包装脚本与 shell 池协议片段。
 只是被写死的 `os:'linux'` 挡住永远选不到。M-W1 一通即生效：
 靶机上实测 **27 个工作负载，其中 15 个 Windows 服务**。
 
-**探针（监控图表）已补齐** —— 起因是用户发现 `yun-computer` 详情页一片空白。
+**探针（监控图表）已补齐** —— 起因是用户发现 `windows-rig` 详情页一片空白。
 排查后确认这不是"功能未做"，而是**静默失败**：
 
 - 远端探针发的是 5184 字符的 POSIX shell 脚本（`/proc`、`awk`、`df`），
@@ -169,7 +169,7 @@ stdout 原样吐回整段 POSIX 包装脚本与 shell 池协议片段。
   platform=Microsoft Windows 11 Home China / x86_64 / 10.0.26100
   network={listening:72, tcp:179}  service={failed:10}  firewall=running
 
-靶机 yun-computer（改前全 null → 改后全部有值）
+靶机 windows-rig（改前全 null → 改后全部有值）
   cpuUsage=11  memoryUsage=27.12  diskUsage=31.31  uptimeSec=35333  processCount=173
   platform=Microsoft Windows 10 企业版 LTSC / x86_64 / 10.0.19044（中文完整）
   keyProcesses=[sshd:5]  failedServices=[DoSvc, edgeupdate, frpc, ...]
