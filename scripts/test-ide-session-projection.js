@@ -27,7 +27,7 @@ try {
     id: 'agent-projection',
     title: 'projection',
     entry: 'core',
-    hostId: 'vip-hk',
+    hostId: 'example-hk',
     messages: [
       { role: 'user', content: 'Check sing-box config' },
       {

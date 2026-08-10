@@ -108,7 +108,7 @@ assert.strictEqual(classifyCommandRisk('docker compose up -d', { securityMode: '
 
 // ── 5. 事故复现：截图里那台云电脑当时能跑通的命令，现在必须被挡 ──────────────
 const INCIDENT = 'Remove-Item -Recurse -Force C:\\';
-const incidentGuard = guard.check('execute_command', { hostId: 'yun-computer', command: INCIDENT }, { capabilities: ['exec_command'], securityMode: 'trusted' });
+const incidentGuard = guard.check('execute_command', { hostId: 'windows-rig', command: INCIDENT }, { capabilities: ['exec_command'], securityMode: 'trusted' });
 assert.strictEqual(incidentGuard.allow, false, '2026-07-04 事故命令仍未被拦截');
 
 console.log('test-windows-risk-rules: OK');

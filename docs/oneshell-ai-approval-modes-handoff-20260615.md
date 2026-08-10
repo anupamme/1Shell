@@ -82,7 +82,7 @@
 
 - 任务必须自动化，所以不能每一步都问。
 - 任务会操作 VPS、端口、目录、Docker、服务，默认完全权限太危险。
-- 用户之前的 vip-hk 事故已经说明，自动化必须有边界。
+- 用户之前的 example-hk 事故已经说明，自动化必须有边界。
 
 建议权限模型：
 
@@ -347,7 +347,7 @@ full_access:
 8. `npm.cmd test` 通过。
 9. `npm.cmd --prefix frontend run build` 通过。
 
-不要再跑重型 GitHub 部署到 vip-hk。需要做端到端验证时，用 local 或低风险测试主机、短命令、临时目录、短超时。
+不要再跑重型 GitHub 部署到 example-hk。需要做端到端验证时，用 local 或低风险测试主机、短命令、临时目录、短超时。
 
 ## 不要做的事
 

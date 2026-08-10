@@ -162,12 +162,12 @@ function createHostCapabilityScanner(options = {}) {
     const targets = [];
 
     for (const home of homes) {
-      const xdgConfig = firstPath(process.env.XDG_CONFIG_HOME, path.join(home, '.config'));
-      const appData = firstPath(process.env.APPDATA, path.join(home, 'AppData', 'Roaming'));
-      const localAppData = firstPath(process.env.LOCALAPPDATA, path.join(home, 'AppData', 'Local'));
-      const codexHome = firstPath(process.env.CODEX_HOME, path.join(home, '.codex'));
-      const claudeHome = firstPath(process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'));
-      const opencodeHome = firstPath(process.env.OPENCODE_CONFIG_HOME, path.join(xdgConfig, 'opencode'));
+      const xdgConfig = firstPath(explicitHomeDir ? '' : process.env.XDG_CONFIG_HOME, path.join(home, '.config'));
+      const appData = firstPath(explicitHomeDir ? '' : process.env.APPDATA, path.join(home, 'AppData', 'Roaming'));
+      const localAppData = firstPath(explicitHomeDir ? '' : process.env.LOCALAPPDATA, path.join(home, 'AppData', 'Local'));
+      const codexHome = firstPath(explicitHomeDir ? '' : process.env.CODEX_HOME, path.join(home, '.codex'));
+      const claudeHome = firstPath(explicitHomeDir ? '' : process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'));
+      const opencodeHome = firstPath(explicitHomeDir ? '' : process.env.OPENCODE_CONFIG_HOME, path.join(xdgConfig, 'opencode'));
 
       targets.push(
         {
@@ -236,10 +236,10 @@ function createHostCapabilityScanner(options = {}) {
 
     if (includeNative) {
       for (const home of hostHomes()) {
-        const xdgConfig = firstPath(process.env.XDG_CONFIG_HOME, path.join(home, '.config'));
-        const codexHome = firstPath(process.env.CODEX_HOME, path.join(home, '.codex'));
-        const claudeHome = firstPath(process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'));
-        const opencodeHome = firstPath(process.env.OPENCODE_CONFIG_HOME, path.join(xdgConfig, 'opencode'));
+        const xdgConfig = firstPath(explicitHomeDir ? '' : process.env.XDG_CONFIG_HOME, path.join(home, '.config'));
+        const codexHome = firstPath(explicitHomeDir ? '' : process.env.CODEX_HOME, path.join(home, '.codex'));
+        const claudeHome = firstPath(explicitHomeDir ? '' : process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'));
+        const opencodeHome = firstPath(explicitHomeDir ? '' : process.env.OPENCODE_CONFIG_HOME, path.join(xdgConfig, 'opencode'));
 
         roots.push(
           { agentId: 'claude-code', dir: path.join(claudeHome, 'skills') },

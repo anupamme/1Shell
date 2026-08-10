@@ -36,7 +36,7 @@ const hostRepository = {
 
 const hostService = createHostService({ hostRepository });
 stored.push(hostService.buildStoredHost({
-  name: 'yun-computer', host: HOST, port: PORT, username: USER, authType: 'password', password: PASS,
+  name: 'windows-rig', host: HOST, port: PORT, username: USER, authType: 'password', password: PASS,
 }));
 const hostId = stored[0].id;
 

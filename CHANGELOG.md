@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.7.6 - 2026-07-29
+## 4.7.6 - 2026-08-10
 
 脚本库彻底重构：回归"存脚本 + 在终端里用"，并把它接成 1Shell AI 能读能写能跑的东西。
 
@@ -15,10 +15,13 @@
 - 移除 AI 生成脚本弹窗与 `/api/scripts/ai-generate`：提示词产出的 `icon`/`category`/`riskLevel`/`parameters` 在新模型下已全部不存在，且能力被 `save_script` 完全覆盖且更强（可对话迭代）。
 - 清理：`ide.tools.js` 里被 core 委派永久遮蔽的 `list_scripts` / `run_script` 影子副本（schema + handler）删除；时间线补上四个脚本工具的中文名（此前 `list_scripts` 会显示成"列出目录"），顺带清掉 4.7.5 漏删的 AI 任务工具标签；`HostInfo` 从脚本模块归位到 `utils/mainConsole`。
 - 页面上三个装饰性控件（导入/导出、"+ 新标签"、排序）与 BETA 徽章一并移除。
+- Windows 主机进入原生 SSH 托管链路：补齐 PowerShell/cmd shell 识别、远程命令执行、主机探针、风险规则、服务面板工作负载识别与审计数据，并增加 Windows 实机探测脚本和回归测试。
+- 文件上传改为 Busboy 流式处理，避免大文件完整进入内存；MCP 文件传输补齐分片上传、后台任务、进度与校验能力。
+- Provider 的 `apiBase` 改为严格使用用户填写的版本路径，不再自动追加 `/v1`，兼容非 OpenAI 路径结构的中转与原生接口。
 
 ### Verification
 
-- `npm test`（40 个脚本；新增 `test-script-library` 覆盖占位符扫描/缺键报错/shell 转义/灾难命令拦截，退役守卫固化本次全部删除项）
+- `npm test`（44 个脚本；覆盖脚本库、Windows 原生 SSH/探针/风险规则、流式上传与既有回归守卫）
 - `npm --prefix frontend run build`
 
 ## 4.7.5 - 2026-07-26
@@ -427,7 +430,7 @@
 - `npm --prefix frontend run build`
 - Repacked Windows and Linux updater assets from the verified 4.2.0 offline release baseline.
 - Windows clean extract smoke test with bundled Node `v20.18.3`; `/api/health` returned `status:"ok"` and `usingFallbackSecret:false`.
-- Linux/vip-hk original offline release script build completed with bundled Node `v20.18.3`, native module checks, frontend build, agent build, SHA256 verification, and `/api/health` returning `status:"ok"` and `usingFallbackSecret:false`.
+- Linux/example-hk original offline release script build completed with bundled Node `v20.18.3`, native module checks, frontend build, agent build, SHA256 verification, and `/api/health` returning `status:"ok"` and `usingFallbackSecret:false`.
 
 ## 4.2.3 - 2026-06-19
 
@@ -559,4 +562,4 @@
 - `npm test`
 - `npm --prefix frontend run build`
 - Windows 干净解压后运行 `start.bat`，自动生成 `.env` 和 `APP_SECRET`，`/api/health` 返回 `usingFallbackSecret:false`
-- Linux/vip-hk 干净解压后运行 `start.sh`，自动生成 `.env` 和 `APP_SECRET`，`/api/health` 返回 `usingFallbackSecret:false`
+- Linux/example-hk 干净解压后运行 `start.sh`，自动生成 `.env` 和 `APP_SECRET`，`/api/health` 返回 `usingFallbackSecret:false`

@@ -207,7 +207,7 @@ async function runAsyncChecks() {
 
   {
     // 脚本没真正跑起来（cmd 回显垃圾）：必须明确报错，不能"在线但全 null"
-    // —— 这正是修复前 yun-computer 详情页空白的根因
+    // —— 这正是修复前 windows-rig 详情页空白的根因
     const { probeService } = makeProbeHarness({
       osInfo: { os: 'windows' },
       bridgeResult: {

@@ -142,7 +142,7 @@
         <div class="panel">
           <h3>主机列表</h3>
           <div class="host"><b>本机</b><small>Windows 11 / 已连接</small><div class="bar"><span style="width:48%"></span></div></div>
-          <div class="host"><b>vip-hk</b><small>Debian 13 / 负载稳定</small><div class="bar"><span style="width:69%"></span></div></div>
+          <div class="host"><b>example-hk</b><small>Debian 13 / 负载稳定</small><div class="bar"><span style="width:69%"></span></div></div>
           <div class="host"><b>vip-edge</b><small>Ubuntu 24.04 / 待巡检</small><div class="bar"><span style="width:61%"></span></div></div>
         </div>
       </aside>
@@ -162,11 +162,11 @@
         <div class="workspace">
           <div class="terminal">
             <div class="terminal-head"><strong>本机 · PowerShell</strong><span style="color:#8ea7bb;font-size:12px;">脚本 | 重连 | AI 命令 | 清屏</span></div>
-            <pre><span class="dim">PS C:\Users\jsw_0&gt; 1shell inspect --host vip-hk --window 15m</span>
+            <pre><span class="dim">PS C:\Users\operator&gt; 1shell inspect --host example-hk --window 15m</span>
 <span class="ok">[probe] cpu 24% · mem 61% · disk 48% · rx 7.4 MiB/s</span>
-<span class="dim">PS C:\Users\jsw_0&gt; 1shell agent draft "optimize nginx worker config"</span>
+<span class="dim">PS C:\Users\operator&gt; 1shell agent draft "optimize nginx worker config"</span>
 <span class="warn">[approval] write_remote_file /etc/nginx/nginx.conf</span>
-<span class="dim">PS C:\Users\jsw_0&gt; waiting for operator confirmation...</span></pre>
+<span class="dim">PS C:\Users\operator&gt; waiting for operator confirmation...</span></pre>
           </div>
 
           <div class="panel">
@@ -182,7 +182,7 @@
             <h3>最近审计</h3>
             <p>把你现在散着的审批、审计、脚本历史揉成一块更可扫读的台面。</p>
             <div class="audit-row head"><span>动作</span><span>主机</span><span>来源</span><span>状态</span></div>
-            <div class="audit-row"><span>write_remote_file</span><small>vip-hk</small><small>AI Agent</small><small style="color:#de6c56;">待审批</small></div>
+            <div class="audit-row"><span>write_remote_file</span><small>example-hk</small><small>AI Agent</small><small style="color:#de6c56;">待审批</small></div>
             <div class="audit-row"><span>download_file</span><small>本机</small><small>Operator</small><small style="color:#11b89b;">完成</small></div>
             <div class="audit-row"><span>restart service</span><small>vip-edge</small><small>Runbook</small><small style="color:#f3a637;">排队</small></div>
           </div>
@@ -202,7 +202,7 @@
       <aside class="copilot">
         <div class="panel">
           <h3>AI 协作</h3>
-          <div class="chat"><b>巡检建议</b><small>优先看 vip-hk 的 nginx worker 上限与 access log 写盘。</small></div>
+          <div class="chat"><b>巡检建议</b><small>优先看 example-hk 的 nginx worker 上限与 access log 写盘。</small></div>
           <div class="chat"><b>脚本建议</b><small>可先在草稿区生成变更，再用审批模式下发到单主机验证。</small></div>
           <div class="chat"><b>风险提醒</b><small>当前动作涉及系统配置写入，建议保留回滚副本。</small></div>
         </div>

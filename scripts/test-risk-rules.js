@@ -146,12 +146,12 @@ assert.strictEqual(readonlyDiscovery.allow, true, 'read-only discovery shell scr
 assert.strictEqual(readonlyDiscovery.needApproval, false, 'read-only discovery shell script should not ask for approval');
 assert.strictEqual(readonlyDiscovery.approvalRequired, false, 'read-only discovery shell script should not require approval');
 
-const probeRead = guard.check('get_probe', { hostId: 'vip-hk', refresh: true }, { capabilities: ['read_only'], securityMode: 'trusted' });
+const probeRead = guard.check('get_probe', { hostId: 'example-hk', refresh: true }, { capabilities: ['read_only'], securityMode: 'trusted' });
 assert.strictEqual(probeRead.allow, true, 'get_probe should be allowed as a read-only probe tool');
 assert.strictEqual(probeRead.needApproval, false, 'get_probe should not need approval');
 assert.strictEqual(probeRead.summary?.actionKind, 'tool', 'get_probe should have a tool summary');
 
-const probeSamples = guard.check('get_probe_samples', { hostId: 'vip-hk', minutes: 60 }, { capabilities: ['read_only'], securityMode: 'trusted' });
+const probeSamples = guard.check('get_probe_samples', { hostId: 'example-hk', minutes: 60 }, { capabilities: ['read_only'], securityMode: 'trusted' });
 assert.strictEqual(probeSamples.allow, true, 'get_probe_samples should be allowed as a read-only probe tool');
 
 const writeFile = guard.check('write_remote_file', { hostId: 'local', path: '/tmp/example.txt', content: 'hello' }, { capabilities: ['exec_command'], securityMode: 'trusted' });
@@ -184,7 +184,7 @@ assert.strictEqual(dockerCleanup.allow, true, 'docker cleanup command should pas
 assert.strictEqual(dockerCleanup.approvalRequired, true, 'docker cleanup command should require approval');
 assert.match(dockerCleanup.reason || '', /Docker/, 'docker cleanup approval should explain Docker side effects');
 
-const probeInstall = guard.check('install_probe_agent', { hostId: 'vip-hk', serverUrl: 'https://example.com' }, { capabilities: ['exec_command'], securityMode: 'trusted' });
+const probeInstall = guard.check('install_probe_agent', { hostId: 'example-hk', serverUrl: 'https://example.com' }, { capabilities: ['exec_command'], securityMode: 'trusted' });
 assert.strictEqual(probeInstall.allow, true, 'install_probe_agent should pass guard for approval gate');
 assert.strictEqual(probeInstall.needApproval, true, 'install_probe_agent should need approval');
 

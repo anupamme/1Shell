@@ -95,7 +95,7 @@ function codexProvider(reasoningEffort, localConfig) {
     id: 'codex-native',
     name: localConfig?.providerId || 'cpa',
     codexProviderId: localConfig?.providerId || 'cpa',
-    apiBase: localConfig?.baseUrl || 'https://codex.weidu.my/v1',
+    apiBase: localConfig?.baseUrl || 'https://codex.example.com/v1',
     apiKey: process.env.OPENAI_API_KEY || 'sk-codex-native-test',
     model: localConfig?.model || 'gpt-5.5',
     upstreamProtocol: 'openai',
@@ -175,7 +175,7 @@ function assertCodexNativeConfig() {
       const configToml = fs.readFileSync(path.join(dataDir, '.codex', 'config.toml'), 'utf8');
       const launchEnv = nativeConfig.buildLaunchEnv('codex', { cwd: '/native-codex-test' });
       const providerId = localConfig?.providerId || 'cpa';
-      const baseUrl = localConfig?.baseUrl || 'https://codex.weidu.my/v1';
+      const baseUrl = localConfig?.baseUrl || 'https://codex.example.com/v1';
       const model = localConfig?.model || 'gpt-5.5';
 
       assert.ok(configToml.includes(`model_provider = "${providerId}"`), configToml);
@@ -448,7 +448,7 @@ function assertNativeConfigScanReadsHostApiConfig() {
       '',
       '[model_providers.cpa]',
       'name = "cpa-codex"',
-      'base_url = "https://codex.weidu.my/v1"',
+      'base_url = "https://codex.example.com/v1"',
       'env_key = "OPENAI_API_KEY"',
     ].join('\n'), 'utf8');
     fs.writeFileSync(path.join(codexDir, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-import-codex' }, null, 2), 'utf8');
@@ -456,7 +456,7 @@ function assertNativeConfigScanReadsHostApiConfig() {
     const codexScan = nativeConfig.scanNativeProviderConfig('codex');
     assert.strictEqual(codexScan.found, true, 'Codex native scan should find config.toml');
     assert.strictEqual(codexScan.provider.name, 'cpa-codex');
-    assert.strictEqual(codexScan.provider.apiBase, 'https://codex.weidu.my/v1');
+    assert.strictEqual(codexScan.provider.apiBase, 'https://codex.example.com/v1');
     assert.strictEqual(codexScan.provider.apiKey, 'sk-import-codex');
     assert.strictEqual(codexScan.provider.model, 'gpt-5.5');
     assert.strictEqual(codexScan.provider.reasoningEffort, 'high');
@@ -504,7 +504,7 @@ function assertNativeConfigScanReadsHostApiConfig() {
       '    "cpa": {',
       '      "npm": "@ai-sdk/openai-compatible",',
       '      "name": "cpa-opencode",',
-      '      "options": { "baseURL": "https://codex.weidu.my/v1", "apiKey": "sk-import-opencode" },',
+      '      "options": { "baseURL": "https://codex.example.com/v1", "apiKey": "sk-import-opencode" },',
       '      "models": {',
       '        "gpt-5.5": { "name": "gpt-5.5", "limit": { "context": 200000, "output": 8192 } }',
       '      }',
@@ -516,7 +516,7 @@ function assertNativeConfigScanReadsHostApiConfig() {
     const openCodeScan = nativeConfig.scanNativeProviderConfig('opencode', { cwd: projectDir });
     assert.strictEqual(openCodeScan.found, true, 'OpenCode native scan should find opencode.jsonc');
     assert.strictEqual(openCodeScan.provider.name, 'cpa-opencode');
-    assert.strictEqual(openCodeScan.provider.apiBase, 'https://codex.weidu.my/v1');
+    assert.strictEqual(openCodeScan.provider.apiBase, 'https://codex.example.com/v1');
     assert.strictEqual(openCodeScan.provider.apiKey, 'sk-import-opencode');
     assert.strictEqual(openCodeScan.provider.model, 'gpt-5.5');
     assert.strictEqual(openCodeScan.provider.opencodeProviderId, 'cpa');
