@@ -214,8 +214,13 @@ function create(): SessionTerminalApi {
     const container = mountedContainer || _term.element?.parentElement || null;
     if (!container) return null;
     const rect = container.getBoundingClientRect();
-    const width = rect.width || container.clientWidth;
-    const height = rect.height || container.clientHeight;
+    const style = window.getComputedStyle(container);
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    const paddingRight = parseFloat(style.paddingRight) || 0;
+    const paddingTop = parseFloat(style.paddingTop) || 0;
+    const paddingBottom = parseFloat(style.paddingBottom) || 0;
+    const width = Math.max(0, (rect.width || container.clientWidth) - paddingLeft - paddingRight);
+    const height = Math.max(0, (rect.height || container.clientHeight) - paddingTop - paddingBottom);
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
     const cell = terminalCellSize();
     const cols = Math.floor(width / cell.width);

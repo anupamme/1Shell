@@ -577,19 +577,23 @@ function isFocusedItem(item: DirItem): boolean {
     </template>
 
     <template v-else-if="props.activeTab === 'files'">
-      <div class="shrink-0 px-3 py-2 border-b border-slate-200 dark:border-white/[0.05]">
+      <div class="shrink-0 px-3 py-2.5 border-b border-slate-200/80 dark:border-white/[0.05]">
         <div class="flex items-center gap-2">
           <div class="min-w-0 flex-1">
-            <div class="text-[11px] font-semibold tracking-widest text-slate-400 dark:text-slate-500 uppercase">文件</div>
-            <div class="mt-0.5 text-xs font-medium text-slate-700 dark:text-slate-200 truncate">{{ fileHostLabel }}</div>
+            <div class="text-[10px] font-semibold tracking-wider text-slate-400 dark:text-slate-500 uppercase">文件浏览</div>
+            <div class="mt-0.5 text-xs font-semibold text-slate-800 dark:text-slate-100 truncate">{{ fileHostLabel }}</div>
           </div>
           <button
             v-if="canNewSessionHere"
-            class="h-7 px-2 rounded-md border border-sky-200 dark:border-sky-400/25 text-[11px] text-sky-600 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-400/10 transition-colors cursor-pointer whitespace-nowrap"
+            class="h-7 px-2.5 rounded-lg border border-sky-200 dark:border-sky-400/25 bg-sky-50/60 dark:bg-sky-400/10 text-[11px] font-medium text-sky-600 dark:text-sky-300 hover:bg-sky-100/80 dark:hover:bg-sky-400/20 transition-all cursor-pointer whitespace-nowrap"
             title="以当前目录为工作目录新建 agent 会话"
             @click="emit('new-session-at', fb.currentPath.value)"
           >在此新建会话</button>
-          <button class="h-7 px-2 rounded-md border border-slate-200 dark:border-white/[0.08] text-[11px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white dark:hover:bg-white/[0.04] transition-colors cursor-pointer" title="刷新当前目录" @click="fb.refreshCurrent">刷新</button>
+          <button
+            class="h-7 px-2.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 hover:border-slate-300 dark:hover:border-white/[0.15] transition-all cursor-pointer"
+            title="刷新当前目录"
+            @click="fb.refreshCurrent"
+          >刷新</button>
         </div>
         <div v-if="activeFileFocus" class="mt-2 rounded-lg border border-sky-200 dark:border-sky-400/15 bg-sky-50/70 dark:bg-sky-400/8 px-2.5 py-2">
           <div class="flex items-center gap-1.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
@@ -605,28 +609,28 @@ function isFocusedItem(item: DirItem): boolean {
         </div>
       </div>
 
-      <div class="shrink-0 px-3 py-2 border-b border-slate-200 dark:border-white/[0.04]">
-        <div class="flex gap-1.5 overflow-x-auto pb-0.5">
+      <div class="shrink-0 px-3 py-2 border-b border-slate-200/80 dark:border-white/[0.04]">
+        <div class="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
           <button
-            class="h-7 px-2 rounded-md text-[11px] border transition-colors cursor-pointer whitespace-nowrap"
-            :class="fileHostId === 'local' ? 'border-sky-300 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:bg-white dark:hover:bg-white/[0.04]'"
+            class="h-6 px-2.5 rounded-full text-[11px] font-medium border transition-all cursor-pointer whitespace-nowrap"
+            :class="fileHostId === 'local' ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300 shadow-sm' : 'border-slate-200/80 dark:border-white/[0.07] text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
             @click="selectHost('local')"
           >本机</button>
           <button
             v-for="host in hostList"
             :key="host.id"
-            class="h-7 px-2 rounded-md text-[11px] border transition-colors cursor-pointer whitespace-nowrap max-w-28 truncate"
-            :class="fileHostId === host.id ? 'border-sky-300 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300' : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:bg-white dark:hover:bg-white/[0.04]'"
+            class="h-6 px-2.5 rounded-full text-[11px] font-medium border transition-all cursor-pointer whitespace-nowrap max-w-28 truncate"
+            :class="fileHostId === host.id ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50 dark:bg-sky-400/10 text-sky-700 dark:text-sky-300 shadow-sm' : 'border-slate-200/80 dark:border-white/[0.07] text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
             :title="host.name || host.id"
             @click="selectHost(host.id)"
           >{{ host.name || host.id }}</button>
         </div>
-        <div v-if="crumbs.length" class="mt-2 flex items-center gap-1 overflow-hidden">
+        <div v-if="crumbs.length" class="mt-2 flex items-center gap-1 overflow-hidden px-1 py-0.5 rounded-md bg-slate-50 dark:bg-white/[0.02]">
           <template v-for="(crumb, index) in crumbs.slice(-4)" :key="`${crumb.path}-${index}`">
             <button
               type="button"
-              class="min-w-0 text-[11px] truncate"
-              :class="crumb.active ? 'text-slate-500 dark:text-slate-400 cursor-default' : 'text-sky-600 dark:text-sky-400 hover:underline cursor-pointer'"
+              class="min-w-0 text-[11px] truncate font-mono"
+              :class="crumb.active ? 'text-slate-600 dark:text-slate-300 cursor-default font-semibold' : 'text-slate-400 dark:text-slate-500 hover:text-sky-600 dark:hover:text-sky-400 cursor-pointer'"
               :disabled="crumb.active"
               @click="fb.navigate(crumb.path)"
             >{{ crumb.label }}</button>
@@ -659,13 +663,13 @@ function isFocusedItem(item: DirItem): boolean {
             v-for="item in visibleItems"
             :key="item.path"
             type="button"
-            class="group w-full min-h-9 px-2 rounded-lg flex items-center gap-2 text-left transition-colors cursor-pointer border"
-            :class="isFocusedItem(item) ? 'border-sky-300 dark:border-sky-400/25 bg-sky-50 dark:bg-sky-400/10' : 'border-transparent hover:bg-white dark:hover:bg-white/[0.04]'"
+            class="group w-full min-h-8.5 px-2.5 rounded-lg flex items-center gap-2.5 text-left transition-all cursor-pointer border"
+            :class="isFocusedItem(item) ? 'border-sky-300 dark:border-sky-400/30 bg-sky-50/80 dark:bg-sky-400/10 shadow-sm' : 'border-transparent hover:bg-slate-50 dark:hover:bg-white/[0.04]'"
             @click="onFileClick(item)"
           >
-            <AppIcon :name="item.isDir || item.isDrive ? 'folder' : 'file'" :size="14" :class="item.isDir || item.isDrive ? 'text-sky-500 dark:text-sky-400' : 'text-slate-400 dark:text-slate-500'" />
-            <span class="min-w-0 flex-1 truncate text-xs" :class="isFocusedItem(item) ? 'text-sky-700 dark:text-sky-300 font-semibold' : 'text-slate-700 dark:text-slate-200'">{{ item.name }}</span>
-            <span v-if="!item.isDir && !item.isDrive" class="text-[10px] text-slate-400 dark:text-slate-600 shrink-0">{{ formatSize(item.size) }}</span>
+            <AppIcon :name="item.isDir || item.isDrive ? 'folder' : 'file'" :size="15" :class="item.isDir || item.isDrive ? 'text-amber-500 dark:text-amber-400' : 'text-slate-400 dark:text-slate-500'" />
+            <span class="min-w-0 flex-1 truncate text-xs" :class="isFocusedItem(item) ? 'text-sky-700 dark:text-sky-300 font-semibold' : 'text-slate-700 dark:text-slate-200 group-hover:text-slate-900 dark:group-hover:text-slate-100'">{{ item.name }}</span>
+            <span v-if="!item.isDir && !item.isDrive" class="text-[10px] font-mono text-slate-400 dark:text-slate-500 shrink-0">{{ formatSize(item.size) }}</span>
           </button>
         </template>
       </div>

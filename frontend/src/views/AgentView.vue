@@ -2295,6 +2295,7 @@ function onSecretRefSubmit(secretRef: string): void {
         <TerminalArea
           @host-change="onHostConnect"
           @fullscreen-toggle="onTerminalFullscreen"
+          @open-host-selector="railTab = 'chat'; railCollapsed = false"
         />
       </div>
 

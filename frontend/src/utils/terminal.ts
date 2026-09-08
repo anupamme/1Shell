@@ -53,26 +53,26 @@ export interface LifecyclePayload {
 /* ───── xterm 主题（与老 session-terminal.js DARK_THEME/LIGHT_THEME 1:1） ───── */
 
 export const DARK_THEME: ITheme = {
-  background: '#0f1729',
-  foreground: '#dbeafe',
-  cursor: '#4f8cff',
-  selectionBackground: 'rgba(79, 140, 255, 0.28)',
-  black: '#1f2937', red: '#f87171', green: '#4ade80', yellow: '#fbbf24',
-  blue: '#60a5fa', magenta: '#c084fc', cyan: '#22d3ee', white: '#e5eefc',
-  brightBlack: '#4b5563', brightRed: '#fca5a5', brightGreen: '#86efac',
-  brightYellow: '#fcd34d', brightBlue: '#93c5fd', brightMagenta: '#d8b4fe',
-  brightCyan: '#67e8f9', brightWhite: '#f8fafc',
+  background: '#0b101c',
+  foreground: '#e2e8f0',
+  cursor: '#38bdf8',
+  selectionBackground: 'rgba(56, 189, 248, 0.28)',
+  black: '#1e293b', red: '#f87171', green: '#34d399', yellow: '#fbbf24',
+  blue: '#38bdf8', magenta: '#c084fc', cyan: '#22d3ee', white: '#f8fafc',
+  brightBlack: '#64748b', brightRed: '#fca5a5', brightGreen: '#6ee7b7',
+  brightYellow: '#fde047', brightBlue: '#7dd3fc', brightMagenta: '#d8b4fe',
+  brightCyan: '#67e8f9', brightWhite: '#ffffff',
 };
 
 export const LIGHT_THEME: ITheme = {
-  background: '#f8fafc',
-  foreground: '#1e293b',
-  cursor: '#3b82f6',
-  selectionBackground: 'rgba(59, 130, 246, 0.18)',
-  black: '#374151', red: '#dc2626', green: '#16a34a', yellow: '#ca8a04',
-  blue: '#2563eb', magenta: '#7c3aed', cyan: '#0891b2', white: '#f8fafc',
-  brightBlack: '#6b7280', brightRed: '#ef4444', brightGreen: '#22c55e',
-  brightYellow: '#eab308', brightBlue: '#3b82f6', brightMagenta: '#a855f7',
+  background: '#ffffff',
+  foreground: '#0f172a',
+  cursor: '#0284c7',
+  selectionBackground: 'rgba(2, 132, 199, 0.18)',
+  black: '#1e293b', red: '#dc2626', green: '#059669', yellow: '#d97706',
+  blue: '#0284c7', magenta: '#7c3aed', cyan: '#0891b2', white: '#f8fafc',
+  brightBlack: '#64748b', brightRed: '#ef4444', brightGreen: '#10b981',
+  brightYellow: '#f59e0b', brightBlue: '#0ea5e9', brightMagenta: '#8b5cf6',
   brightCyan: '#06b6d4', brightWhite: '#ffffff',
 };
 

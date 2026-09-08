@@ -200,6 +200,37 @@ const sizePx = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M12 10v4M12 17v.5" />
     </template>
 
+    <!-- 刷新 / 重连 -->
+    <template v-else-if="name === 'refresh'">
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+      <path d="M16 16h5v5" />
+    </template>
+
+    <!-- 扫帚 / 清屏 / 清理 -->
+    <template v-else-if="name === 'broom'">
+      <path d="M18 3l3 3-9.5 9.5a2 2 0 0 1-1.4.6H7v-3.1a2 2 0 0 1 .6-1.4L18 3z" />
+      <path d="M3 21h7" />
+      <path d="M5 18l-2 3" />
+    </template>
+
+    <!-- 最大化 / 全屏扩展 -->
+    <template v-else-if="name === 'maximize'">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />
+    </template>
+
+    <!-- 最小化 / 退出全屏 -->
+    <template v-else-if="name === 'minimize'">
+      <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
+    </template>
+
+    <!-- 代码 / 脚本 -->
+    <template v-else-if="name === 'code'">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </template>
+
     <!-- 勾 -->
     <template v-else-if="name === 'check'">
       <path d="M5 12.5l4.5 4.5L19 7" />
