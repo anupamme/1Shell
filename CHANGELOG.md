@@ -2,24 +2,21 @@
 
 ## 4.7.7 - 2026-09-08
 
-外部 Agent 安全护栏、1Shell AI MCP 委托能力、桌面版 PATH 修复、长会话内存回收、终端界面精修。
-
-- 新增命令白名单/黑名单（设置 → 安全）：黑名单按词边界无条件拦截（含 `bash -c`、`$(…)`、绝对路径等包装写法）；白名单逐语句豁免，但不可豁免灾难红线与 critical 级规则。规则全局生效于所有执行入口，`run_script` 渲染产物同过黑名单。
-- 新增命令试算：预演一条命令会被放行、告警、审批还是拦截，不实际执行。
-- 风险分级校准：docker 日常运维动词（run/start/stop/restart/pull/build 及 compose 等价动词）降为 medium，标准挡位直接放行；删除类动词保持 high；`docker run --rm` 不再误判为删除。
-- `ask_1shell_ai` 的 answer/plan 模式开放只读命令探查，外部 AI 可将其作为只读子 agent；写操作仍需 mode=execute。
-- 新增 AI 审批（默认关闭）：外部 MCP 的待审批命令交 1Shell AI 单次评估放行或拒绝，模型超时/报错/输出不可解析一律拒绝；仅外部 MCP 入口生效，决策写入审计。
-- MCP 板块新增「1Shell AI」设置页：委托开关、审批开关、模型选择。
-- 修复：4.7.5 起桌面版后端进程 PATH 被破坏，第三方 agent 误报未安装、本机命令执行报 ENOENT。
-- 新增 agent 二进制检测兜底：PATH 扫描失败时直查 npm 全局目录，已安装的 CLI 不再误报 missing。
-- 修复：1Shell AI 在默认输出 thinking 块的推理模型（如 DeepSeek v4）上多轮工具循环失败；AI 审批在同类模型上输出被 thinking 块耗尽。
+- 新增命令白名单/黑名单与命令试算（设置 → 安全）。
+- docker 日常运维命令风险等级降为 medium，删除类保持 high。
+- `ask_1shell_ai` 的 answer/plan 模式支持只读命令探查。
+- 新增 AI 审批（默认关闭），外部 MCP 的待审批命令交 1Shell AI 评估。
+- MCP 板块新增「1Shell AI」设置页。
+- 修复：桌面版后端 PATH 被破坏，第三方 agent 误报未安装、本机命令执行报错。
+- 修复：agent 二进制检测在 PATH 异常时误报未安装。
+- 修复：1Shell AI 在默认输出 thinking 块的推理模型上多轮工具循环失败。
+- 修复：长会话服务器内存无限积压。
 - 修复：MCP 板块 1Shell AI 设置的数字输入框保存崩溃。
-- 新增长会话内存回收：AgentRun 状态结束/取消后到期删除（存量上限 200）；会话空闲 30 分钟落盘回收；回溯快照总会话预算 32MB；单条工具输出入库截断 256K 字符。
-- 终端界面精修：标签栏药丸卡片化并新增 `+` 快速连接主机；终端画布大圆角卡片化并增加内容内边距；操作按钮全部图标化；浅色主题纯白底、深色主题 #0b101c。
+- 终端界面前端优化。
 
 ### Verification
 
-- `npm test`（48 个脚本；新增 test-command-rules / test-gateway-readonly-exploration / test-ai-approver / test-agent-memory-reclaim）
+- `npm test`（48 个脚本）
 - `npm --prefix frontend run build`
 
 ## 4.7.6 - 2026-08-10
