@@ -2,14 +2,16 @@
 
 ## 未发布（4.7.7 开发中）
 
-外部 Agent 安全护栏升级 + 1Shell AI 子 agent 能力 + 桌面版 PATH 修复。
+外部 Agent 安全护栏升级 + 1Shell AI 子 agent 能力 + 桌面版 PATH 修复 + 长会话内存回收 + 终端界面精修。
 
 - **修复（桌面版严重 bug）**：4.7.5 起桌面版后端进程的 PATH 被破坏——spawnServer 给后端前置 runtime/node 目录时写了 `env.PATH`，而 Windows 真实键名是 `Path`，普通对象上新建的 `PATH` 键在子进程里把真 `Path` 整条遮蔽，后端 PATH 只剩 runtime 目录。后果：第三方 agent（Claude Code/Codex/OpenCode）一直误报"未安装"、本机命令执行/文件服务全部 ENOENT（`spawn powershell.exe ENOENT`）。修复为按现有键的大小写拼写追加。诊断过程：本机探针正常（spawn 不传 env 用真实环境块）而 exec 失败（传 `{...process.env}` 用合并后的坏值），两条检测链路（agent-catalog 的 PATH 扫描与 native-cli-config 的 where.exe）全灭，锁定单一根因。
 - **检测兜底（参考 cc-switch 的思路：按固定位置找而不是依赖进程环境）**：新增 `src/agents/binary-locate.js`，PATH 扫描/where.exe 失败时直查 npm 全局目录（Windows `%APPDATA%\npm`，类 Unix `~/.npm-global/bin`、`~/.local/bin`），agent-catalog 与 native-cli-config 两条链路都接入——即使将来再出现 PATH 残缺的场景，已安装的 CLI 也不会误报 missing。
 
 - `ask_1shell_ai`（外部 AI 委托 1Shell AI）的 answer/plan 模式支持只读命令探查：此前 answer 模式连 `docker ps`、`systemctl status` 都不能跑（execute_command 被整体视为变更工具），只剩读文件/看探针。现在 answer/plan 放行只读命令（复用 read_only 能力的白名单判定，含 `git -C <path> log` 这类带全局旗标的写法），写命令与其余写工具照旧拒绝，需要变更仍须 mode=execute。外部 AI 现在可以真正把 1Shell AI 当"只读探查子 agent"用。远程 MCP Token 的工具/主机/脚本/路径四维白名单照常透传约束子 agent。
 - MCP 板块新增「1Shell AI」设置页：1Shell AI 委托开关（关闭后 MCP 客户端看不到 ask_1shell_ai / get_1shell_ai_run，直接调用也会被拒）、AI 审批开关（自设置页安全 tab 迁入）与模型选择（列出 Skills 槽位已配置的 Provider 与模型，切换即生效——委托任务与 AI 审批共用此引擎模型；每次打开页面自动刷新列表）。AI 审批固定使用小输出上限（400 token）与关闭思考，不做配置；委托任务不做思考参数注入，按 Provider 自身配置运行。
+- 终端界面精修（对标现代桌面终端的视觉质感，布局仍为左右两栏）：顶部标签栏从通栏灰条改为 macOS 式药丸卡片——选中项为纯白微投影卡片，连接状态圆点带发光呼吸效果，IP/本地标注改为浅底微胶囊，标签尾部新增 `+` 按钮（点击展开侧栏主机列表快速连接新主机）；右侧操作按钮全部配齐线性图标（AI 命令为紫色渐变高亮，脚本/重连/清屏/全屏为统一胶囊组，全屏按钮随状态切换图标）。终端画布升级为 16px 大圆角卡片容器 + 柔和外投影，终端内容新增 14×18px 内边距（此前文字紧贴边缘是廉价感主因，尺寸计算已同步扣除内边距保证行列精确）；浅色主题底色统一为纯白、深色主题为更深的 `#0b101c`，配色与光标色随之校准。左侧文件浏览同步微调：主机切换改药丸 chip、路径栏加底色、文件夹图标换暖琥珀色。全局滚动条从 4px 灰条改为 5px 圆角带悬停态。
 - 修复：1Shell AI 内部 agent 在"默认输出 thinking 块"的推理模型（如 DeepSeek v4）上多轮工具循环必然失败——SSE 解析器不累积 thinking_delta/signature_delta，历史里的 thinking 块残缺（无内容无签名还挂内部字段），第二轮请求被上游判非法返回空响应，重试后报 "empty assistant responses repeatedly"。现在正确累积 thinking 块，并在模型 API 投影层剥离历史 thinking 块（1Shell 的 agent 请求不开 thinking 参数，Anthropic 协议不允许历史携带）。真 Claude 不触发此问题（默认请求不产生 thinking 块）。
+- 修复长会话服务器内存无限积压（4H4G 服务器用一下午卡死的根因，共四处）：① AgentRun 执行状态只增不减——每条 1Shell AI 消息产生一个 run state（含最多 200 条观察记录与全部事件）永久滞留内存 store，现在结束/取消后保留 15 分钟（供 UI 回看）即删除，且存量上限 200 个、超出驱逐最旧已结束 run；② 1Shell AI 会话无空闲回收——完整消息历史（含附件 base64）常驻内存直到重启，现在空闲 30 分钟即落盘并移出内存（记录保留，下条消息自动从库里恢复；运行中/待审批会话不回收），与协议 agent 既有机制对齐；③ 回溯快照无预算——每次文件写入/删除前的整文件 base64 快照（单条最大 ~8MB）无限累积，现在总会话预算 32MB、超出把最老快照降级为"无法自动恢复"占位（回溯点列表不受影响）；④ 单条工具输出不设上限（read_remote_file 最少 2MB、命令输出最大 8MB）全量入库并随每条消息的全量重写放大，现在单条截断到 256K 字符（配置/脚本/常规日志原样保留，超大输出截断并提示模型用 head/tail/sed 分页补读）。
 - 修复：AI 审批在默认输出 thinking 块的推理模型（如 DeepSeek v4）上不可用——400 输出 token 上限会被 thinking 块耗尽导致正文为空（fail-closed 拒绝）。现审批调用显式关闭思考（thinking disabled），400 上限稳定可用。
 - 修复：MCP 板块 1Shell AI 设置的思考预算输入框保存崩溃——input[type=number] 的 v-model 自动转 number，`.trim()` 抛 TypeError。
 - 新增 AI 审批（1Shell AI 替我审批，默认关闭）：外部 AI agent 经 MCP 执行"需要人工审批"的高危命令且无人在场时，把命令 + 风险判定交给 1Shell AI（skills 槽位模型）单次评估，由它决定放行或拒绝（类似 Codex 的"替我审批"）。灾难红线、命令黑名单与 critical 级阻断不受它管辖照常硬拦；模型超时/报错/输出不可解析一律拒绝（fail-closed）；仅外部 MCP 入口生效，IDE 人审卡不变；每次决策写入审计（`ai_approval_decision`）。设置 → 安全新增开关。
@@ -20,7 +22,7 @@
 
 ### Verification
 
-- `npm test`（45 个脚本；新增 `test-command-rules`：引擎匹配语义、guard 集成、设置持久化、docker 降级回归）
+- `npm test`（48 个脚本；4.7.7 新增 `test-command-rules`、`test-gateway-readonly-exploration`、`test-ai-approver`、`test-agent-memory-reclaim`）
 - `npm --prefix frontend run build`
 
 ## 4.7.6 - 2026-08-10
