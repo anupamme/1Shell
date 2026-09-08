@@ -28,11 +28,22 @@ const SERVER_INFO = { name: '1shell-bridge', version: '1.0.0' };
  *   - tools/list
  *   - tools/call
  */
+const ONESHELL_AI_MCP_TOOLS = new Set(['ask_1shell_ai', 'get_1shell_ai_run']);
+
 function createMcpService(deps = {}) {
   const coreTools = createOneShellCoreTools(deps);
   const TOOLS = coreTools.getToolSchemas('mcp');
   const remoteMcpService = deps.remoteMcpService || null;
   const auditService = deps.auditService || null;
+  // 1Shell AI MCP 委托（ask_1shell_ai）的服务级开关：关闭后 MCP 客户端
+  // 既看不到这两个工具，直接调用也会被拒（远程 token 的工具白名单另算）。
+  const oneshellAiMcpEnabled = () => {
+    try {
+      return deps.securitySettingsService?.getSettings?.()?.oneshellAiMcp?.enabled !== false;
+    } catch {
+      return true;
+    }
+  };
 
   // Map<sessionId, { res: Response, initialized: boolean, context: object }>
   const sessions = new Map();
@@ -68,6 +79,12 @@ function createMcpService(deps = {}) {
     const toolName = String(name || '').trim();
     const argSummary = summarizeArgs(args);
     log.info('[mcp] tools/call IN', { name: toolName, source: context.source || 'mcp', exposure: context.exposure || 'unknown', args: argSummary });
+
+    if (ONESHELL_AI_MCP_TOOLS.has(toolName) && !oneshellAiMcpEnabled()) {
+      const result = makeToolError('1Shell AI MCP 委托未启用（可在 MCP 板块的 1Shell AI 设置里开启）');
+      auditToolCall(toolName, args, context, startedAt, result);
+      return result;
+    }
 
     if (!coreTools.isToolExposed(toolName, 'mcp')) {
       const result = makeToolError(`MCP 不允许直接调用工具: ${toolName}`);
@@ -215,7 +232,10 @@ function createMcpService(deps = {}) {
   }
 
   function getToolSchemas(context = {}) {
-    return remoteMcpService ? remoteMcpService.filterTools(TOOLS, context) : TOOLS;
+    const filtered = oneshellAiMcpEnabled()
+      ? TOOLS
+      : TOOLS.filter((tool) => !ONESHELL_AI_MCP_TOOLS.has(tool.name));
+    return remoteMcpService ? remoteMcpService.filterTools(filtered, context) : filtered;
   }
 
   function getAllToolSchemas() {

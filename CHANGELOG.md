@@ -1,5 +1,28 @@
 # Changelog
 
+## 未发布（4.7.7 开发中）
+
+外部 Agent 安全护栏升级 + 1Shell AI 子 agent 能力 + 桌面版 PATH 修复。
+
+- **修复（桌面版严重 bug）**：4.7.5 起桌面版后端进程的 PATH 被破坏——spawnServer 给后端前置 runtime/node 目录时写了 `env.PATH`，而 Windows 真实键名是 `Path`，普通对象上新建的 `PATH` 键在子进程里把真 `Path` 整条遮蔽，后端 PATH 只剩 runtime 目录。后果：第三方 agent（Claude Code/Codex/OpenCode）一直误报"未安装"、本机命令执行/文件服务全部 ENOENT（`spawn powershell.exe ENOENT`）。修复为按现有键的大小写拼写追加。诊断过程：本机探针正常（spawn 不传 env 用真实环境块）而 exec 失败（传 `{...process.env}` 用合并后的坏值），两条检测链路（agent-catalog 的 PATH 扫描与 native-cli-config 的 where.exe）全灭，锁定单一根因。
+- **检测兜底（参考 cc-switch 的思路：按固定位置找而不是依赖进程环境）**：新增 `src/agents/binary-locate.js`，PATH 扫描/where.exe 失败时直查 npm 全局目录（Windows `%APPDATA%\npm`，类 Unix `~/.npm-global/bin`、`~/.local/bin`），agent-catalog 与 native-cli-config 两条链路都接入——即使将来再出现 PATH 残缺的场景，已安装的 CLI 也不会误报 missing。
+
+- `ask_1shell_ai`（外部 AI 委托 1Shell AI）的 answer/plan 模式支持只读命令探查：此前 answer 模式连 `docker ps`、`systemctl status` 都不能跑（execute_command 被整体视为变更工具），只剩读文件/看探针。现在 answer/plan 放行只读命令（复用 read_only 能力的白名单判定，含 `git -C <path> log` 这类带全局旗标的写法），写命令与其余写工具照旧拒绝，需要变更仍须 mode=execute。外部 AI 现在可以真正把 1Shell AI 当"只读探查子 agent"用。远程 MCP Token 的工具/主机/脚本/路径四维白名单照常透传约束子 agent。
+- MCP 板块新增「1Shell AI」设置页：1Shell AI 委托开关（关闭后 MCP 客户端看不到 ask_1shell_ai / get_1shell_ai_run，直接调用也会被拒）、AI 审批开关（自设置页安全 tab 迁入）与模型选择（列出 Skills 槽位已配置的 Provider 与模型，切换即生效——委托任务与 AI 审批共用此引擎模型；每次打开页面自动刷新列表）。AI 审批固定使用小输出上限（400 token）与关闭思考，不做配置；委托任务不做思考参数注入，按 Provider 自身配置运行。
+- 修复：1Shell AI 内部 agent 在"默认输出 thinking 块"的推理模型（如 DeepSeek v4）上多轮工具循环必然失败——SSE 解析器不累积 thinking_delta/signature_delta，历史里的 thinking 块残缺（无内容无签名还挂内部字段），第二轮请求被上游判非法返回空响应，重试后报 "empty assistant responses repeatedly"。现在正确累积 thinking 块，并在模型 API 投影层剥离历史 thinking 块（1Shell 的 agent 请求不开 thinking 参数，Anthropic 协议不允许历史携带）。真 Claude 不触发此问题（默认请求不产生 thinking 块）。
+- 修复：AI 审批在默认输出 thinking 块的推理模型（如 DeepSeek v4）上不可用——400 输出 token 上限会被 thinking 块耗尽导致正文为空（fail-closed 拒绝）。现审批调用显式关闭思考（thinking disabled），400 上限稳定可用。
+- 修复：MCP 板块 1Shell AI 设置的思考预算输入框保存崩溃——input[type=number] 的 v-model 自动转 number，`.trim()` 抛 TypeError。
+- 新增 AI 审批（1Shell AI 替我审批，默认关闭）：外部 AI agent 经 MCP 执行"需要人工审批"的高危命令且无人在场时，把命令 + 风险判定交给 1Shell AI（skills 槽位模型）单次评估，由它决定放行或拒绝（类似 Codex 的"替我审批"）。灾难红线、命令黑名单与 critical 级阻断不受它管辖照常硬拦；模型超时/报错/输出不可解析一律拒绝（fail-closed）；仅外部 MCP 入口生效，IDE 人审卡不变；每次决策写入审计（`ai_approval_decision`）。设置 → 安全新增开关。
+- 新增命令白名单/黑名单：设置 → 安全新增规则编辑器，按命令前缀（支持 `docker compose *` 式通配，整词匹配不误伤 `dockerxyz` 这类粘连词）自定义放行/拦截。黑名单无条件拦截整条命令（含 `bash -c "…"`、`$(…)`、绝对路径等包装写法，词边界匹配不误伤 `lsblk` 这类相似命令）；白名单逐语句豁免（语句内每个管道子段都命中才豁免，命令里夹带的其他操作照常分级），但豁免不了灾难红线与 critical 级风险规则。规则全局生效于所有执行入口（1Shell AI、本地/远程 MCP、协议 agent）；`run_script` 渲染出的成品命令同样过黑名单，堵住脚本库绕过通道。保存时校验拒绝灾难级 allow 规则与含 shell 分隔符的 pattern。
+- 新增命令试算：输入一条命令，按当前挡位 + 规则推演会被怎么处理（放行/告警/审批/拦截，命中哪条规则），不会真正执行。
+- 风险规则库分级校准（修"标准挡位下连 docker 都被拦"）：`docker run / start / stop / restart / pull / build`、`docker compose up / down / pull / build` 等日常运维动词从 high 降为 medium——standard 挡位直接放行，外部 agent（无人工审批）不再被审批卡死；strict 挡位仍需审批。`docker rm / rmi / system prune / volume rm`、xargs 批量删除等破坏性动词保持 high。`docker run --rm` 的 `--rm` 参数不再误判为删除。
+- 修复（沿分级调整带出）：风险规则库对 Windows 主机的日常服务操作分级不变，本次仅校准 POSIX docker 规则。
+
+### Verification
+
+- `npm test`（45 个脚本；新增 `test-command-rules`：引擎匹配语义、guard 集成、设置持久化、docker 降级回归）
+- `npm --prefix frontend run build`
+
 ## 4.7.6 - 2026-08-10
 
 脚本库彻底重构：回归"存脚本 + 在终端里用"，并把它接成 1Shell AI 能读能写能跑的东西。

@@ -65,11 +65,27 @@ const cases = [
     rule: 'remote-script-pipe-shell',
   },
   {
-    name: 'docker compose update standard requires approval',
+    name: 'docker compose update standard is routine (medium, warn) since 4.7.7',
     command: 'cd /opt/cliproxyapi-stack && docker compose pull && docker compose up -d --force-recreate',
+    mode: 'standard',
+    level: 'medium',
+    action: 'warn',
+    rule: 'docker-service-mutation',
+  },
+  {
+    name: 'docker destructive prune stays high in standard',
+    command: 'docker system prune -af',
     mode: 'standard',
     level: 'high',
     action: 'approval',
+    rule: 'docker-destructive',
+  },
+  {
+    name: 'docker run --rm flag is routine, not destructive',
+    command: 'docker run --rm alpine echo hi',
+    mode: 'standard',
+    level: 'medium',
+    action: 'warn',
     rule: 'docker-service-mutation',
   },
   {

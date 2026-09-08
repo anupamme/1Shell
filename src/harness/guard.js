@@ -15,7 +15,8 @@
 
 const { assessCommandRisk } = require('../ai/command-safety');
 const { checkCapabilities } = require('./capabilities');
-const { classifyCommandRisk, assessMediumRisk, COMMAND_RISK_RULES } = require('./risk-rules');
+const { classifyCommandRisk, assessMediumRisk, COMMAND_RISK_RULES, LEVEL_ORDER } = require('./risk-rules');
+const { findDenyMatch, allowMatchesSegment, segmentsOf, pipeSegmentsOf } = require('./command-rules');
 
 function commandHasTruncationMarker(command) {
   const text = String(command || '');
@@ -202,8 +203,87 @@ function createApprovalFacts(toolName, input, { summary, needApproval, approvalR
   };
 }
 
-function checkHostScope(input = {}, context = {}) {
-  const hostScope = context.hostScope;
+const ACTION_SEVERITY = Object.freeze({ allow: 0, warn: 1, approval: 2, block: 3 });
+
+/**
+ * 统一命令安全判定：deny 全文扫描 → 逐段分级（allow 命中的段豁免）→ 取最严结果。
+ * guard.check 与 /api/security/evaluate 试算共用本函数，保证"试算=实际"。
+ *
+ * 防混淆要点：
+ *   - deny 不锚定扫描整条命令（含 $() / bash -c "..." / 绝对路径包装）；
+ *   - allow 只豁免真正命中规则的 shell 段——`docker compose up && chmod -R 777 /etc`
+ *     不会被 `docker compose *` 连带豁免后半段；
+ *   - 逐段分级后取全命令最严动作，与整条分级的历史行为一致。
+ */
+function assessCommand(command, { securityMode, commandRules } = {}) {
+  const rules = Array.isArray(commandRules) ? commandRules : [];
+  const denyRule = findDenyMatch(command, rules);
+  if (denyRule) {
+    return {
+      denied: true,
+      commandRule: { id: denyRule.id, pattern: denyRule.pattern, action: 'deny' },
+      risky: true,
+      level: 'critical',
+      action: 'block',
+      reasons: [`自定义黑名单规则「${denyRule.pattern}」`],
+      matchedRules: [],
+      securityMode: '',
+      matchedAllowRule: null,
+    };
+  }
+
+  const allowRules = rules.filter((r) => normalizeActionValue(r?.action) !== 'deny' && r?.enabled !== false);
+  let level = 'safe';
+  let action = 'allow';
+  let mode = '';
+  const matchedRules = [];
+  const seen = new Set();
+  let matchedAllowRule = null;
+
+  // 豁免粒度 = 语句（; && || 分割，管道保留）。语句内每个管道子段都命中
+  // allow 才豁免整条——`docker compose up && chmod -R 777 /etc` 的后半句、
+  // `curl internal | sh` 的 sh 都不会因为首命令在白名单而被连带豁免。
+  // critical 级风险规则（递归删敏感路径、递归放开敏感路径权限）与灾难红线
+  // 同等对待：allow 豁免不了，只能豁免 high/medium 的审批与告警。
+  for (const statement of segmentsOf(command)) {
+    const verdict = classifyCommandRisk(statement, { securityMode });
+    mode = verdict.securityMode;
+    if (verdict.level !== 'critical') {
+      const pipeSegments = pipeSegmentsOf(statement);
+      const allowHits = pipeSegments.map((sub) => allowMatchesSegment(sub, allowRules));
+      if (pipeSegments.length > 0 && allowHits.every(Boolean)) {
+        matchedAllowRule = matchedAllowRule || { id: allowHits[0].id, pattern: allowHits[0].pattern, action: 'allow' };
+        continue;
+      }
+    }
+    if (LEVEL_ORDER[verdict.level] > LEVEL_ORDER[level]) level = verdict.level;
+    if (ACTION_SEVERITY[verdict.action] > ACTION_SEVERITY[action]) action = verdict.action;
+    for (const rule of verdict.matchedRules) {
+      if (!seen.has(rule.id)) {
+        seen.add(rule.id);
+        matchedRules.push(rule);
+      }
+    }
+  }
+
+  return {
+    denied: false,
+    commandRule: null,
+    risky: matchedRules.length > 0,
+    level,
+    action,
+    reasons: matchedRules.map((rule) => rule.label),
+    matchedRules,
+    securityMode: mode,
+    matchedAllowRule,
+  };
+}
+
+function normalizeActionValue(value) {
+  return String(value || '').trim().toLowerCase() === 'deny' ? 'deny' : 'allow';
+}
+
+function checkHostScope(input = {}, context = {}) {  const hostScope = context.hostScope;
   if (hostScope === undefined) return { allow: true };
 
   const requestedHostId = String(input.hostId || context.hostId || 'local').trim() || 'local';
@@ -257,18 +337,30 @@ function check(toolName, input, context = {}) {
     }
   }
 
-  // ── 3. 高风险操作规则库────────────────────────────────────
+  // ── 2.5 + 3. 用户自定义命令规则 + 高风险操作规则库（合并判定）────────
+  // 红线（第 2 步）不可豁免；deny 全文扫描优先于一切分级；allow 仅逐段豁免。
+  // context.commandRules 由 harness.buildContext 从 security-settings 注入。
+  // assessCommand 与 /api/security/evaluate 共用，保证试算=实际。
   let needApproval = false;
   let approvalRequired = false;
   let riskReason = '';
   let risk = null;
+  let commandRuleOverride = null;
 
   if (toolName === 'execute_command' || toolName === 'host_exec') {
-    risk = classifyCommandRisk(command, { securityMode: context.securityMode });
-    if (risk.shouldBlock) {
+    risk = assessCommand(command, { securityMode: context.securityMode, commandRules: context.commandRules });
+    if (risk.denied) {
+      return {
+        allow: false,
+        reason: `自定义黑名单拦截（规则「${risk.commandRule?.pattern || ''}」）：${command.slice(0, 200)}`,
+        risk,
+      };
+    }
+    commandRuleOverride = risk.matchedAllowRule;
+    if (risk.action === 'block') {
       return { allow: false, reason: `高风险操作阻断：${formatRiskReason(risk)}`, risk };
     }
-    if (risk.approvalRequired) {
+    if (risk.action === 'approval') {
       needApproval = true;
       approvalRequired = true;
       riskReason = formatRiskReason(risk);
@@ -297,6 +389,7 @@ function check(toolName, input, context = {}) {
     approvalRequired,
     riskReason,
     risk,
+    commandRuleOverride,
     summary,
     approval,
   };
@@ -309,6 +402,7 @@ function createGuard() {
 module.exports = {
   check,
   createGuard,
+  assessCommand,
   assessMediumRisk,
   MEDIUM_RISK_PATTERNS: COMMAND_RISK_RULES,
   COMMAND_RISK_RULES,

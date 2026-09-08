@@ -76,6 +76,33 @@ function shouldRequestAgentApproval(toolName, { readonlyTools, sideEffectTools, 
   return false;
 }
 
+const GATEWAY_WRITE_TOOLS = new Set([
+  'execute_command',
+  'run_script', 'save_script', 'write_remote_file', 'create_directory', 'delete_path', 'rename_path',
+  'upload_file', 'download_file', 'add_mcp_server',
+  'remove_mcp_server', 'deploy_local_mcp', 'ack_probe_alert', 'install_probe_agent',
+  'restart_probe_agent', 'uninstall_probe_agent', 'invoke_claude_code',
+]);
+
+/**
+ * MCP 网关模式（ask_1shell_ai 的 answer/plan/execute）下的写工具门禁。
+ * answer/plan 是"只读探查"档：execute_command 放行只读命令（探查服务器的
+ * 核心手段），其余写工具一刀切拒绝；execute 不设此门禁。
+ */
+function evaluateGatewayWriteToolPolicy(gatewayMode, toolName, command = '') {
+  const mode = String(gatewayMode || '').trim().toLowerCase();
+  if (mode !== 'answer' && mode !== 'plan') return null;
+  if (!GATEWAY_WRITE_TOOLS.has(toolName)) return null;
+  if (toolName !== 'execute_command') {
+    return { allow: false, reason: `mode=${mode} 不允许执行变更型工具: ${toolName}` };
+  }
+  const { isReadonlyCommand } = require('../harness/capabilities');
+  if (!isReadonlyCommand(String(command || ''))) {
+    return { allow: false, reason: `mode=${mode} 只允许只读命令（探查服务器），当前命令包含写/变更动作。需要变更请用 mode=execute` };
+  }
+  return null;
+}
+
 function normalizeIdeGoalStatus(value) {
   const text = String(value || '').trim();
   return ['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'].includes(text)
@@ -136,6 +163,7 @@ module.exports = {
   createIdeAgentPolicy,
   createIdeAgentGoalProfile,
   evaluateIdeAgentProfileToolUse,
+  evaluateGatewayWriteToolPolicy,
   filterToolsForAgent,
   normalizeIdeApprovalMode,
   normalizeIdeAgentToolInput,

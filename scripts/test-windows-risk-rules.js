@@ -104,7 +104,8 @@ for (const cmd of BENIGN) {
 assert.strictEqual(assessCommandRisk('rm -rf /').dangerous, true, 'POSIX 红线回归失败');
 assert.strictEqual(assessCommandRisk('ls -la').dangerous, false, 'POSIX 常规命令回归失败');
 assert.strictEqual(classifyCommandRisk('systemctl stop firewalld', { securityMode: 'standard' }).action, 'approval', 'POSIX 防火墙规则回归失败');
-assert.strictEqual(classifyCommandRisk('docker compose up -d', { securityMode: 'standard' }).level, 'high', 'POSIX docker 规则回归失败');
+assert.strictEqual(classifyCommandRisk('docker compose up -d', { securityMode: 'standard' }).level, 'medium', 'POSIX docker 规则回归失败（4.7.7 起 docker 日常动词为 medium）');
+assert.strictEqual(classifyCommandRisk('docker system prune -af', { securityMode: 'standard' }).level, 'high', 'POSIX docker 破坏性规则回归失败');
 
 // ── 5. 事故复现：截图里那台云电脑当时能跑通的命令，现在必须被挡 ──────────────
 const INCIDENT = 'Remove-Item -Recurse -Force C:\\';

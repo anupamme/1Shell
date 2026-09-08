@@ -85,6 +85,21 @@ function hasDockerMutationIntent(text) {
     || /\bxargs\b[^|;&\n]*\b(?:docker|podman)\b[^|;&\n]*\b(?:rm|rmi|stop|restart)\b/i.test(text);
 }
 
+// docker 的"高破坏性"动词：删镜像/容器/卷、prune、xargs 批量删
+// —— run/up/stop/restart 等日常运维动词不再算 high（见 docker-service-mutation 的 medium 拆分）。
+// 注意动词须处于子命令位（(?:^|\s)），避免把 docker run 的 --rm 参数误判成 rm 子命令。
+function hasDockerDestructiveIntent(text) {
+  return /\b(?:docker|podman)\b[^|;&\n]*\b(?:volume\s+(?:rm|prune)|system\s+prune|container\s+(?:rm|prune)|image\s+(?:rm|prune))\b/i.test(text)
+    || /\b(?:docker|podman)\b[^|;&\n]*\s(?:rmi|rm)\b/i.test(text)
+    || /\bxargs\b[^|;&\n]*\b(?:docker|podman)\b[^|;&\n]*\b(?:rm|rmi|stop|restart)\b/i.test(text);
+}
+
+// docker 的日常变更动词：run/start/stop/restart/pull/build/compose up 等
+function hasDockerRoutineIntent(text) {
+  return /\b(?:docker|podman)\s+compose\b[^|;&\n]*\b(?:up|down|pull|build|restart|stop|start|create)\b/i.test(text)
+    || /\b(?:docker|podman)\b[^|;&\n]*\b(?:run|start|restart|stop|pull|build)\b/i.test(text);
+}
+
 function hasOperationalStateFile(text) {
   return /(?:^|[\/\s])(?:data\.key|usage\.sqlite|[^\/\s]+\.(?:sqlite|sqlite3|db)|config\.ya?ml|docker-compose\.ya?ml|\.env)(?:[\s;&|>]|$)/i.test(text)
     || /(?:secret|credential|api[-_]?key|auth)[^\/\s]*\.(?:txt|json|ya?ml|env|key|sqlite|db)(?:[\s;&|>]|$)/i.test(text);
@@ -214,9 +229,17 @@ const COMMAND_RISK_RULES = Object.freeze([
   },
   {
     id: 'docker-service-mutation',
-    level: 'high',
+    level: 'medium',
     label: 'Docker/Compose service or image mutation',
-    test: hasDockerMutationIntent,
+    // 4.7.7：docker run/up/stop/restart 等日常运维动词从 high 降 medium——
+    // standard 挡直接放行，外部 agent 不再被审批卡死；破坏性动词见 docker-destructive。
+    test: hasDockerRoutineIntent,
+  },
+  {
+    id: 'docker-destructive',
+    level: 'high',
+    label: 'Docker 批量删除/prune/删卷删镜像',
+    test: hasDockerDestructiveIntent,
   },
   {
     id: 'operational-state-file-change',

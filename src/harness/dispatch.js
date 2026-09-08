@@ -113,6 +113,40 @@ function createDispatch({ guard, executors, trace, redact, auditService, logger 
       }
     }
     if (verdict.approvalRequired && !approvalGranted) {
+      // AI 审批（1Shell AI 替我审批）：仅无人在场的入口（外部 MCP）会带
+      // context.requestAiApproval。红线/黑名单/critical 在 guard 阶段已被拦死，
+      // AI 只决定"这条需审批的高危命令放不放行"；评估异常即拒绝（fail-closed）。
+      if (typeof context.requestAiApproval === 'function') {
+        let aiVerdict;
+        try {
+          aiVerdict = await context.requestAiApproval(toolName, input, verdict, context);
+        } catch (err) {
+          aiVerdict = { handled: true, allow: false, reason: `AI 审批异常: ${err?.message || err}` };
+        }
+        if (!aiVerdict?.handled) {
+          // 审批器未启用/不适用 → 走原有拒绝路径（下方）
+        } else if (aiVerdict.allow === true) {
+          approvalGranted = true;
+          trace.recordEvent?.({
+            stage: 'security',
+            eventType: 'security_check',
+            source: context.source || 'harness',
+            runId: context.runId,
+            sessionId: context.sessionId,
+            hostId: context.hostId || input?.hostId,
+            toolName: 'security_check',
+            summary: `工具=${toolName}；动作=ai_approved；${aiVerdict.reason || ''}`.slice(0, 400),
+            decision: 'ai_approved',
+            capabilities: context.capabilities,
+          });
+        } else {
+          const reason = aiVerdict.reason || 'AI 审批拒绝';
+          trace.end(traceId, { denied: true, reason: `ai denied: ${reason}`, risk: verdict.risk });
+          return { content: `[harness] AI 审批拒绝，已拦截：${reason}`, is_error: true };
+        }
+      }
+    }
+    if (verdict.approvalRequired && !approvalGranted) {
       const reason = verdict.approval?.reason || verdict.riskReason || '当前操作需要人工审批';
       recordSecurityEvent(trace, toolName, input, context, verdict, 'approval_required');
       trace.end(traceId, { denied: true, reason: `approval required: ${reason}`, risk: verdict.risk });

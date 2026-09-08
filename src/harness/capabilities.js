@@ -73,7 +73,26 @@ function isReadonlyDocker(command) {
 }
 
 function isReadonlyGit(command) {
-  return GIT_READONLY_SUBCOMMANDS.has(secondToken(command));
+  return GIT_READONLY_SUBCOMMANDS.has(gitSubcommand(command));
+}
+
+// git 全局旗标（-C <path>、-c <k=v>、--git-dir=…）后才是子命令；
+// 直接取第二个 token 会把 "-C" 当成子命令导致 `git -C /app log` 误判为写操作。
+function gitSubcommand(command) {
+  const tokens = String(command || '').trim().split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < tokens.length && (tokens[i] === 'sudo' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))) i += 1;
+  if (tokens[i] !== 'git') return '';
+  i += 1;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (token === '-C' || token === '--git-dir' || token === '--work-tree' || token === '--namespace') { i += 2; continue; }
+    if (token === '-c') { i += 2; continue; }
+    if (token.startsWith('--git-dir=') || token.startsWith('--work-tree=') || token.startsWith('--namespace=') || token.startsWith('-c')) { i += 1; continue; }
+    if (token.startsWith('-')) { i += 1; continue; }
+    return token.toLowerCase();
+  }
+  return '';
 }
 
 function splitShellSegments(command) {

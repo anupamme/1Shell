@@ -1351,6 +1351,13 @@ function resolveBinaryCandidates(candidate, isWindows) {
       .filter(Boolean)
       .map((line) => ({ installed: true, path: line, source: 'path' }));
   } catch { /* not found */ }
+  // where.exe/which 失败兜底：npm 全局目录直查。桌面自启动等场景后端
+  // PATH 可能残缺，where.exe 本身 ENOENT，不兜底会把已安装的 CLI 误报 missing。
+  const { findBinaryInNpmGlobal } = require('./binary-locate');
+  const fallbackPath = findBinaryInNpmGlobal(clean);
+  if (fallbackPath) {
+    return [{ installed: true, path: fallbackPath, source: 'npm-global' }];
+  }
   return [];
 }
 

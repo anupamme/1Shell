@@ -163,14 +163,17 @@ probeService.refreshSnapshot().catch((error) => log.warn?.(`[probe] initial refr
 const panelWorkloadsService = createPanelWorkloadsService({ hostService, bridgeService, auditService });
 const securitySettingsService = createSecuritySettingsService({ dataDir, auditService, logger: log });
 // ─── Harness — AI 与外部世界的统一边界层 ────────────────────────────────
-const harness = createHarness({ bridgeService, hostService, auditService, db, logger: log, securitySettingsService });
+// AI 审批（1Shell AI 替我审批）：外部 MCP 的待审批命令交 skills 模型单次评估
+const { createAiApprover } = require('./src/harness/ai-approver');
+const aiApprover = createAiApprover({ aiService, securitySettingsService, auditService, logger: log });
+const harness = createHarness({ bridgeService, hostService, auditService, db, logger: log, securitySettingsService, aiApprover });
 const agentRuntime = createAgentRuntime({ harness, io, logger: log });
 const probeDiagService = createProbeDiagService({ bridgeService, hostService, auditService, logger: log });
 const probeAgentInstallerService = createProbeAgentInstallerService({ rootDir: ROOT_DIR, bridgeService, hostService, probeAgentService, probeRelayService });
 const probeRelayInstallerService = createProbeRelayInstallerService({ rootDir: ROOT_DIR, hostService, bridgeService, probeRelayService });
 const fileService = createFileService({ hostService, probeAgentService });
 const ipFilterService = createIpFilterService({ db });
-const scriptService = createScriptService({ scriptRepository, hostService, bridgeService, auditService });
+const scriptService = createScriptService({ scriptRepository, hostService, bridgeService, auditService, securitySettingsService });
 const libraryService = createLibraryService({ skillRegistry });
 const mcpRegistry = createMcpRegistry({ dataDir });
 const localMcpService = createLocalMcpService({ logger: log });
@@ -275,6 +278,7 @@ const mcpService = createMcpService({
   probeAgentInstallerService,
   panelWorkloadsService,
   remoteMcpService,
+  securitySettingsService,
   ideService,
   harness,
   secretService,

@@ -116,13 +116,13 @@ const TOOL_DEFS = [
   {
     name: 'ask_1shell_ai',
     targets: ['mcp'],
-    description: '把复杂运维、监控、脚本、审计或诊断目标委托给 1Shell AI，由它在内部选择合适工具并返回结果摘要。长任务请传 background=true，然后用 get_1shell_ai_run 查询结果，避免单次 MCP 请求断开导致等待失败。',
+    description: '把复杂运维、监控、脚本、审计或诊断目标委托给 1Shell AI，由它在内部选择合适工具并返回结果摘要。mode=answer（默认）适合只读探查与诊断：它可以运行只读命令（ps/journalctl/docker ps/systemctl status 等）和读取文件，但不能做任何变更；mode=execute 才能执行变更动作。长任务请传 background=true，然后用 get_1shell_ai_run 查询结果，避免单次 MCP 请求断开导致等待失败。',
     schema: {
       type: 'object',
       properties: {
         goal: { type: 'string', description: '要交给 1Shell AI 完成的问题、目标或诊断目标' },
         hostId: { type: 'string', description: '可选的目标主机 ID，用于限定目标范围' },
-        mode: { type: 'string', enum: ['answer', 'plan', 'execute'], description: '执行模式：answer 只回答，plan 只制定计划，execute 可执行必要动作；默认 answer' },
+        mode: { type: 'string', enum: ['answer', 'plan', 'execute'], description: '执行模式：answer 只读探查与回答（可运行只读命令，不做变更），plan 只制定计划，execute 可执行变更动作；默认 answer' },
         requireConfirmation: { type: 'boolean', description: '是否要求 1Shell AI 在变更型动作前走确认；默认 true' },
         timeoutMs: { type: 'number', description: '等待 1Shell AI 完成的超时时间；同步默认 300000 最大 600000，后台默认 3600000 最大 21600000' },
         background: { type: 'boolean', description: 'true 时立即返回 runId，1Shell AI 在后台继续运行' },
@@ -1299,8 +1299,8 @@ function createOneShellCoreTools(deps = {}) {
       'External MCP clients directly see only these tools: list_hosts, host_exec, get_host_exec_run, list_remote_dir, read_remote_file, write_remote_file, create_directory, delete_path, rename_path, upload_file, download_file, start_file_upload, append_file_upload, finish_file_upload, cancel_file_upload, start_file_download, get_file_transfer, resume_file_transfer, cancel_file_transfer, ask_1shell_ai, get_1shell_ai_run.',
       'Scripts, automations, probes, audit, diagnostics, and MCP registry operations are delegated capabilities behind ask_1shell_ai; do not describe them as directly visible external MCP tools.',
       requireConfirmation ? 'mutating actions require confirmation; if confirmation is unavailable, explain what would be done instead of forcing the action.' : 'the caller explicitly allowed execution without interactive confirmation.',
-      mode === 'answer' ? 'Answer the request. Prefer read-only inspection and do not make changes.' : '',
-      mode === 'plan' ? 'Produce a concrete plan. Do not make changes.' : '',
+      mode === 'answer' ? 'Answer the request with read-only inspection: you may run read-only commands (ps/journalctl/docker ps/systemctl status/df and similar) and read files to investigate the server, but do not make any changes.' : '',
+      mode === 'plan' ? 'Produce a concrete plan. You may run read-only commands to verify current state, but do not make changes.' : '',
       mode === 'execute' ? 'Execute only the necessary actions and summarize exactly what changed.' : '',
       '',
       goal,

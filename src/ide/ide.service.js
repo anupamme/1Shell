@@ -26,6 +26,7 @@ const {
   createIdeAgentPolicy,
   createIdeAgentGoalProfile,
   evaluateIdeAgentProfileToolUse,
+  evaluateGatewayWriteToolPolicy,
   filterToolsForAgent,
   normalizeIdeApprovalMode,
   normalizeIdeAgentToolInput,
@@ -131,6 +132,12 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
             }
             return { type: 'tool_use', id: blk.id, name: blk.name, input: input || {} };
           }
+          if (blk.type === 'thinking') {
+            // 完整 thinking 块（内容+signature）——DeepSeek 等推理模型默认输出
+            // thinking；历史里回传残缺块会被上游当非法请求（Anthropic 协议在
+            // 请求未开 thinking 时不接受历史 thinking 块，DeepSeek 表现为空响应）
+            return { type: 'thinking', thinking: blk.thinking || '', signature: blk.signature || '' };
+          }
           return blk;
         }),
         stop_reason: stopReason,
@@ -212,6 +219,12 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
               text: assistantTextFromBlocks(blocks),
             });
           }
+        }
+        if (d.type === 'thinking_delta' && d.thinking) {
+          blk.thinking = (blk.thinking || '') + d.thinking;
+        }
+        if (d.type === 'signature_delta' && d.signature) {
+          blk.signature = (blk.signature || '') + d.signature;
         }
         if (d.type === 'input_json_delta') {
           blk._inputJson += d.partial_json || '';
@@ -680,7 +693,14 @@ function projectMessagesForModelApi(messages = []) {
   const projected = (Array.isArray(messages) ? messages : []).map((message) => {
     if (message?.role !== 'assistant' || !Array.isArray(message.content)) return message;
     let changed = false;
-    const content = message.content.map((block) => {
+    let content = message.content.filter((block) => {
+      // 1Shell 的 agent 请求不开 thinking 参数，Anthropic 协议不允许历史里
+      // 出现 thinking 块；DeepSeek 等默认输出 thinking 的模型若不剥掉，
+      // 第二轮起上游会返回空响应（曾经表现为"empty assistant responses repeatedly"）
+      if (block?.type === 'thinking') { changed = true; return false; }
+      return true;
+    });
+    content = content.map((block) => {
       if (block?.type !== 'tool_use') return block;
       const name = String(block.name || '');
       if (!MODEL_API_TOOL_NAME_RE.test(name)) {
@@ -694,7 +714,8 @@ function projectMessagesForModelApi(messages = []) {
       }
       return block;
     });
-    return changed ? { ...message, content } : message;
+    if (!changed && content.length === message.content.length) return message;
+    return { ...message, content };
   });
   return projected.map((message) => {
     if (message?.role !== 'user' || !Array.isArray(message.content)) return message;
@@ -2911,8 +2932,12 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       'remove_mcp_server', 'deploy_local_mcp', 'ack_probe_alert', 'install_probe_agent',
       'restart_probe_agent', 'uninstall_probe_agent', 'invoke_claude_code',
     ]);
-    if ((policy.gatewayMode === 'answer' || policy.gatewayMode === 'plan') && writeTools.has(tc.name)) {
-      return deniedByPolicy(`mode=${policy.gatewayMode} 不允许执行变更型工具: ${tc.name}`);
+    if (writeTools.has(tc.name)) {
+      // answer/plan 是"只读探查"档（外部 AI 委托探查服务器的主路径）：
+      // execute_command 放行只读命令，其余写工具一刀切拒绝。判定抽在
+      // ide.agent-kernel.evaluateGatewayWriteToolPolicy，纯函数可直接测。
+      const gatewayVerdict = evaluateGatewayWriteToolPolicy(policy.gatewayMode, tc.name, input.command);
+      if (gatewayVerdict) return deniedByPolicy(gatewayVerdict.reason);
     }
     if (tc.name === 'list_hosts' && policy.allowedHosts.length > 0 && !policy.allowedHosts.includes('*')) {
       return filteredHostsForPolicy(policy);

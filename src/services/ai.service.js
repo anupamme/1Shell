@@ -68,7 +68,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
       .trim();
   }
 
-  async function requestAnthropicMessage({ system, messages, maxTokens = 1200, model, temperature = 0.2, tools = [], retryCount = 2, timeoutMs = AI_PROVIDER_TIMEOUT_MS }) {
+  async function requestAnthropicMessage({ system, messages, maxTokens = 1200, model, temperature = 0.2, tools = [], thinking = null, retryCount = 2, timeoutMs = AI_PROVIDER_TIMEOUT_MS }) {
     if (!skillsProxyUrl) return null;
     let lastError = null;
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
@@ -86,6 +86,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
             messages,
             temperature,
             ...(tools.length > 0 ? { tools } : {}),
+            ...(thinking ? { thinking } : {}),
           }),
           signal: ac.signal,
         });
@@ -283,6 +284,43 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
     ]);
   }
 
+  /**
+   * 轻量单次文本调用（skills 槽位模型）：给不需要起完整 agent 的功能用
+   * （AI 审批等）。优先走 skills 代理（Anthropic Messages），否则走
+   * 环境配置的 chat/completions。返回纯文本，失败抛错。
+   */
+  async function requestSkillsText({ system, user, maxTokens = 800, temperature = 0.1, thinking = null, timeoutMs = AI_PROVIDER_TIMEOUT_MS } = {}) {
+    const skillModel = activeSkillsModel() || ENV_MODEL;
+    const messages = [{ role: 'user', content: String(user || '') }];
+    if (skillsProxyUrl) {
+      const data = await requestAnthropicMessage({
+        system: String(system || ''),
+        messages,
+        maxTokens,
+        model: skillModel,
+        temperature,
+        thinking,
+        retryCount: 1,
+        timeoutMs,
+      });
+      const text = extractTextContent(data?.content);
+      if (!text) throw new Error('AI 未返回有效内容');
+      return text;
+    }
+    const { base, key, model } = resolveConfig();
+    const text = await requestChatCompletionText({
+      base,
+      key,
+      model: skillModel || model,
+      messages: system ? [{ role: 'system', content: String(system) }, ...messages] : messages,
+      maxTokens,
+      temperature,
+      retryCount: 1,
+    });
+    if (!text) throw new Error('AI 未返回有效内容');
+    return text;
+  }
+
   async function requestSkillAdaptation(body = {}) {
     const source = String(body.source || '').trim();
     if (!source) throw new Error('source 不能为空');
@@ -324,6 +362,7 @@ function createAIService({ fetchImpl = fetch, skillsProxyUrl = '', proxyConfigSt
 
   return {
     requestSkillAdaptation,
+    requestSkillsText,
     requestCompletion,
     analyzeSelection,
   };

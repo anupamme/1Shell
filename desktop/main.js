@@ -392,7 +392,13 @@ function spawnServer() {
   delete env.ELECTRON_RUN_AS_NODE;
 
   if (isAbsoluteCommand(nodeExecutable)) {
-    env.PATH = `${path.dirname(nodeExecutable)}${path.delimiter}${env.PATH || ''}`;
+    // Windows 上真实键名通常是 'Path'（大小写不定）。{...process.env} 展开成
+    // 普通对象后大小写敏感：若直接写 env.PATH 会新建一个 'PATH' 键（值为空），
+    // 子进程里后写的 'PATH' 把真 'Path' 整条遮蔽 —— 后端从此 PATH 只剩 runtime
+    // 目录，where.exe/powershell/claude.cmd 全部找不到（4.7.5 引入的桌面版 bug）。
+    // 必须找到现有键并沿用其拼写追加。
+    const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH';
+    env[pathKey] = `${path.dirname(nodeExecutable)}${path.delimiter}${env[pathKey] || ''}`;
   }
 
   serverExitReason = '';

@@ -4,12 +4,21 @@ const fs = require('fs');
 const path = require('path');
 const { ONESHELL_SECURITY_MODE } = require('../config/env');
 const { normalizeSecurityMode } = require('../harness/risk-rules');
+const { normalizeRules, validatePattern, normalizePattern, normalizeAction } = require('../harness/command-rules');
 
 const DEFAULT_STATE = Object.freeze({
   securityMode: normalizeSecurityMode(ONESHELL_SECURITY_MODE),
   agentPrivilegeIsolation: false,
   agentUser: 'oneshell-agent',
+  commandRules: [],
+  oneshellAiMcp: { enabled: true },
+  aiApprover: { enabled: false },
 });
+
+function normalizeOneshellAiMcp(value) {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return { enabled: raw.enabled !== false };
+}
 
 function createSecuritySettingsService({ dataDir, auditService, logger } = {}) {
   const filePath = path.join(dataDir, 'security-settings.json');
@@ -21,10 +30,16 @@ function createSecuritySettingsService({ dataDir, auditService, logger } = {}) {
   }
 
   function normalizeState(value = {}) {
+    const aiApprover = value.aiApprover && typeof value.aiApprover === 'object' && !Array.isArray(value.aiApprover)
+      ? value.aiApprover
+      : {};
     return {
       securityMode: normalizeSecurityMode(value.securityMode || DEFAULT_STATE.securityMode),
       agentPrivilegeIsolation: value.agentPrivilegeIsolation === true,
       agentUser: cleanUser(value.agentUser) || DEFAULT_STATE.agentUser,
+      commandRules: normalizeRules(value.commandRules),
+      oneshellAiMcp: normalizeOneshellAiMcp(value.oneshellAiMcp),
+      aiApprover: { enabled: aiApprover.enabled === true },
       updatedAt: value.updatedAt || null,
     };
   }
@@ -62,6 +77,36 @@ function createSecuritySettingsService({ dataDir, auditService, logger } = {}) {
       const user = cleanUser(patch.agentUser);
       if (user) next.agentUser = user;
     }
+    if (patch.commandRules !== undefined) {
+      if (!Array.isArray(patch.commandRules)) {
+        const error = new Error('commandRules 必须是数组');
+        error.status = 400;
+        throw error;
+      }
+      if (patch.commandRules.length > 200) {
+        const error = new Error('commandRules 数量超上限（200）');
+        error.status = 400;
+        throw error;
+      }
+      for (const item of patch.commandRules) {
+        const patternError = validatePattern(normalizePattern(item?.pattern), normalizeAction(item?.action));
+        if (patternError) {
+          const error = new Error(`规则「${normalizePattern(item?.pattern) || '(空)'}」校验失败：${patternError}`);
+          error.status = 400;
+          throw error;
+        }
+      }
+      next.commandRules = normalizeRules(patch.commandRules);
+    }
+    if (patch.oneshellAiMcp !== undefined) {
+      next.oneshellAiMcp = normalizeOneshellAiMcp(patch.oneshellAiMcp);
+    }
+    if (patch.aiApprover !== undefined) {
+      const aiApprover = patch.aiApprover && typeof patch.aiApprover === 'object' && !Array.isArray(patch.aiApprover)
+        ? patch.aiApprover
+        : {};
+      next.aiApprover = { enabled: aiApprover.enabled === true };
+    }
     next.updatedAt = new Date().toISOString();
     writeState(next);
 
@@ -83,6 +128,9 @@ function createSecuritySettingsService({ dataDir, auditService, logger } = {}) {
       securityMode: normalized.securityMode,
       agentPrivilegeIsolation: normalized.agentPrivilegeIsolation,
       agentUser: normalized.agentUser,
+      commandRules: normalized.commandRules,
+      oneshellAiMcp: normalized.oneshellAiMcp,
+      aiApprover: normalized.aiApprover,
       updatedAt: normalized.updatedAt,
     };
   }

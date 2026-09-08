@@ -10,7 +10,19 @@ import type { DiagnosticsResponse, EndpointsResponse } from '@/utils/cliSetup';
 const { requestJson } = useApiClient();
 const notify = useNotifyStore();
 
-type McpHubTab = 'server' | 'remote' | 'api' | 'logs';
+type McpHubTab = 'server' | 'remote' | 'ai' | 'api' | 'logs';
+
+interface AiMcpSettings {
+  oneshellAiMcp: { enabled: boolean };
+  aiApprover: { enabled: boolean };
+}
+
+interface SkillsProviderOption {
+  id: string;
+  name: string;
+  models: Array<{ id?: string; model?: string }>;
+  model?: string;
+}
 
 interface RemoteMcpConfig {
   enabled: boolean;
@@ -67,7 +79,7 @@ const MCP_HUB_CACHE_TTL_MS = 45_000;
 
 const savedTab = readStorageState<string>(MCP_HUB_PREFS_KEY, 'server');
 const currentTab = ref<McpHubTab>(
-  savedTab === 'remote' || savedTab === 'api' || savedTab === 'logs' ? savedTab : 'server'
+  savedTab === 'remote' || savedTab === 'ai' || savedTab === 'api' || savedTab === 'logs' ? savedTab : 'server'
 );
 const endpoints = ref<EndpointsResponse | null>(null);
 const diagnostics = ref<DiagnosticsResponse['checks']>([]);
@@ -532,14 +544,104 @@ async function loadLogs(): Promise<void> {
 
 watch([logScope, logResult], () => { void loadLogs(); });
 
+// ── 1Shell AI MCP 板块（子 agent 委托 + AI 审批 + 模型选择） ──
+const aiMcpLoading = ref(false);
+const aiMcpSaving = ref(false);
+const aiMcpError = ref<string | null>(null);
+const aiMcpLoaded = ref(false);
+const aiMcpDelegationOn = ref(true);
+const aiApproverOn = ref(false);
+const skillsProviders = ref<SkillsProviderOption[]>([]);
+const activeModelKey = ref('');
+const modelSwitching = ref(false);
+
+function providerModelOptions(provider: SkillsProviderOption): Array<{ key: string; label: string }> {
+  if (Array.isArray(provider.models) && provider.models.length > 0) {
+    return provider.models.map((m) => ({
+      key: `${provider.id}:${m.id || m.model || ''}`,
+      // 单模型档案（models=[{id:'default'}]）不带模型名，回退到 provider 的活跃模型投影
+      label: m.model || provider.model || m.id || '(未命名模型)',
+    }));
+  }
+  const single = provider.model || '';
+  return single ? [{ key: `${provider.id}:${single}`, label: single }] : [];
+}
+
+async function loadAiMcpSettings(): Promise<void> {
+  if (aiMcpLoading.value) return;
+  aiMcpError.value = null;
+  aiMcpLoading.value = true;
+  try {
+    const [secRes, provRes] = await Promise.all([
+      requestJson<{ ok?: boolean; settings?: AiMcpSettings }>('/api/security/settings'),
+      requestJson<{ ok?: boolean; providers?: SkillsProviderOption[]; activeRoute?: { providerId?: string; modelId?: string } | null; activeProviderId?: string | null }>('/api/agent/providers/skills'),
+    ]);
+    if (secRes.settings) {
+      aiMcpDelegationOn.value = secRes.settings.oneshellAiMcp?.enabled !== false;
+      aiApproverOn.value = secRes.settings.aiApprover?.enabled === true;
+    }
+    skillsProviders.value = Array.isArray(provRes.providers) ? provRes.providers : [];
+    const route = provRes.activeRoute;
+    const routePid = route?.providerId || provRes.activeProviderId || '';
+    const routeModel = route?.modelId || '';
+    activeModelKey.value = routePid ? `${routePid}:${routeModel}` : '';
+    aiMcpLoaded.value = true;
+  } catch (err) {
+    aiMcpError.value = err instanceof Error ? err.message : '加载 1Shell AI 设置失败';
+  } finally {
+    aiMcpLoading.value = false;
+  }
+}
+
+async function onActiveModelChange(key: string): Promise<void> {
+  const [providerId, modelId] = key.split(':');
+  if (!providerId) return;
+  modelSwitching.value = true;
+  aiMcpError.value = null;
+  try {
+    await requestJson(`/api/agent/providers/skills/${encodeURIComponent(providerId)}/activate`, {
+      method: 'PUT',
+      body: JSON.stringify({ modelId: modelId || null }),
+    });
+    notify.success('1Shell AI 模型已切换');
+  } catch (err) {
+    aiMcpError.value = err instanceof Error ? err.message : '切换模型失败';
+    await loadAiMcpSettings();
+  } finally {
+    modelSwitching.value = false;
+  }
+}
+
+async function saveAiMcpSettings(): Promise<void> {
+  aiMcpError.value = null;
+  aiMcpSaving.value = true;
+  try {
+    await requestJson('/api/security/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        oneshellAiMcp: { enabled: aiMcpDelegationOn.value },
+        aiApprover: { enabled: aiApproverOn.value },
+      }),
+    });
+    notify.success('1Shell AI 设置已保存');
+  } catch (err) {
+    aiMcpError.value = err instanceof Error ? err.message : '保存失败';
+  } finally {
+    aiMcpSaving.value = false;
+  }
+}
+
 watch(currentTab, (tab) => {
   writeStorageState(MCP_HUB_PREFS_KEY, tab);
   if (tab === 'logs' && logRows.value.length === 0) void loadLogs();
+  // Provider 可能在「接入 → AI 配置」被增删，每次打开都刷新模型列表（两个 GET 很轻）
+  if (tab === 'ai') void loadAiMcpSettings();
 });
 
 onMounted(() => {
   const restored = restoreCache();
   if (!restored || !isPageStateFresh(MCP_HUB_CACHE_KEY, MCP_HUB_CACHE_TTL_MS)) void reloadAll();
+  if (currentTab.value === 'ai') void loadAiMcpSettings();
 });
 </script>
 
@@ -583,6 +685,10 @@ onMounted(() => {
         <AppIcon name="cloud" :size="14" />
         远程开放
         <span v-if="remoteOn" class="ml-1 w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+      </button>
+      <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'ai' }" @click="currentTab = 'ai'">
+        <AppIcon name="zap" :size="14" />
+        1Shell AI
       </button>
       <button class="tab-btn inline-flex items-center gap-1.5" :class="{ active: currentTab === 'api' }" @click="currentTab = 'api'">
         <AppIcon name="lock" :size="14" />
@@ -791,6 +897,61 @@ onMounted(() => {
       </div>
 
       <!-- ─────────── Tab 3：API Key（创建 + 列表 + 详情） ─────────── -->
+      <!-- 1Shell AI 板块：子 agent 委托 + AI 审批 + 思考配置 -->
+      <div v-show="currentTab === 'ai'" class="flex flex-col gap-5 max-w-[880px]">
+        <div class="rounded-2xl bg-shell-panel border border-slate-200 dark:border-[#1e293b] dark:bg-[#0f172a] p-5 flex flex-col gap-4">
+          <div>
+            <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">1Shell AI MCP</div>
+            <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">把 1Shell AI 作为能力开放给外部 AI agent：探查委托与命令审批共用 skills 槽位模型（在「接入 → AI 配置」维护密钥与模型）。</div>
+          </div>
+
+          <div v-if="aiMcpLoading" class="text-xs text-slate-400">正在加载设置…</div>
+          <template v-else>
+            <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324] cursor-pointer">
+              <input v-model="aiMcpDelegationOn" type="checkbox" class="mt-1" />
+              <span>
+                <span class="block text-sm font-semibold text-slate-700 dark:text-slate-200">对外提供 1Shell AI 委托（ask_1shell_ai）</span>
+                <span class="mt-1 block text-xs text-slate-500 dark:text-slate-400">外部 agent 可把运维/探查/诊断目标委托给 1Shell AI（mode=answer 只读探查，mode=execute 需其自行确认策略）。关闭后 MCP 客户端将看不到 ask_1shell_ai / get_1shell_ai_run 工具。</span>
+              </span>
+            </label>
+
+            <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324] cursor-pointer">
+              <input v-model="aiApproverOn" type="checkbox" class="mt-1" />
+              <span>
+                <span class="block text-sm font-semibold text-slate-700 dark:text-slate-200">AI 审批（1Shell AI 替我审批）</span>
+                <span class="mt-1 block text-xs text-slate-500 dark:text-slate-400">外部 AI agent 经 MCP 执行"需要人工审批"的高危命令且无人在场时，交给 1Shell AI 评估放行或拒绝。灾难红线、命令黑名单与最高危阻断照常硬拦；AI 评估失败一律拒绝；每次决策写入审计。</span>
+              </span>
+            </label>
+
+            <div class="flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324]">
+              <div class="text-xs font-semibold text-slate-500 dark:text-slate-400">模型选择（1Shell AI 引擎）</div>
+              <div class="text-xs text-slate-500 dark:text-slate-400">委托任务与 AI 审批共用此模型。Provider 与密钥在「接入 → AI 配置」的 Skills 槽位维护。</div>
+              <select
+                v-model="activeModelKey"
+                class="h-9 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-700 outline-none dark:border-[#1e293b] dark:bg-[#0f1a30] dark:text-slate-200 disabled:opacity-50"
+                :disabled="modelSwitching || skillsProviders.length === 0"
+                @change="onActiveModelChange(($event.target as HTMLSelectElement).value)"
+              >
+                <option v-if="skillsProviders.length === 0" value="">（未配置 Provider）</option>
+                <optgroup v-for="provider in skillsProviders" :key="provider.id" :label="provider.name || provider.id">
+                  <option v-for="opt in providerModelOptions(provider)" :key="opt.key" :value="opt.key">{{ opt.label }}</option>
+                </optgroup>
+              </select>
+              <div class="text-[11px] text-slate-400">AI 审批使用固定的小输出上限（400 token），不随思考配置变化。</div>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <div class="text-xs text-red-500">{{ aiMcpError }}</div>
+              <button
+                class="h-9 px-5 rounded-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-semibold shadow-md hover:shadow-lg transition-all disabled:opacity-50 cursor-pointer"
+                :disabled="aiMcpSaving"
+                @click="saveAiMcpSettings"
+              >{{ aiMcpSaving ? '保存中…' : '保存' }}</button>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <div v-show="currentTab === 'api'" class="flex flex-col gap-4">
         <div class="flex items-baseline justify-between">
           <div>

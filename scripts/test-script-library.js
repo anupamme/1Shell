@@ -28,7 +28,7 @@ assert.deepStrictEqual(extractPlaceholders('{{x}}'), ['x']);
 assert.deepStrictEqual(extractPlaceholders('{{x}}'), ['x'], 'lastIndex 必须每次重置');
 
 // ─── 测试替身 ───────────────────────────────────────────────────────────
-function makeService(script, { execResult, onExec } = {}) {
+function makeService(script, { execResult, onExec, commandRules } = {}) {
   const calls = [];
   const service = createScriptService({
     scriptRepository: {
@@ -47,6 +47,7 @@ function makeService(script, { execResult, onExec } = {}) {
       },
     },
     auditService: { log: () => {} },
+    securitySettingsService: { getSettings: () => ({ commandRules: commandRules || [] }) },
   });
   return { service, calls };
 }
@@ -105,6 +106,19 @@ const script = { id: 's1', name: 'demo', content: 'echo {{msg}} {{other}}', tags
     (err) => err.status === 400,
   );
   assert.strictEqual(missCalls.length, 0);
+
+  // ─── 5. 自定义命令黑名单同样拦渲染后的成品命令 ─────────────────────────
+  // run_script 不经过 harness guard，黑名单若不在 service 里生效就成了绕过通道
+  const gitPush = { id: 's3', name: 'push', content: 'git push --force {{remote}}', tags: [] };
+  const { service: denyService, calls: denyCalls } = makeService(gitPush, {
+    commandRules: [{ pattern: 'git push --force*', action: 'deny', enabled: true }],
+  });
+  await assert.rejects(
+    () => denyService.runScript('s3', { hostId: 'h1', params: { remote: 'origin' } }, {}),
+    (err) => err.status === 400 && err.message.includes('黑名单'),
+    '黑名单规则必须拦下渲染后的成品命令',
+  );
+  assert.strictEqual(denyCalls.length, 0, '被黑名单拦截的脚本不能发到主机');
 
   console.log('script library ok');
 })().catch((err) => {

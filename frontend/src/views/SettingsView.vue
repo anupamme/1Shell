@@ -14,7 +14,16 @@ interface SecuritySettings {
   securityMode: SecurityMode;
   agentPrivilegeIsolation: boolean;
   agentUser: string;
+  commandRules?: CommandRule[];
   updatedAt?: string | null;
+}
+
+interface CommandRule {
+  id: string;
+  pattern: string;
+  action: 'allow' | 'deny';
+  note?: string;
+  enabled: boolean;
 }
 
 interface SecuritySettingsResponse {
@@ -85,6 +94,24 @@ const agentUser = ref('oneshell-agent');
 const initHostId = ref('local');
 const initLoading = ref(false);
 const initResult = ref('');
+
+// ── 命令白/黑名单 ──
+const commandRules = ref<CommandRule[]>([]);
+const newRulePattern = ref('');
+const newRuleAction = ref<'allow' | 'deny'>('allow');
+const newRuleNote = ref('');
+const ruleEvalCommand = ref('');
+const ruleEvalResult = ref<RuleEvalResult | null>(null);
+const ruleEvalBusy = ref(false);
+
+interface RuleEvalResult {
+  verdict: string;
+  level: string;
+  action: string;
+  reasons: string[];
+  catastrophic: boolean;
+  matchedRule: { pattern: string; action: string } | null;
+}
 
 // ── 两步验证（2FA） ──
 interface TwoFaStatus {
@@ -423,6 +450,96 @@ function applySecuritySettings(settings: SecuritySettings): void {
   securityMode.value = isSecurityMode(settings.securityMode) ? settings.securityMode : 'strict';
   agentPrivilegeIsolation.value = settings.agentPrivilegeIsolation === true;
   agentUser.value = settings.agentUser || 'oneshell-agent';
+  commandRules.value = Array.isArray(settings.commandRules)
+    ? settings.commandRules.map((r) => ({
+        id: String(r.id || ''),
+        pattern: String(r.pattern || ''),
+        action: r.action === 'deny' ? 'deny' : 'allow',
+        note: String(r.note || ''),
+        enabled: r.enabled !== false,
+      }))
+    : [];
+}
+
+function addCommandRule(): void {
+  securityError.value = '';
+  const pattern = newRulePattern.value.trim().replace(/\s+/g, ' ');
+  if (!pattern) {
+    securityError.value = '请填写命令规则，如 docker compose *';
+    return;
+  }
+  if (/[;&|]/.test(pattern)) {
+    securityError.value = '规则匹配单条命令段，不能包含 ; & | 分隔符';
+    return;
+  }
+  if (newRuleAction.value === 'allow' && /rm\s+[^|]*-[a-z]*r[a-z]*f|--no-preserve-root|mkfs|\bdd\b[^|]*of=\/dev\//i.test(pattern)) {
+    securityError.value = '灾难级操作不能用 allow 规则放行（红线无法豁免）';
+    return;
+  }
+  commandRules.value.push({
+    id: `crule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    pattern,
+    action: newRuleAction.value,
+    note: newRuleNote.value.trim().slice(0, 200),
+    enabled: true,
+  });
+  newRulePattern.value = '';
+  newRuleNote.value = '';
+}
+
+function removeCommandRule(id: string): void {
+  commandRules.value = commandRules.value.filter((r) => r.id !== id);
+}
+
+async function evaluateRuleCommand(): Promise<void> {
+  const command = ruleEvalCommand.value.trim();
+  if (!command) {
+    ruleEvalResult.value = null;
+    return;
+  }
+  ruleEvalBusy.value = true;
+  try {
+    const res = await requestJson<{ ok?: boolean } & RuleEvalResult>('/api/security/evaluate', {
+      method: 'POST',
+      body: JSON.stringify({ command }),
+    });
+    ruleEvalResult.value = {
+      verdict: res.verdict,
+      level: res.level,
+      action: res.action,
+      reasons: res.reasons || [],
+      catastrophic: res.catastrophic === true,
+      matchedRule: res.matchedRule || null,
+    };
+  } catch (err) {
+    ruleEvalResult.value = {
+      verdict: (err as Error).message || '评估失败',
+      level: '',
+      action: '',
+      reasons: [],
+      catastrophic: false,
+      matchedRule: null,
+    };
+  } finally {
+    ruleEvalBusy.value = false;
+  }
+}
+
+function ruleEvalBadgeClass(action: string): string {
+  if (action === 'block' || action === 'deny') return 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300';
+  if (action === 'approval') return 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300';
+  if (action === 'warn') return 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300';
+  return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300';
+}
+
+function ruleEvalLabel(res: RuleEvalResult): string {
+  if (res.catastrophic) return '灾难红线拦截';
+  if (res.matchedRule?.action === 'deny') return '黑名单拦截';
+  if (res.matchedRule?.action === 'allow') return '白名单放行';
+  if (res.action === 'block') return '风险阻断';
+  if (res.action === 'approval') return '需要审批';
+  if (res.action === 'warn') return '放行并告警';
+  return '放行';
 }
 
 async function onSecuritySubmit(e: Event): Promise<void> {
@@ -440,6 +557,7 @@ async function onSecuritySubmit(e: Event): Promise<void> {
         securityMode: securityMode.value,
         agentPrivilegeIsolation: agentPrivilegeIsolation.value,
         agentUser: agentUser.value.trim() || 'oneshell-agent',
+        commandRules: commandRules.value,
       }),
     });
     if (res.settings) applySecuritySettings(res.settings);
@@ -818,6 +936,98 @@ async function onDesktopToggle(key: DesktopBooleanKey, event: Event): Promise<vo
                 <option v-for="m in securityModes" :key="m" :value="m">{{ SECURITY_MODE_LABELS[m] }}</option>
               </select>
               <div class="text-[11px] text-slate-400">strict：高危需审批/关键风险阻断；trusted：回到更自由的个人使用体验，但灾难命令仍保留红线。</div>
+            </div>
+
+            <div class="flex flex-col gap-2">
+              <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">命令白名单 / 黑名单</label>
+              <div class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324]">
+                <div class="text-xs text-slate-500 dark:text-slate-400">
+                  按命令前缀匹配（支持 <code class="font-mono">docker compose *</code> 式通配）。黑名单无条件拦截整条命令（含包装写法）；白名单逐条豁免命中部分的审批/告警，但<b>豁免不了灾难红线与最高危规则</b>（rm -rf / 等），且只豁免真正命中的部分——命令里夹带的其他操作照常分级。黑名单优先于白名单。
+                </div>
+
+                <div v-if="commandRules.length === 0" class="mt-2 text-[11px] text-slate-400">
+                  暂无规则。示例：白名单 <code class="font-mono">docker compose *</code> 让外部 agent 在任何挡位下直接执行 compose 常规操作。
+                </div>
+
+                <div v-else class="mt-2 flex flex-col gap-1.5">
+                  <div
+                    v-for="rule in commandRules"
+                    :key="rule.id"
+                    class="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 dark:border-[#1e293b] dark:bg-[#0f1a30]"
+                  >
+                    <span
+                      class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold"
+                      :class="rule.action === 'deny' ? 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'"
+                    >{{ rule.action === 'deny' ? '黑名单' : '白名单' }}</span>
+                    <code class="min-w-0 flex-1 truncate font-mono text-xs text-slate-700 dark:text-slate-200" :title="rule.pattern">{{ rule.pattern }}</code>
+                    <span v-if="rule.note" class="hidden sm:block max-w-40 truncate text-[11px] text-slate-400" :title="rule.note">{{ rule.note }}</span>
+                    <label class="flex shrink-0 cursor-pointer items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      <input v-model="rule.enabled" type="checkbox" />
+                      启用
+                    </label>
+                    <button
+                      type="button"
+                      class="shrink-0 text-xs text-red-500 hover:text-red-600 cursor-pointer"
+                      @click="removeCommandRule(rule.id)"
+                    >删除</button>
+                  </div>
+                </div>
+
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <select
+                    v-model="newRuleAction"
+                    class="h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none dark:border-[#1e293b] dark:bg-[#0f1a30] dark:text-slate-200"
+                  >
+                    <option value="allow">白名单（放行）</option>
+                    <option value="deny">黑名单（拦截）</option>
+                  </select>
+                  <input
+                    v-model="newRulePattern"
+                    type="text"
+                    placeholder="命令前缀，如 docker compose * 或 git push --force"
+                    class="min-w-48 flex-1 h-9 px-3 rounded-lg border border-slate-200 bg-white font-mono text-sm text-slate-700 outline-none focus:border-blue-400 dark:border-[#1e293b] dark:bg-[#0f1a30] dark:text-slate-200"
+                    @keydown.enter.prevent="addCommandRule"
+                  />
+                  <input
+                    v-model="newRuleNote"
+                    type="text"
+                    placeholder="备注（可选）"
+                    class="w-32 h-9 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-700 outline-none focus:border-blue-400 dark:border-[#1e293b] dark:bg-[#0f1a30] dark:text-slate-200"
+                  />
+                  <button
+                    type="button"
+                    class="h-9 px-3 rounded-lg border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-700 hover:bg-blue-100 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-200 cursor-pointer"
+                    @click="addCommandRule"
+                  >添加规则</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex flex-col gap-2">
+              <label class="text-xs font-semibold text-slate-500 dark:text-slate-400">命令试算</label>
+              <div class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324]">
+                <div class="text-xs text-slate-500 dark:text-slate-400">输入一条命令，按当前挡位 + 规则试算它会被怎么处理（不会真正执行）。</div>
+                <div class="mt-2 flex gap-2">
+                  <input
+                    v-model="ruleEvalCommand"
+                    type="text"
+                    placeholder="如 sudo docker compose up -d"
+                    class="flex-1 h-9 px-3 rounded-lg border border-slate-200 bg-white font-mono text-sm text-slate-700 outline-none focus:border-blue-400 dark:border-[#1e293b] dark:bg-[#0f1a30] dark:text-slate-200"
+                    @keydown.enter.prevent="evaluateRuleCommand"
+                  />
+                  <button
+                    type="button"
+                    class="h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:bg-[#0f1a30] dark:text-slate-300 disabled:opacity-50 cursor-pointer"
+                    :disabled="ruleEvalBusy"
+                    @click="evaluateRuleCommand"
+                  >{{ ruleEvalBusy ? '…' : '试算' }}</button>
+                </div>
+                <div v-if="ruleEvalResult" class="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                  <span class="rounded px-2 py-0.5 font-bold" :class="ruleEvalBadgeClass(ruleEvalResult.action)">{{ ruleEvalLabel(ruleEvalResult) }}</span>
+                  <span v-if="ruleEvalResult.level" class="text-slate-500 dark:text-slate-400">风险等级：{{ ruleEvalResult.level }}</span>
+                  <span v-if="ruleEvalResult.reasons.length" class="text-slate-500 dark:text-slate-400">规则：{{ ruleEvalResult.reasons.join('、') }}</span>
+                </div>
+              </div>
             </div>
 
             <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-[#1e293b] dark:bg-[#0b1324] cursor-pointer">

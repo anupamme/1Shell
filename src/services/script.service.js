@@ -21,11 +21,12 @@ const { execLocalScript } = require('../../lib/exec-local');
 const { extractPlaceholders, placeholderPattern } = require('../../lib/script-placeholders');
 const { redactCredentialPatterns } = require('../../lib/secret-redaction');
 const { assessCommandRisk } = require('../ai/command-safety');
+const { evaluateCommandRules } = require('../harness/command-rules');
 
 const LOCAL_HOST_ID = 'local';
 const DEFAULT_TIMEOUT_MS = 120000;
 
-function createScriptService({ scriptRepository, hostService, bridgeService, auditService }) {
+function createScriptService({ scriptRepository, hostService, bridgeService, auditService, securitySettingsService }) {
 
   // 本机 shell 类型：Windows → powershell, 其他 → bash
   // 影响参数的 shellQuote 风格。远程主机一律按 POSIX bash 处理。
@@ -103,10 +104,12 @@ function createScriptService({ scriptRepository, hostService, bridgeService, aud
   /**
    * 在单台主机上执行脚本。仅供 agent 的 run_script 工具调用。
    *
-   * 渲染完成后对成品命令跑一次灾难命令拦截：harness guard 的红线检查只覆盖
-   * execute_command / host_exec（它们的 input 里有 command），run_script 传进
-   * guard 的只有 scriptId，规则库看不到任何正文。不在这里拦，脚本库就成了绕过
-   * 整套命令安全规则的通道。
+   * 渲染完成后对成品命令跑一次灾难命令拦截与用户自定义命令规则：harness
+   * guard 的检查只覆盖 execute_command / host_exec（它们的 input 里有
+   * command），run_script 传进 guard 的只有 scriptId，规则库看不到任何正文。
+   * 不在这里拦，脚本库就成了绕过整套命令安全规则的通道。
+   * （自定义 allow 规则不在此豁免风险——run_script 本就无分级审批路径；
+   * 黑名单 deny 与红线一样无条件拦。）
    */
   async function runScript(id, { hostId, params, timeoutMs, signal }, { clientIp, source } = {}) {
     const script = scriptRepository.findScript(id);
@@ -126,6 +129,11 @@ function createScriptService({ scriptRepository, hostService, bridgeService, aud
     const risk = assessCommandRisk(rendered);
     if (risk.dangerous) {
       throw validationError(`已拦截灾难性命令：${risk.reason}`);
+    }
+    const commandRules = securitySettingsService?.getSettings?.()?.commandRules;
+    const customVerdict = evaluateCommandRules(rendered, commandRules);
+    if (customVerdict.denied) {
+      throw validationError(`自定义黑名单拦截（规则「${customVerdict.matchedRule?.pattern || ''}」）：脚本渲染出的命令命中黑名单`);
     }
 
     const auditSource = source || 'agent';

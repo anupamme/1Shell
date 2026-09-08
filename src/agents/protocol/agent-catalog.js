@@ -5,6 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { findBinaryInNpmGlobal } = require('../binary-locate');
 
 const PROTOCOL_AGENTS = [
   {
@@ -65,6 +66,9 @@ function findBinaryOnPath(binary, excludePath) {
       } catch { /* keep scanning */ }
     }
   }
+  // PATH 扫描失败时兜底：npm 全局目录直查（桌面自启动等场景 PATH 可能残缺）
+  const fallback = findBinaryInNpmGlobal(binary);
+  if (fallback && !(excludePath && excludePath(fallback))) return fallback;
   return null;
 }
 
