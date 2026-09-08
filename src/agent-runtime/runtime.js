@@ -19,13 +19,51 @@ const { normalizeAgentStore } = require('./store');
 const { buildHarnessContext, createToolCallEnvelope, normalizeToolResult } = require('./tools');
 const { redactCredentialPatterns, redactPotentialSecrets } = require('../../lib/secret-redaction');
 
-function createAgentRuntime({ harness, io, logger, store, verifierRegistry = null } = {}) {
+// Run GC：state 只用于执行期与 UI 回看，结束后按保留期删除，防止
+// 内存 store 随消息量无限累积（长会话服务器的实际卡死来源）。
+const RUN_GC_DEFAULT_RETENTION_MS = 15 * 60 * 1000;
+const RUN_GC_DEFAULT_MAX_RUNS = 200;
+
+function createAgentRuntime({ harness, io, logger, store, verifierRegistry = null, runRetentionMs = RUN_GC_DEFAULT_RETENTION_MS, maxRetainedRuns = RUN_GC_DEFAULT_MAX_RUNS } = {}) {
   const agentStore = normalizeAgentStore(store);
   const emitter = new EventEmitter();
   const runtimeVerifierRegistry = normalizeVerifierRegistry(verifierRegistry);
 
   function saveState(state) {
     return agentStore.saveRun(state);
+  }
+
+  const runGcTimers = new Map();
+
+  function cancelRunGc(runId) {
+    const timer = runGcTimers.get(runId);
+    if (!timer) return;
+    clearTimeout(timer);
+    runGcTimers.delete(runId);
+  }
+
+  function scheduleRunGc(runId) {
+    if (!runId) return;
+    cancelRunGc(runId);
+    const timer = setTimeout(() => {
+      runGcTimers.delete(runId);
+      try { agentStore.deleteRun(runId); } catch { /* already removed */ }
+    }, runRetentionMs);
+    timer.unref?.();
+    runGcTimers.set(runId, timer);
+  }
+
+  function evictExcessEndedRuns() {
+    if (!Number.isFinite(maxRetainedRuns) || maxRetainedRuns <= 0) return;
+    let excess = agentStore.listRuns().length - maxRetainedRuns;
+    if (excess <= 0) return;
+    for (const state of agentStore.listRuns()) {
+      if (excess <= 0) break;
+      if (!state || state.runnerStatus === 'running') continue;
+      cancelRunGc(state.runId);
+      try { agentStore.deleteRun(state.runId); } catch { /* ignore */ }
+      excess -= 1;
+    }
   }
 
   function emit(state, type, payload = {}) {
@@ -174,7 +212,9 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
     const state = createInitialAgentState(spec, options);
     applyVerifierPlanToRuntimeState(state);
     setRunnerStatus(state, 'running');
+    cancelRunGc(state.runId);
     saveState(state);
+    evictExcessEndedRuns();
     emit(state, 'agent:run-started', { goal: state.goal, metadata: state.spec.metadata });
     return state;
   }
@@ -216,6 +256,7 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
 
   function resumeRun(runId, { checkpointId = '', interruptId = '', resolution = {}, runnerStatus = 'running', taskStatus = null, data = {} } = {}) {
     const state = requireState(runId);
+    cancelRunGc(runId);
     const checkpoint = findCheckpoint(state, checkpointId);
     if (checkpointId && !checkpoint) throw new Error(`Agent checkpoint not found: ${checkpointId}`);
 
@@ -285,6 +326,7 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
       result: state.result,
       data: normalizeObject(data),
     });
+    scheduleRunGc(runId);
     return state;
   }
 
@@ -313,6 +355,7 @@ function createAgentRuntime({ harness, io, logger, store, verifierRegistry = nul
       replay: state.runtimeState.replay,
       appliedReplay: null,
     });
+    scheduleRunGc(runId);
     return state;
   }
 

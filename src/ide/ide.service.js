@@ -294,6 +294,70 @@ function streamAnthropicSSE(stream, abortController, session, socket, sessionId,
 // 保留最近 KEEP_RECENT 条消息完整，更早的 tool_result 截断到 TRUNCATE_TO 字符
 const KEEP_RECENT = 40;
 const TRUNCATE_TO = 6000;
+
+// 回溯快照是整文件 base64 常驻内存（每条最多 ~8MB），undo 记录数组无上限，
+// agent 反复改文件的会话会线性吃掉服务器内存。总预算超限时把最老的
+// restore_file 原位降级为 unrestorable 占位（长度不变，checkpoint.undoStart 索引不断）。
+const REWIND_SNAPSHOT_BUDGET_BYTES = 32 * 1024 * 1024;
+
+function rewindRecordSnapshotBytes(entry) {
+  const snap = entry?.record?.snapshot?.base64Content;
+  return typeof snap === 'string' ? snap.length : 0;
+}
+
+function applyRewindSnapshotBudget(entries, budgetBytes = REWIND_SNAPSHOT_BUDGET_BYTES) {
+  if (!Array.isArray(entries)) return 0;
+  let total = 0;
+  for (const entry of entries) total += rewindRecordSnapshotBytes(entry);
+  if (total <= budgetBytes) return total;
+  for (const entry of entries) {
+    if (total <= budgetBytes) break;
+    const bytes = rewindRecordSnapshotBytes(entry);
+    if (!bytes) continue;
+    total -= bytes;
+    entry.record = {
+      type: 'unrestorable',
+      hostId: entry.record.hostId || 'local',
+      path: entry.record.path || '',
+      reason: 'snapshot_budget_recycled',
+      note: '较早的回溯快照已因内存预算回收，无法自动恢复',
+    };
+  }
+  return total;
+}
+
+// 1Shell AI 会话 idle 回收：sessions Map 无驱逐时，每个会话的完整消息历史
+// （含附件 base64、回溯快照）常驻内存直到进程重启；协议 agent 侧已有
+// idle 回收（destroySession keepRecord），这里对齐同一模式——空闲超时后
+// 落盘并移出内存，下条消息 getOrCreateSession 会从 repo 恢复。
+const IDE_SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+function createSessionIdleKeeper({ sessions, timeoutMs = IDE_SESSION_IDLE_TIMEOUT_MS, onEvict }) {
+  function clear(session) {
+    if (session?.idleTimer) {
+      clearTimeout(session.idleTimer);
+      session.idleTimer = null;
+    }
+  }
+
+  function touch(session) {
+    if (!session?.sessionId) return;
+    clear(session);
+    session.idleTimer = setTimeout(() => {
+      session.idleTimer = null;
+      if (!sessions.has(session.sessionId)) return;
+      if (session.currentRunId && !session.cancelled) {
+        touch(session); // 回合运行中（含挂起审批卡），续期不回收
+        return;
+      }
+      clear(session);
+      onEvict(session);
+    }, timeoutMs);
+    session.idleTimer.unref?.();
+  }
+
+  return { touch, clear };
+}
 const MAX_PROVIDER_TRANSIENT_RETRIES = 2;
 const EMPTY_MODEL_RESPONSE_RETRY_LIMIT = 2;
 const COMPACT_KEEP_RECENT_MESSAGES = 8;
@@ -386,8 +450,16 @@ function isProviderProtocolError(err) {
   return /No tool call found for function call output|invalid_request_error|Provider (?:返回|杩斿洖) 400|HTTP 400|status 400/i.test(message);
 }
 
+// 单条工具结果的入库/进上下文上限。read_remote_file 一次最少返回 2MB，
+// execute_command maxBuffer 8MB——不设上限时一条结果就常驻内存并随
+// 全量重写放大，长会话服务器（4G 内存）跑一下午就 OOM。取 256K：
+// 常规配置/脚本/日志片段原样保留（text-fidelity 不受影响），超大输出
+// 截断并提示模型用可分页命令补读。
+const TOOL_RESULT_MAX_CHARS = 256 * 1024;
+
 function compactToolResultForModel(_toolName, content) {
-  return content;
+  if (typeof content !== 'string' || content.length <= TOOL_RESULT_MAX_CHARS) return content;
+  return `${content.slice(0, TOOL_RESULT_MAX_CHARS)}\n\n[1Shell] 工具输出超过 ${TOOL_RESULT_MAX_CHARS} 字符，已截断。如需其余内容，请用可分页的命令（head/tail/sed -n 'N,Mp'/grep）读取指定范围。`;
 }
 
 function compactMessages(messages) {
@@ -1019,6 +1091,15 @@ function createIdeService({ ideTools, proxyConfigStore, port, hostService, audit
 
   // sessionId → { messages[], system, hostId, abortController }
   const sessions = new Map();
+  const sessionIdleKeeper = createSessionIdleKeeper({
+    sessions,
+    timeoutMs: IDE_SESSION_IDLE_TIMEOUT_MS,
+    onEvict: (session) => {
+      persistSessionSafe(session.sessionId, session, { modelLabel: '' });
+      sessions.delete(session.sessionId);
+      logger?.info?.(`[ide] 会话 ${session.sessionId} 空闲回收（记录已落盘，可继续对话）`);
+    },
+  });
 
 const READONLY_TOOLS = new Set([
   'list_hosts', 'list_artifacts', 'query_format',
@@ -1467,6 +1548,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       toolUseId: meta.toolUseId || '',
       createdAt: new Date().toISOString(),
     });
+    applyRewindSnapshotBudget(session.rewindUndoRecords);
   }
 
   async function applyRewindUndoRecord(session, undoEntry, runId = '') {
@@ -3940,6 +4022,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       return { ok: false, error: '当前回合仍在运行，请先停止后再切换 agent' };
     }
     persistSessionSafe(sessionId, session, { modelLabel: '' });
+    sessionIdleKeeper.clear(session);
     sessions.delete(sessionId);
     return { ok: true, live: true };
   }
@@ -3954,6 +4037,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     const contextApprovalMode = context && typeof context === 'object' && !Array.isArray(context) ? (context.approvalMode || context.approval_mode) : null;
     const effectiveApprovalMode = normalizeIdeApprovalMode(approvalMode || contextApprovalMode, { entry: effectiveEntry });
     const session = getOrCreateSession(sessionId, context, effectiveEntry, effectiveApprovalMode);
+    sessionIdleKeeper.touch(session);
     ensureSessionCancellation(session);
     if (session.currentRunId && !session.cancelled) {
       cancelSession(sessionId, 'superseded by new user message');
@@ -4155,6 +4239,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
       return;
     } finally {
       persistSessionSafe(sessionId, session, { modelLabel: model });
+      sessionIdleKeeper.touch(session);
     }
 
   }
@@ -4306,6 +4391,8 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
 
   function deleteSession(sessionId) {
     cancelSession(sessionId, 'session deleted');
+    const session = sessions.get(sessionId);
+    if (session) sessionIdleKeeper.clear(session);
     sessions.delete(sessionId);
   }
 
@@ -4366,6 +4453,7 @@ const REWIND_MAX_FILE_BYTES = 6 * 1024 * 1024;
     session.socketId = socket.id;
     session.detachedAt = null;
     session.detachReason = '';
+    sessionIdleKeeper.touch(session);
     recordTraceEvent('runtime', 'session_reattached', {
       source: 'ide',
       runId: session.currentRunId,
@@ -4387,12 +4475,16 @@ module.exports = {
   createIdeService,
   __private: {
     AGENT_ATTACHMENT_MAX_TEXT_BYTES,
+    applyRewindSnapshotBudget,
     assistantTraceSummary,
     buildAgentUserContent,
     compactToolResultForModel,
+    createSessionIdleKeeper,
     expandExactTextReferences,
     normalizeAgentAttachments,
     projectMessagesForModelApi,
+    rewindRecordSnapshotBytes,
     streamAnthropicSSE,
+    TOOL_RESULT_MAX_CHARS,
   },
 };
